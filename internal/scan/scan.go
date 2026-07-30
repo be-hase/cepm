@@ -30,6 +30,7 @@ type RepoConfig struct {
 	Extensions []string `toml:"extensions"`
 	Track      string   `toml:"track"`       // "branch" | "tag"
 	TagPattern string   `toml:"tag_pattern"` // glob, e.g. "v*"
+	Prerelease bool     `toml:"prerelease"`  // follow prerelease versions too
 }
 
 // LoadRepoConfig reads <repoDir>/cepm.toml. It returns (nil, nil) when the

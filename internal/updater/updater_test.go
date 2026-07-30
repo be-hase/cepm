@@ -407,19 +407,105 @@ func TestUpdateTagMode(t *testing.T) {
 	}
 }
 
+// Publishing a GitHub release pushes its tag, so following stable tags is
+// equivalent to following published stable releases — verified here against a
+// real repository.
+func TestUpdateTagModeIgnoresPrereleaseTags(t *testing.T) {
+	author := setupRepo(t, "mytools")
+	tagAt(t, author, "v1.0.0", "2026-01-01T00:00:00")
+	git(t, author, "push", "origin", "v1.0.0")
+
+	dir, _ := RepoDir("mytools")
+	st, _ := state.Load()
+	r := st.Repos["mytools"]
+	r.Track, r.TagPattern, r.Branch = state.TrackTag, "v*", ""
+	git(t, dir, "fetch", "--tags", "origin")
+	git(t, dir, "checkout", "--detach", "v1.0.0")
+	r.Tag, r.Head = "v1.0.0", git(t, dir, "rev-parse", "HEAD")
+	if err := st.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	// A release candidate is published after a stable version.
+	writeFile(t, filepath.Join(author, "ext", "alpha", "stable.js"), "x")
+	git(t, author, "add", "-A")
+	git(t, author, "commit", "-m", "1.1.0")
+	tagAt(t, author, "v1.1.0", "2026-01-02T00:00:00")
+	writeFile(t, filepath.Join(author, "ext", "alpha", "wip.js"), "y")
+	git(t, author, "add", "-A")
+	git(t, author, "commit", "-m", "2.0.0 rc")
+	tagAt(t, author, "v2.0.0-rc1", "2026-01-03T00:00:00")
+	git(t, author, "push", "origin", "main", "--tags")
+
+	results, err := Update(context.Background(), nil, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if results[0].Err != nil {
+		t.Fatal(results[0].Err)
+	}
+	if results[0].NewRef != "v1.1.0" {
+		t.Errorf("prerelease tag must not be followed: got %q, want v1.1.0", results[0].NewRef)
+	}
+
+	// Opting in picks the release candidate up.
+	st2, _ := state.Load()
+	st2.Repos["mytools"].Prerelease = true
+	if err := st2.Save(); err != nil {
+		t.Fatal(err)
+	}
+	results, err = Update(context.Background(), nil, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if results[0].NewRef != "v2.0.0-rc1" {
+		t.Errorf("with --prerelease: got %q, want v2.0.0-rc1", results[0].NewRef)
+	}
+}
+
 func TestLatestTag(t *testing.T) {
 	// Input is creatordate-descending, as produced by gitx.TagsByCreation.
-	if got, warn := LatestTag([]string{"v1.9.0", "v1.10.0", "v1.0.0"}); got != "v1.10.0" || warn != "" {
+	if got, warn := LatestTag([]string{"v1.9.0", "v1.10.0", "v1.0.0"}, false); got != "v1.10.0" || warn != "" {
 		t.Errorf("semver: got (%q, %q)", got, warn)
 	}
-	if got, _ := LatestTag([]string{"2.0.0", "1.9.0"}); got != "2.0.0" {
+	if got, _ := LatestTag([]string{"2.0.0", "1.9.0"}, false); got != "2.0.0" {
 		t.Errorf("semver without v prefix: got %q", got)
 	}
-	if got, warn := LatestTag([]string{"release-b", "v1.0.0"}); got != "release-b" || warn == "" {
-		t.Errorf("mixed tags should fall back to creatordate with warning, got (%q, %q)", got, warn)
+	// Oddly named tags are ignored in favour of real version numbers, so a
+	// stray "nightly" tag can never become the followed release.
+	if got, warn := LatestTag([]string{"release-b", "v1.0.0"}, false); got != "v1.0.0" || warn == "" {
+		t.Errorf("mixed tags should prefer the version number with a warning, got (%q, %q)", got, warn)
 	}
-	if got, _ := LatestTag([]string{"beta", "alpha"}); got != "beta" {
-		t.Errorf("non-semver tags should use creatordate order, got %q", got)
+	// With no version-like tag at all, fall back to creation order.
+	if got, warn := LatestTag([]string{"beta", "alpha"}, false); got != "beta" || warn == "" {
+		t.Errorf("non-semver-only tags should use creatordate order with a warning, got (%q, %q)", got, warn)
+	}
+}
+
+// A published GitHub release always creates its tag, a draft never does, and
+// a prerelease is spelled out by semver — so tag names alone are enough to
+// follow "published stable releases" without calling the API.
+func TestLatestTagPrereleases(t *testing.T) {
+	tags := []string{"v2.0.0-rc2", "v2.0.0-rc1", "v1.10.0", "v1.9.0"}
+
+	if got, warn := LatestTag(tags, false); got != "v1.10.0" || warn != "" {
+		t.Errorf("stable-only: got (%q, %q), want v1.10.0", got, warn)
+	}
+	if got, _ := LatestTag(tags, true); got != "v2.0.0-rc2" {
+		t.Errorf("with prereleases: got %q, want v2.0.0-rc2", got)
+	}
+	// Build metadata is not a prerelease marker.
+	if got, _ := LatestTag([]string{"v1.2.0+build7"}, false); got != "v1.2.0+build7" {
+		t.Errorf("build metadata should not be treated as prerelease, got %q", got)
+	}
+	// Nothing but prereleases: report why rather than silently following one.
+	got, warn := LatestTag([]string{"v2.0.0-rc1"}, false)
+	if got != "" || warn == "" {
+		t.Errorf("prerelease-only: got (%q, %q), want (\"\", explanation)", got, warn)
+	}
+	// Mixed naming must also respect the prerelease filter.
+	if got, _ := LatestTag([]string{"v2.0.0-rc1", "nightly", "v1.0.0"}, false); got != "v1.0.0" {
+		t.Errorf("mixed naming with prereleases: got %q, want v1.0.0", got)
 	}
 }
 

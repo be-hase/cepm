@@ -24,6 +24,7 @@ type installFlags struct {
 	branch     string
 	track      string
 	tagPattern string
+	prerelease bool
 	only       []string
 	all        bool
 }
@@ -43,6 +44,7 @@ func newInstallCmd() *cobra.Command {
 	cmd.Flags().StringVar(&flags.branch, "branch", "", "branch to track (branch mode)")
 	cmd.Flags().StringVar(&flags.track, "track", "", `tracking mode: "branch" or "tag" (default: repo's cepm.toml, then branch)`)
 	cmd.Flags().StringVar(&flags.tagPattern, "tag-pattern", "", `glob for release tags in tag mode (default "v*")`)
+	cmd.Flags().BoolVar(&flags.prerelease, "prerelease", false, "in tag mode, also follow prerelease versions (v2.0.0-rc1)")
 	cmd.Flags().StringSliceVar(&flags.only, "only", nil, "enable only these extension dirs (repo-relative); others stay available")
 	cmd.Flags().BoolVar(&flags.all, "all", false, "enable every detected extension without asking")
 	return cmd
@@ -88,7 +90,7 @@ func runInstall(cmd *cobra.Command, url string, flags installFlags) error {
 	}
 	rollback := func() { _ = os.RemoveAll(dir) }
 
-	repo, err := buildRepo(ctx, url, dir, branch, track, tagPattern)
+	repo, err := buildRepo(ctx, url, dir, branch, track, tagPattern, flags.prerelease)
 	if err != nil {
 		rollback()
 		return err
@@ -203,7 +205,7 @@ func extensionDirs(repo *state.Repo) []string {
 // buildRepo inspects a fresh clone and produces its state entry, resolving the
 // tracking mode (CLI flags > repo cepm.toml > branch) and, in tag mode,
 // checking out the latest matching tag.
-func buildRepo(ctx context.Context, url, dir, branch, track, tagPattern string) (*state.Repo, error) {
+func buildRepo(ctx context.Context, url, dir, branch, track, tagPattern string, prerelease bool) (*state.Repo, error) {
 	repoCfg, err := scan.LoadRepoConfig(dir)
 	if err != nil {
 		return nil, err
@@ -217,9 +219,12 @@ func buildRepo(ctx context.Context, url, dir, branch, track, tagPattern string) 
 	if tagPattern == "" && repoCfg != nil && repoCfg.TagPattern != "" {
 		tagPattern = repoCfg.TagPattern
 	}
+	if !prerelease && repoCfg != nil {
+		prerelease = repoCfg.Prerelease
+	}
 
 	g := gitx.Repo{Dir: dir}
-	r := &state.Repo{URL: url, Track: track}
+	r := &state.Repo{URL: url, Track: track, Prerelease: prerelease}
 
 	switch track {
 	case state.TrackTag:
@@ -233,7 +238,10 @@ func buildRepo(ctx context.Context, url, dir, branch, track, tagPattern string) 
 		if len(tags) == 0 {
 			return nil, fmt.Errorf("no tags match pattern %q (use --track branch to follow a branch instead)", r.TagPattern)
 		}
-		latest, warn := updater.LatestTag(tags)
+		latest, warn := updater.LatestTag(tags, prerelease)
+		if latest == "" {
+			return nil, fmt.Errorf("no release tag to follow: %s", warn)
+		}
 		if warn != "" {
 			fmt.Fprintln(os.Stderr, "Warning:", warn)
 		}

@@ -49,11 +49,14 @@ type StaleExtension struct {
 
 // Repo is a managed repository.
 type Repo struct {
-	URL        string           `json:"url"`
-	Track      string           `json:"track"` // "branch" | "tag"
-	Branch     string           `json:"branch,omitempty"`
-	TagPattern string           `json:"tagPattern,omitempty"`
-	Tag        string           `json:"tag,omitempty"` // currently checked-out tag (tag mode)
+	URL        string `json:"url"`
+	Track      string `json:"track"` // "branch" | "tag"
+	Branch     string `json:"branch,omitempty"`
+	TagPattern string `json:"tagPattern,omitempty"`
+	Tag        string `json:"tag,omitempty"` // currently checked-out tag (tag mode)
+	// Prerelease opts into semver prerelease tags (v2.0.0-rc1); by default
+	// only stable releases are followed.
+	Prerelease bool             `json:"prerelease,omitempty"`
 	Head       string           `json:"head"`
 	LastPull   time.Time        `json:"lastPull"`
 	LastError  string           `json:"lastError,omitempty"`

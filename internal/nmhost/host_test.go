@@ -151,8 +151,10 @@ func TestHostEndToEnd(t *testing.T) {
 }
 
 // After a cepm upgrade the host binary carries newer helper files than the
-// ones loaded in Chrome; on connect it must rewrite ~/.cepm/helper and ask
-// the helper to reload itself — with zero user action.
+// ones loaded in Chrome; on connect it must rewrite ~/.cepm/helper. It must
+// NOT ask the helper to reload itself: chrome.runtime.reload() tears down
+// this port and Chrome does not reliably bring the helper back, which would
+// strand the connection until the next Chrome start.
 func TestHostRefreshesOutdatedHelper(t *testing.T) {
 	dir, err := os.MkdirTemp("/tmp", "cepm-host")
 	if err != nil {
@@ -180,16 +182,34 @@ func TestHostRefreshesOutdatedHelper(t *testing.T) {
 		reloads: make(chan []string, 4)}
 	go helper.run()
 
-	select {
-	case ids := <-helper.reloads:
-		if len(ids) != 1 || ids[0] != helperext.ExtensionID() {
-			t.Errorf("expected self-reload of the helper %s, got %v", helperext.ExtensionID(), ids)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("host never asked the helper to reload itself")
+	waitCtx, waitCancel := context.WithTimeout(ctx, 10*time.Second)
+	defer waitCancel()
+	if _, err := ipc.Ping(waitCtx); err != nil {
+		t.Fatalf("host not reachable: %v", err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for helperext.InstalledVersion(helperDir) != helperext.Version && time.Now().Before(deadline) {
+		time.Sleep(100 * time.Millisecond)
 	}
 	if v := helperext.InstalledVersion(helperDir); v != helperext.Version {
 		t.Errorf("helper files not refreshed: marker=%q, want %q", v, helperext.Version)
+	}
+	select {
+	case ids := <-helper.reloads:
+		for _, id := range ids {
+			if id == helperext.ExtensionID() {
+				t.Error("host must not ask the helper to reload itself (it would drop the port for good)")
+			}
+		}
+	case <-time.After(time.Second):
+		// No reload at all is the expected case here: no extensions are
+		// registered, so the startup catch-up pass has nothing to do.
+	}
+	// The connection must have survived the refresh.
+	pingCtx, pingCancel := context.WithTimeout(ctx, 5*time.Second)
+	defer pingCancel()
+	if _, err := ipc.Ping(pingCtx); err != nil {
+		t.Errorf("host unreachable after the helper refresh: %v", err)
 	}
 
 	helperToHostW.Close()

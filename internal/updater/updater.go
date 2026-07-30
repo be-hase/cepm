@@ -222,7 +222,10 @@ func moveToLatest(ctx context.Context, repo gitx.Repo, r *state.Repo, res *RepoR
 		if len(tags) == 0 {
 			return fmt.Errorf("no tags match pattern %q", pattern)
 		}
-		latest, warn := LatestTag(tags)
+		latest, warn := LatestTag(tags, r.Prerelease)
+		if latest == "" {
+			return fmt.Errorf("no release tag to follow: %s", warn)
+		}
 		if warn != "" {
 			res.Warnings = append(res.Warnings, warn)
 		}
@@ -248,29 +251,43 @@ func moveToLatest(ctx context.Context, repo gitx.Repo, r *state.Repo, res *RepoR
 // LatestTag picks the newest tag from a creatordate-descending list. When all
 // tags parse as semver they are compared as versions; otherwise the most
 // recently created tag wins and a warning explains the fallback.
-func LatestTag(tags []string) (latest string, warning string) {
+//
+// Semver prereleases (v2.0.0-rc1, v1.5.0-beta.2, …) are skipped unless
+// includePrerelease is set. Together with the fact that GitHub only creates a
+// tag once a release is *published* (drafts create none), this gives the same
+// "follow published stable releases" behavior as the Releases API — without
+// every user's machine needing an API token and network access to it.
+func LatestTag(tags []string, includePrerelease bool) (latest string, warning string) {
 	type cand struct{ name, canon string }
-	cands := make([]cand, 0, len(tags))
-	allSemver := true
+	var cands []cand
+	nonSemver, skippedPrerelease := 0, 0
 	for _, t := range tags {
 		v := t
 		if !strings.HasPrefix(v, "v") {
 			v = "v" + v
 		}
-		if semver.IsValid(v) {
+		switch {
+		case !semver.IsValid(v):
+			nonSemver++
+		case semver.Prerelease(v) != "" && !includePrerelease:
+			skippedPrerelease++
+		default:
 			cands = append(cands, cand{t, v})
-		} else {
-			allSemver = false
 		}
 	}
-	if allSemver && len(cands) > 0 {
-		sort.Slice(cands, func(i, j int) bool { return semver.Compare(cands[i].canon, cands[j].canon) > 0 })
-		return cands[0].name, ""
-	}
 	if len(cands) > 0 {
-		return tags[0], fmt.Sprintf("tags mix semver and non-semver names; using most recently created tag %q", tags[0])
+		sort.Slice(cands, func(i, j int) bool { return semver.Compare(cands[i].canon, cands[j].canon) > 0 })
+		if nonSemver > 0 {
+			warning = fmt.Sprintf("ignored %d tag(s) that are not version numbers; following %q", nonSemver, cands[0].name)
+		}
+		return cands[0].name, warning
 	}
-	return tags[0], ""
+	if skippedPrerelease > 0 {
+		return "", fmt.Sprintf("only prerelease tags match (%d); use --prerelease to follow them", skippedPrerelease)
+	}
+	// No version-like tag at all: follow the most recently created one, since
+	// the pattern presumably selects releases in some other naming scheme.
+	return tags[0], fmt.Sprintf("no version-number tags match; following most recently created tag %q", tags[0])
 }
 
 // refreshExtensions re-scans the repo, updates r.Extensions (preserving the

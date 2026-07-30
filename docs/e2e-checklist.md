@@ -84,6 +84,10 @@ Note: `cepm setup` still writes the native messaging manifest to the real
 - [ ] Install a repo with `--track tag`. Push commits to main without a tag:
       `cepm update` stays on the old tag. Push a higher semver tag: update
       checks it out and reloads.
+- [ ] Publish a GitHub *prerelease* (e.g. `v2.0.0-rc1`): `cepm update` stays
+      on the stable version; re-installing with `--prerelease` follows it.
+- [ ] Create a *draft* release: nothing happens (no tag is pushed until it is
+      published), and publishing it makes cepm pick the version up.
 
 ## 8. Upgrade path
 

@@ -83,15 +83,29 @@ an extension directory, cepm reports it, carries your enabled choice over to
 the new path, and `cepm cleanup` clears the now-broken entry from Chrome via
 Chrome's own confirmation dialog.
 
-### Tracking release tags instead of a branch
+### Tracking releases instead of a branch
 
-If a repo's default branch carries unstable work-in-progress, follow release
-tags instead — cepm then only ever checks out the newest matching tag
-(compared as semver):
+If a repo's default branch carries unstable work-in-progress, follow releases
+instead — cepm then only ever checks out the newest released version:
 
 ```console
-$ cepm install <git-url> --track tag --tag-pattern "v*"
+$ cepm install <git-url> --track tag                  # newest stable version
+$ cepm install <git-url> --track tag --prerelease     # ...including v2.0.0-rc1
+$ cepm install <git-url> --track tag --tag-pattern "release-*"
 ```
+
+This works off tags, which is deliberately the same thing as following
+**GitHub Releases**, without every machine needing a GitHub API token:
+
+- publishing a release pushes its tag, so released versions are exactly the
+  tags cepm sees;
+- a *draft* release does not create a tag at all, so drafts are invisible;
+- a *prerelease* is spelled out by semver (`v2.0.0-rc1`), so cepm skips it
+  unless you pass `--prerelease`.
+
+Versions are compared as semver, so `v1.10.0` correctly beats `v1.9.0`, and
+tags that are not version numbers (a stray `nightly`) are ignored rather than
+mistaken for a release.
 
 ### Repository-side configuration (`cepm.toml`, optional)
 
@@ -102,9 +116,10 @@ get the right behavior with a plain `cepm install <url>`:
 # Explicit extension directories (skips auto-detection):
 extensions = ["dist/sidebar", "dist/search"]
 
-# Recommend tag tracking to consumers:
+# Recommend release tracking to consumers:
 track = "tag"
 tag_pattern = "v*"
+# prerelease = true   # opt consumers into release candidates as well
 ```
 
 Note for repo authors: renaming an extension directory is a breaking change
