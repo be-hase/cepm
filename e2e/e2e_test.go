@@ -355,6 +355,11 @@ func chromeArgs(profile string) []string {
 	if os.Getenv("CEPM_E2E_HEADED") == "" {
 		args = append(args, "--headless=new")
 	}
+	if runtime.GOOS == "linux" {
+		// CI containers usually cannot set up Chrome's sandbox, and /dev/shm
+		// is often tiny there. Safe here: the profile is throwaway.
+		args = append(args, "--no-sandbox", "--disable-dev-shm-usage")
+	}
 	return append(args, "about:blank")
 }
 

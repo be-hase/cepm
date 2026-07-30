@@ -115,17 +115,25 @@ func printListJSON(cmd *cobra.Command, st *state.State, chromeStatus map[string]
 		Enabled bool   `json:"enabled"`
 		Status  string `json:"status"`
 	}
+	type staleOut struct {
+		ID     string `json:"id"`
+		Name   string `json:"name"`
+		Reason string `json:"reason"`
+		NewDir string `json:"newDir,omitempty"`
+	}
 	type repoOut struct {
-		Name       string    `json:"name"`
-		URL        string    `json:"url"`
-		Track      string    `json:"track"`
-		Branch     string    `json:"branch,omitempty"`
-		Tag        string    `json:"tag,omitempty"`
-		TagPattern string    `json:"tagPattern,omitempty"`
-		Head       string    `json:"head"`
-		LastPull   time.Time `json:"lastPull"`
-		LastError  string    `json:"lastError,omitempty"`
-		Extensions []extOut  `json:"extensions"`
+		Name       string     `json:"name"`
+		URL        string     `json:"url"`
+		Track      string     `json:"track"`
+		Branch     string     `json:"branch,omitempty"`
+		Tag        string     `json:"tag,omitempty"`
+		TagPattern string     `json:"tagPattern,omitempty"`
+		Prerelease bool       `json:"prerelease,omitempty"`
+		Head       string     `json:"head"`
+		LastPull   time.Time  `json:"lastPull"`
+		LastError  string     `json:"lastError,omitempty"`
+		Extensions []extOut   `json:"extensions"`
+		Stale      []staleOut `json:"stale,omitempty"`
 	}
 	var repos []repoOut
 	for _, name := range st.RepoNames() {
@@ -136,7 +144,7 @@ func printListJSON(cmd *cobra.Command, st *state.State, chromeStatus map[string]
 		}
 		ro := repoOut{
 			Name: name, URL: r.URL, Track: r.Track, Branch: r.Branch,
-			Tag: r.Tag, TagPattern: r.TagPattern, Head: r.Head,
+			Tag: r.Tag, TagPattern: r.TagPattern, Prerelease: r.Prerelease, Head: r.Head,
 			LastPull: r.LastPull, LastError: r.LastError,
 		}
 		for _, e := range r.Extensions {
@@ -144,6 +152,9 @@ func printListJSON(cmd *cobra.Command, st *state.State, chromeStatus map[string]
 				Name: e.Name, Dir: e.Dir, AbsDir: filepath.Join(dir, e.Dir),
 				ID: e.ID, Enabled: e.Enabled(), Status: extStatus(chromeStatus, e),
 			})
+		}
+		for _, s := range r.Stale {
+			ro.Stale = append(ro.Stale, staleOut{ID: s.ID, Name: s.Name, Reason: s.Reason, NewDir: s.NewDir})
 		}
 		repos = append(repos, ro)
 	}

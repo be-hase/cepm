@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"time"
 
@@ -26,8 +27,10 @@ func Call(ctx context.Context, req Request) (*Response, error) {
 	if err != nil {
 		return nil, err
 	}
+	slog.Debug("host request", "cmd", req.Cmd, "ids", len(req.IDs), "socket", sock)
 	conn, err := dialWithRetry(ctx, sock)
 	if err != nil {
+		slog.Debug("host not reachable", "socket", sock, "err", err)
 		return nil, err
 	}
 	defer conn.Close()

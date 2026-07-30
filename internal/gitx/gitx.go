@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"log/slog"
 	"os/exec"
 	"strings"
 )
@@ -21,6 +22,7 @@ func run(ctx context.Context, dir string, args ...string) (string, error) {
 	if dir != "" {
 		cmdArgs = append([]string{"-C", dir}, args...)
 	}
+	slog.Debug("git", "args", strings.Join(args, " "), "dir", dir)
 	cmd := exec.CommandContext(ctx, "git", cmdArgs...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

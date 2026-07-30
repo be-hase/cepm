@@ -47,7 +47,9 @@ func newUninstallCmd() *cobra.Command {
 			}
 			out := cmd.OutOrStdout()
 			fmt.Fprintf(out, "Uninstalled %q (%d extension(s)).\n", name, len(removed.Extensions))
-			fmt.Fprintf(out, "Remove the extension(s) from chrome://extensions manually if they are still loaded.\n")
+			// The files are gone, so any copy still loaded in Chrome is now
+			// broken; offer to remove it the same way "cepm disable" does.
+			offerChromeRemoval(cmd, removed.Extensions)
 			return nil
 		},
 	}

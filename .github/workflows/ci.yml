@@ -27,11 +27,24 @@ jobs:
 
   e2e:
     # Drives a real Chrome (downloaded Chrome for Testing) end to end.
-    runs-on: macos-latest
+    # Linux is covered too: its native messaging paths, launcher and socket
+    # handling are otherwise never exercised.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - name: install Chrome dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 \
+            libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libasound2t64
       - name: e2e
         run: make e2e

@@ -3,12 +3,14 @@ package cli
 
 import (
 	"context"
+	"log/slog"
 	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/be-hase/cepm/internal/launcher"
+	"github.com/be-hase/cepm/internal/logx"
 	"github.com/be-hase/cepm/internal/nmhost"
 )
 
@@ -25,8 +27,14 @@ It clones repositories, tracks branches or release tags, pulls updates
 the affected unpacked extensions in Chrome through a small helper extension.`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
+		PersistentPreRun: func(cmd *cobra.Command, args []string) {
+			// Packages report their steps with slog.Debug; routing them to
+			// stderr at debug level is what --verbose turns on.
+			slog.SetDefault(logx.StderrLogger(verbose))
+		},
 	}
-	root.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "enable verbose logging")
+	root.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false,
+		"log what cepm does (git commands, host communication) to stderr")
 
 	root.AddGroup(
 		&cobra.Group{ID: "setup", Title: "Setup:"},

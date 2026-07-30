@@ -26,11 +26,23 @@ checksum:
 release:
   draft: false
 
-# For internal distribution, point this at your company's tap repository and
-# run goreleaser with a token that can push to it.
+changelog:
+  use: github
+  sort: asc
+  filters:
+    exclude: ["^docs:", "^test:", "^chore:"]
+
+# Homebrew tap for internal distribution. Create the tap repository, add a
+# token that can push to it as the TAP_GITHUB_TOKEN secret (see
+# .github/workflows/release.yml), then uncomment.
 # brews:
 #   - repository:
 #       owner: your-org
 #       name: homebrew-tap
+#       token: "{{ .Env.TAP_GITHUB_TOKEN }}"
 #     homepage: https://github.com/be-hase/cepm
 #     description: Keep git-distributed unpacked Chrome extensions up to date
+#     install: |
+#       bin.install "cepm"
+#     caveats: |
+#       Run "cepm setup" once, then load ~/.cepm/helper in chrome://extensions.

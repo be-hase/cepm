@@ -41,7 +41,6 @@ func SocketPath() (string, error)     { return sub("run", "cepm.sock") }
 func HostLockPath() (string, error)   { return sub("run", "host.lock") }
 func UpdateLockPath() (string, error) { return sub("run", "update.lock") }
 func HostLogFile() (string, error)    { return sub("logs", "host.log") }
-func CLILogFile() (string, error)     { return sub("logs", "cli.log") }
 
 // EnsureLayout creates the ~/.cepm directory tree. run/ is 0700 because the
 // Unix socket lives there and its directory permissions are the access control.

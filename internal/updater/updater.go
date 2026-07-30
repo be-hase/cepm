@@ -7,6 +7,7 @@ package updater
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"path"
 	"path/filepath"
 	"sort"
@@ -191,6 +192,7 @@ func updateRepo(ctx context.Context, name string, r *state.Repo, opts Options) R
 		return res
 	}
 	res.NewRef = displayRef(r, newHead)
+	slog.Debug("repo moved", "repo", name, "from", res.OldRef, "to", res.NewRef, "track", r.Track)
 	if newHead == oldHead || oldHead == "" {
 		r.Head = newHead
 		refreshExtensions(name, r, dir, &res, nil)
