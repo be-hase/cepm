@@ -1,0 +1,35 @@
+version: 2
+
+project_name: cepm
+
+builds:
+  - main: ./cmd/cepm
+    binary: cepm
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+    goarch:
+      - arm64
+      - amd64
+    ldflags:
+      - -s -w -X github.com/be-hase/cepm/internal/cli.Version={{.Version}}
+
+archives:
+  - formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: checksums.txt
+
+release:
+  draft: false
+
+# For internal distribution, point this at your company's tap repository and
+# run goreleaser with a token that can push to it.
+# brews:
+#   - repository:
+#       owner: your-org
+#       name: homebrew-tap
+#     homepage: https://github.com/be-hase/cepm
+#     description: Keep git-distributed unpacked Chrome extensions up to date

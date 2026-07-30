@@ -1,0 +1,207 @@
+package cli
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
+
+	"github.com/spf13/cobra"
+
+	"github.com/be-hase/cepm/internal/extid"
+	"github.com/be-hase/cepm/internal/gitx"
+	"github.com/be-hase/cepm/internal/paths"
+	"github.com/be-hase/cepm/internal/scan"
+	"github.com/be-hase/cepm/internal/state"
+	"github.com/be-hase/cepm/internal/updater"
+)
+
+func newInstallCmd() *cobra.Command {
+	var (
+		name       string
+		branch     string
+		track      string
+		tagPattern string
+	)
+	cmd := &cobra.Command{
+		Use:     "install <git-url>",
+		Short:   "Clone a git repository and register its extensions",
+		GroupID: "ext",
+		Args:    cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runInstall(cmd, args[0], name, branch, track, tagPattern)
+		},
+	}
+	cmd.Flags().StringVar(&name, "name", "", "directory name for the clone (default: derived from the URL)")
+	cmd.Flags().StringVar(&branch, "branch", "", "branch to track (branch mode)")
+	cmd.Flags().StringVar(&track, "track", "", `tracking mode: "branch" or "tag" (default: repo's cepm.toml, then branch)`)
+	cmd.Flags().StringVar(&tagPattern, "tag-pattern", "", `glob for release tags in tag mode (default "v*")`)
+	return cmd
+}
+
+var repoNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+
+func runInstall(cmd *cobra.Command, url, name, branch, track, tagPattern string) error {
+	ctx := cmd.Context()
+	out := cmd.OutOrStdout()
+	if track != "" && track != state.TrackBranch && track != state.TrackTag {
+		return fmt.Errorf(`--track must be "branch" or "tag"`)
+	}
+	if name == "" {
+		name = repoNameFromURL(url)
+	}
+	if !repoNameRe.MatchString(name) || name == "." || name == ".." {
+		return fmt.Errorf("invalid repository name %q (use --name)", name)
+	}
+	if err := paths.EnsureLayout(); err != nil {
+		return err
+	}
+	dir, err := updater.RepoDir(name)
+	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(dir); err == nil {
+		return fmt.Errorf("%s already exists; pick another --name or run: cepm uninstall %s", dir, name)
+	}
+
+	st, err := state.Load()
+	if err != nil {
+		return err
+	}
+	if _, exists := st.Repos[name]; exists {
+		return fmt.Errorf("repository %q is already registered", name)
+	}
+
+	fmt.Fprintf(out, "Cloning %s ...\n", url)
+	if err := gitx.Clone(ctx, url, dir, branch); err != nil {
+		return err
+	}
+	rollback := func() { _ = os.RemoveAll(dir) }
+
+	repo, err := buildRepo(ctx, url, dir, branch, track, tagPattern)
+	if err != nil {
+		rollback()
+		return err
+	}
+	if len(repo.Extensions) == 0 {
+		rollback()
+		return fmt.Errorf("no Chrome extensions found in %s (no manifest.json; repo authors can declare directories in cepm.toml)", url)
+	}
+
+	err = updater.WithLock(ctx, func() error {
+		st, err := state.Load()
+		if err != nil {
+			return err
+		}
+		if _, exists := st.Repos[name]; exists {
+			return fmt.Errorf("repository %q is already registered", name)
+		}
+		st.Repos[name] = repo
+		return st.Save()
+	})
+	if err != nil {
+		rollback()
+		return err
+	}
+
+	fmt.Fprintf(out, "\nInstalled %q", name)
+	if repo.Track == state.TrackTag {
+		fmt.Fprintf(out, " (tracking tags %q, currently %s)", repo.TagPattern, repo.Tag)
+	} else {
+		fmt.Fprintf(out, " (tracking branch %s)", repo.Branch)
+	}
+	fmt.Fprintf(out, " with %d extension(s):\n\n", len(repo.Extensions))
+	for _, e := range repo.Extensions {
+		fmt.Fprintf(out, "  %-24s %s\n", e.Name, filepath.Join(dir, e.Dir))
+	}
+	fmt.Fprintf(out, "\nOne-time step: open chrome://extensions, enable Developer mode,\n")
+	fmt.Fprintf(out, "and use \"Load unpacked\" for each directory above.\n")
+	fmt.Fprintf(out, "After that, updates are applied automatically.\n")
+	return nil
+}
+
+// buildRepo inspects a fresh clone and produces its state entry, resolving the
+// tracking mode (CLI flags > repo cepm.toml > branch) and, in tag mode,
+// checking out the latest matching tag.
+func buildRepo(ctx context.Context, url, dir, branch, track, tagPattern string) (*state.Repo, error) {
+	repoCfg, err := scan.LoadRepoConfig(dir)
+	if err != nil {
+		return nil, err
+	}
+	if track == "" && repoCfg != nil && repoCfg.Track != "" {
+		track = repoCfg.Track
+	}
+	if track == "" {
+		track = state.TrackBranch
+	}
+	if tagPattern == "" && repoCfg != nil && repoCfg.TagPattern != "" {
+		tagPattern = repoCfg.TagPattern
+	}
+
+	g := gitx.Repo{Dir: dir}
+	r := &state.Repo{URL: url, Track: track}
+
+	switch track {
+	case state.TrackTag:
+		if r.TagPattern = tagPattern; r.TagPattern == "" {
+			r.TagPattern = "v*"
+		}
+		tags, err := g.TagsByCreation(ctx, r.TagPattern)
+		if err != nil {
+			return nil, err
+		}
+		if len(tags) == 0 {
+			return nil, fmt.Errorf("no tags match pattern %q (use --track branch to follow a branch instead)", r.TagPattern)
+		}
+		latest, warn := updater.LatestTag(tags)
+		if warn != "" {
+			fmt.Fprintln(os.Stderr, "Warning:", warn)
+		}
+		if err := g.CheckoutDetached(ctx, latest); err != nil {
+			return nil, err
+		}
+		r.Tag = latest
+	default:
+		b := branch
+		if b == "" {
+			if b, err = g.CurrentBranch(ctx); err != nil {
+				return nil, err
+			}
+		}
+		if b == "" {
+			return nil, fmt.Errorf("could not determine the default branch; pass --branch")
+		}
+		r.Branch = b
+	}
+
+	if r.Head, err = g.Head(ctx); err != nil {
+		return nil, err
+	}
+	exts, err := scan.Detect(dir)
+	if err != nil {
+		return nil, err
+	}
+	if len(exts) > scan.MaxAutoDetect {
+		fmt.Fprintf(os.Stderr, "Warning: %d extensions auto-detected; consider declaring them in cepm.toml\n", len(exts))
+	}
+	for _, e := range exts {
+		id, err := extid.FromPath(filepath.Join(dir, e.Dir))
+		if err != nil {
+			return nil, err
+		}
+		r.Extensions = append(r.Extensions, state.Extension{Dir: e.Dir, Name: e.Name, ID: id})
+	}
+	return r, nil
+}
+
+// repoNameFromURL derives a directory name from a git URL:
+// "git@host:team/mytools.git" or "https://host/team/mytools" → "mytools".
+func repoNameFromURL(url string) string {
+	s := strings.TrimSuffix(strings.TrimRight(url, "/"), ".git")
+	if i := strings.LastIndexAny(s, "/:"); i >= 0 {
+		s = s[i+1:]
+	}
+	return s
+}
