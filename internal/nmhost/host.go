@@ -23,6 +23,9 @@ import (
 const (
 	pingInterval   = 25 * time.Second // keeps the helper's service worker alive
 	requestTimeout = 10 * time.Second
+	// uninstallTimeout is long because the helper waits for the user to
+	// answer Chrome's confirmation dialog.
+	uninstallTimeout = 2 * time.Minute
 	// minHelperVersion is the oldest helper this host can talk to; bump it
 	// together with protocol changes.
 	minHelperVersion = "0.1.0"
@@ -164,7 +167,7 @@ func (h *Host) readLoop(ctx context.Context) error {
 			go h.maybeRefreshHelper(ctx)
 		case typePong:
 			h.lastPong.Store(time.Now().UnixNano())
-		case typeReloadResult, typeListResult:
+		case typeReloadResult, typeListResult, typeUninstallResult:
 			h.mu.Lock()
 			ch := h.pending[env.RequestID]
 			delete(h.pending, env.RequestID)
@@ -191,8 +194,9 @@ func (h *Host) send(msg any) {
 	}
 }
 
-// request sends a message carrying requestID and waits for the helper's reply.
-func (h *Host) request(ctx context.Context, requestID string, msg any) (json.RawMessage, error) {
+// requestCtx sends a message carrying requestID and waits for the helper's
+// reply until ctx expires; callers bound the wait with a timeout.
+func (h *Host) requestCtx(ctx context.Context, requestID string, msg any) (json.RawMessage, error) {
 	ch := make(chan json.RawMessage, 1)
 	h.mu.Lock()
 	h.pending[requestID] = ch
@@ -206,11 +210,16 @@ func (h *Host) request(ctx context.Context, requestID string, msg any) (json.Raw
 	select {
 	case raw := <-ch:
 		return raw, nil
-	case <-time.After(requestTimeout):
-		return nil, fmt.Errorf("helper extension did not answer within %s (is it loaded and enabled?)", requestTimeout)
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		return nil, fmt.Errorf("helper extension did not answer (is it loaded and enabled?): %w", ctx.Err())
 	}
+}
+
+// request is requestCtx with the default short timeout.
+func (h *Host) request(ctx context.Context, requestID string, msg any) (json.RawMessage, error) {
+	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
+	defer cancel()
+	return h.requestCtx(ctx, requestID, msg)
 }
 
 func (h *Host) nextRequestID() string {
@@ -243,6 +252,27 @@ func (h *Host) ListChrome(ctx context.Context) ([]ipc.ChromeExt, error) {
 		return nil, err
 	}
 	return msg.Extensions, nil
+}
+
+// Uninstall asks the helper to uninstall an extension; Chrome shows a native
+// confirmation dialog, so this can never remove anything silently. Waiting is
+// bounded by the user's decision, hence the longer timeout.
+func (h *Host) Uninstall(ctx context.Context, extID string) (status string, err error) {
+	id := h.nextRequestID()
+	ctx, cancel := context.WithTimeout(ctx, uninstallTimeout)
+	defer cancel()
+	raw, err := h.requestCtx(ctx, id, uninstallReq{Type: typeUninstall, RequestID: id, ExtensionID: extID})
+	if err != nil {
+		return "", err
+	}
+	var msg uninstallResultMsg
+	if err := json.Unmarshal(raw, &msg); err != nil {
+		return "", err
+	}
+	if msg.Status == "error" {
+		return msg.Status, fmt.Errorf("uninstall failed: %s", msg.Error)
+	}
+	return msg.Status, nil
 }
 
 // maybeRefreshHelper brings ~/.cepm/helper up to date with the helper files
@@ -348,6 +378,12 @@ func (h *Host) handleIPC(ctx context.Context, req ipc.Request) ipc.Response {
 			return ipc.Response{Error: err.Error()}
 		}
 		return ipc.Response{OK: true, Extensions: exts}
+	case ipc.CmdUninstall:
+		status, err := h.Uninstall(ctx, req.ID)
+		if err != nil {
+			return ipc.Response{Error: err.Error()}
+		}
+		return ipc.Response{OK: true, Status: status}
 	default:
 		return ipc.Response{Error: fmt.Sprintf("unknown command %q", req.Cmd)}
 	}

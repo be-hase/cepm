@@ -103,3 +103,14 @@ func ListChrome(ctx context.Context) ([]ChromeExt, error) {
 	}
 	return resp.Extensions, nil
 }
+
+// Uninstall asks Chrome (via the helper) to uninstall an extension. Chrome
+// shows a native confirmation dialog; the returned status reflects the
+// user's choice. Callers should use a generous ctx deadline.
+func Uninstall(ctx context.Context, id string) (string, error) {
+	resp, err := Call(ctx, Request{Cmd: CmdUninstall, ID: id})
+	if err != nil {
+		return "", err
+	}
+	return resp.Status, nil
+}

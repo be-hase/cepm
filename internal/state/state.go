@@ -21,23 +21,78 @@ const (
 )
 
 // Extension is a registered extension inside a repo.
+//
+// The user-intent flag is stored inverted (Disabled) so that the zero value
+// means "enabled": state files written before the field existed, and the
+// common case, both stay implicit.
 type Extension struct {
-	Dir  string `json:"dir"` // repo-relative, "." for repo root
-	Name string `json:"name"`
-	ID   string `json:"id"` // Chrome unpacked-extension ID (derived from abs path)
+	Dir      string `json:"dir"` // repo-relative, "." for repo root
+	Name     string `json:"name"`
+	ID       string `json:"id"` // Chrome unpacked-extension ID (derived from abs path)
+	Disabled bool   `json:"disabled,omitempty"`
+}
+
+// Enabled reports whether the user wants this extension active ("available"
+// extensions are registered but excluded from reloads and diagnostics).
+func (e Extension) Enabled() bool { return !e.Disabled }
+
+// StaleExtension records a Chrome-side entry that no longer corresponds to a
+// registered directory (the dir was renamed or deleted in the repo). Chrome
+// still shows a broken extension for it until the user removes it; "cepm
+// cleanup" automates that and clears the record.
+type StaleExtension struct {
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+	Reason string `json:"reason"`           // "renamed" | "removed"
+	NewDir string `json:"newDir,omitempty"` // for renames: where it moved
 }
 
 // Repo is a managed repository.
 type Repo struct {
-	URL        string      `json:"url"`
-	Track      string      `json:"track"` // "branch" | "tag"
-	Branch     string      `json:"branch,omitempty"`
-	TagPattern string      `json:"tagPattern,omitempty"`
-	Tag        string      `json:"tag,omitempty"` // currently checked-out tag (tag mode)
-	Head       string      `json:"head"`
-	LastPull   time.Time   `json:"lastPull"`
-	LastError  string      `json:"lastError,omitempty"`
-	Extensions []Extension `json:"extensions"`
+	URL        string           `json:"url"`
+	Track      string           `json:"track"` // "branch" | "tag"
+	Branch     string           `json:"branch,omitempty"`
+	TagPattern string           `json:"tagPattern,omitempty"`
+	Tag        string           `json:"tag,omitempty"` // currently checked-out tag (tag mode)
+	Head       string           `json:"head"`
+	LastPull   time.Time        `json:"lastPull"`
+	LastError  string           `json:"lastError,omitempty"`
+	Extensions []Extension      `json:"extensions"`
+	Stale      []StaleExtension `json:"stale,omitempty"`
+}
+
+// FindExtension returns the extension at dir, or nil.
+func (r *Repo) FindExtension(dir string) *Extension {
+	for i := range r.Extensions {
+		if r.Extensions[i].Dir == dir {
+			return &r.Extensions[i]
+		}
+	}
+	return nil
+}
+
+// AddStale records a stale Chrome entry, deduplicating by ID.
+func (r *Repo) AddStale(s StaleExtension) {
+	for _, existing := range r.Stale {
+		if existing.ID == s.ID {
+			return
+		}
+	}
+	r.Stale = append(r.Stale, s)
+}
+
+// RemoveStale drops the stale record with the given ID.
+func (r *Repo) RemoveStale(id string) {
+	out := r.Stale[:0]
+	for _, s := range r.Stale {
+		if s.ID != id {
+			out = append(out, s)
+		}
+	}
+	r.Stale = out
+	if len(r.Stale) == 0 {
+		r.Stale = nil
+	}
 }
 
 // State is the root of state.json.

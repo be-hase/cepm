@@ -26,18 +26,26 @@ reloaded; otherwise pass repository names.`,
 				targets = st.RepoNames()
 			}
 			var ids, names []string
+			skipped := 0
 			for _, name := range targets {
 				r, ok := st.Repos[name]
 				if !ok {
 					return fmt.Errorf("repository %q is not registered (see cepm list)", name)
 				}
 				for _, e := range r.Extensions {
+					if !e.Enabled() {
+						skipped++
+						continue
+					}
 					ids = append(ids, e.ID)
 					names = append(names, e.Name)
 				}
 			}
 			if len(ids) == 0 {
-				return fmt.Errorf("no extensions registered; run cepm install first")
+				return fmt.Errorf("no enabled extensions to reload (see cepm list)")
+			}
+			if skipped > 0 {
+				fmt.Fprintf(cmd.OutOrStdout(), "(%d available extension(s) skipped)\n", skipped)
 			}
 			reloadExtensions(cmd.Context(), cmd.OutOrStdout(), ids, names)
 			return nil

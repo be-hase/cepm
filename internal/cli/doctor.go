@@ -240,14 +240,32 @@ func checkRepos(ctx context.Context, hostReachable bool) []diagnostic {
 			if !hostReachable {
 				continue // cannot tell whether extensions are loaded
 			}
-			if _, loaded := chromeStatus[e.ID]; !loaded {
+			_, loaded := chromeStatus[e.ID]
+			switch {
+			case e.Enabled() && !loaded:
 				diags = append(diags, diagnostic{
 					Name:   "extension " + e.Name,
 					Status: "fail",
-					Detail: "not loaded in Chrome",
-					Hint:   "one-time step: Load unpacked " + filepath.Join(dir, e.Dir),
+					Detail: "enabled but not loaded in Chrome",
+					Hint: fmt.Sprintf("one-time step: Load unpacked %s (or opt out with: cepm disable %s/%s)",
+						filepath.Join(dir, e.Dir), name, e.Dir),
+				})
+			case !e.Enabled() && loaded:
+				diags = append(diags, diagnostic{
+					Name:   "extension " + e.Name,
+					Status: "warn",
+					Detail: "loaded in Chrome but not enabled in cepm — updates will NOT reload it",
+					Hint:   fmt.Sprintf("run: cepm enable %s/%s", name, e.Dir),
 				})
 			}
+		}
+		for _, s := range r.Stale {
+			diags = append(diags, diagnostic{
+				Name:   "stale entry " + s.Name,
+				Status: "warn",
+				Detail: fmt.Sprintf("extension dir was %s in the repo; its Chrome entry is broken", s.Reason),
+				Hint:   "run: cepm cleanup",
+			})
 		}
 	}
 	return diags

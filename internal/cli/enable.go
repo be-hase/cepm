@@ -1,0 +1,135 @@
+package cli
+
+import (
+	"fmt"
+	"path/filepath"
+	"strings"
+
+	"github.com/spf13/cobra"
+
+	"github.com/be-hase/cepm/internal/assist"
+	"github.com/be-hase/cepm/internal/state"
+	"github.com/be-hase/cepm/internal/updater"
+)
+
+// parseExtRef splits "<repo>[/<dir>]" (repo names cannot contain "/").
+func parseExtRef(arg string) (repo, dir string) {
+	parts := strings.SplitN(arg, "/", 2)
+	if len(parts) == 2 {
+		return parts[0], filepath.Clean(parts[1])
+	}
+	return parts[0], ""
+}
+
+func newEnableCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "enable <repo>[/<dir>]",
+		Short: "Enable an extension of a repo (and walk through loading it)",
+		Long: `Enable marks an extension as one you use: it becomes a reload target for
+updates and doctor watches that it is actually loaded in Chrome. Without
+<dir>, cepm picks the extension interactively (or automatically when only
+one candidate exists).`,
+		GroupID: "ext",
+		Args:    cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			repoName, dir := parseExtRef(args[0])
+			var targets []loadTarget
+			err := updater.WithLock(cmd.Context(), func() error {
+				st, err := state.Load()
+				if err != nil {
+					return err
+				}
+				r, ok := st.Repos[repoName]
+				if !ok {
+					return fmt.Errorf("repository %q is not registered (see cepm list)", repoName)
+				}
+				repoDir, err := updater.RepoDir(repoName)
+				if err != nil {
+					return err
+				}
+				picked, err := pickExtensions(cmd, r, dir, false)
+				if err != nil {
+					return err
+				}
+				for _, e := range picked {
+					e.Disabled = false
+					targets = append(targets, loadTarget{
+						Name: e.Name, AbsDir: filepath.Join(repoDir, e.Dir), ID: e.ID,
+					})
+				}
+				return st.Save()
+			})
+			if err != nil {
+				return err
+			}
+			names := make([]string, len(targets))
+			for i, t := range targets {
+				names[i] = t.Name
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "✔ Enabled: %s\n", strings.Join(names, ", "))
+			runLoadCeremony(cmd.Context(), cmd, targets)
+			return nil
+		},
+	}
+}
+
+// pickExtensions resolves which extensions of r the user means. dir may be
+// empty; disabled selects from currently-enabled ones (for cepm disable) or
+// currently-disabled ones (for cepm enable).
+func pickExtensions(cmd *cobra.Command, r *state.Repo, dir string, wantEnabled bool) ([]*state.Extension, error) {
+	if dir != "" {
+		e := r.FindExtension(dir)
+		if e == nil {
+			return nil, fmt.Errorf("no extension at %q (dirs: %s)", dir, strings.Join(repoDirs(r), ", "))
+		}
+		return []*state.Extension{e}, nil
+	}
+	var candidates []*state.Extension
+	for i := range r.Extensions {
+		if r.Extensions[i].Enabled() == wantEnabled {
+			candidates = append(candidates, &r.Extensions[i])
+		}
+	}
+	verb, prompt := "enable", "Enable which?"
+	if wantEnabled {
+		verb, prompt = "disable", "Disable which?"
+	}
+	switch {
+	case len(candidates) == 0:
+		return nil, fmt.Errorf("nothing to %s (see cepm list)", verb)
+	case len(candidates) == 1:
+		return candidates, nil
+	case !assist.IsTTY():
+		return nil, fmt.Errorf("multiple candidates; specify one: %s", strings.Join(candidateRefs(candidates), ", "))
+	default:
+		items := make([]string, len(candidates))
+		for i, e := range candidates {
+			items[i] = fmt.Sprintf("%-24s %s", e.Name, e.Dir)
+		}
+		picked, err := selectByNumbers(cmd, prompt, items)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]*state.Extension, len(picked))
+		for i, idx := range picked {
+			out[i] = candidates[idx]
+		}
+		return out, nil
+	}
+}
+
+func repoDirs(r *state.Repo) []string {
+	dirs := make([]string, len(r.Extensions))
+	for i, e := range r.Extensions {
+		dirs[i] = e.Dir
+	}
+	return dirs
+}
+
+func candidateRefs(exts []*state.Extension) []string {
+	refs := make([]string, len(exts))
+	for i, e := range exts {
+		refs[i] = e.Dir
+	}
+	return refs
+}

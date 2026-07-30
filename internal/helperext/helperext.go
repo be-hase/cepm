@@ -18,8 +18,9 @@ import (
 var assets embed.FS
 
 // Version is the helper extension version. Bump it whenever assets change;
-// "cepm setup" re-installs the helper when it differs from the marker file.
-const Version = "0.1.0"
+// setup and the native host re-install the helper when it differs from the
+// marker file.
+const Version = "0.2.0"
 
 // HostName is the native messaging host name shared by the helper extension,
 // the host manifest, and the native host process.

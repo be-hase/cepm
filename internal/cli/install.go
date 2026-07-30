@@ -10,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/be-hase/cepm/internal/assist"
 	"github.com/be-hase/cepm/internal/extid"
 	"github.com/be-hase/cepm/internal/gitx"
 	"github.com/be-hase/cepm/internal/paths"
@@ -18,34 +19,41 @@ import (
 	"github.com/be-hase/cepm/internal/updater"
 )
 
+type installFlags struct {
+	name       string
+	branch     string
+	track      string
+	tagPattern string
+	only       []string
+	all        bool
+}
+
 func newInstallCmd() *cobra.Command {
-	var (
-		name       string
-		branch     string
-		track      string
-		tagPattern string
-	)
+	var flags installFlags
 	cmd := &cobra.Command{
 		Use:     "install <git-url>",
 		Short:   "Clone a git repository and register its extensions",
 		GroupID: "ext",
 		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runInstall(cmd, args[0], name, branch, track, tagPattern)
+			return runInstall(cmd, args[0], flags)
 		},
 	}
-	cmd.Flags().StringVar(&name, "name", "", "directory name for the clone (default: derived from the URL)")
-	cmd.Flags().StringVar(&branch, "branch", "", "branch to track (branch mode)")
-	cmd.Flags().StringVar(&track, "track", "", `tracking mode: "branch" or "tag" (default: repo's cepm.toml, then branch)`)
-	cmd.Flags().StringVar(&tagPattern, "tag-pattern", "", `glob for release tags in tag mode (default "v*")`)
+	cmd.Flags().StringVar(&flags.name, "name", "", "directory name for the clone (default: derived from the URL)")
+	cmd.Flags().StringVar(&flags.branch, "branch", "", "branch to track (branch mode)")
+	cmd.Flags().StringVar(&flags.track, "track", "", `tracking mode: "branch" or "tag" (default: repo's cepm.toml, then branch)`)
+	cmd.Flags().StringVar(&flags.tagPattern, "tag-pattern", "", `glob for release tags in tag mode (default "v*")`)
+	cmd.Flags().StringSliceVar(&flags.only, "only", nil, "enable only these extension dirs (repo-relative); others stay available")
+	cmd.Flags().BoolVar(&flags.all, "all", false, "enable every detected extension without asking")
 	return cmd
 }
 
 var repoNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 
-func runInstall(cmd *cobra.Command, url, name, branch, track, tagPattern string) error {
+func runInstall(cmd *cobra.Command, url string, flags installFlags) error {
 	ctx := cmd.Context()
 	out := cmd.OutOrStdout()
+	name, branch, track, tagPattern := flags.name, flags.branch, flags.track, flags.tagPattern
 	if track != "" && track != state.TrackBranch && track != state.TrackTag {
 		return fmt.Errorf(`--track must be "branch" or "tag"`)
 	}
@@ -89,6 +97,10 @@ func runInstall(cmd *cobra.Command, url, name, branch, track, tagPattern string)
 		rollback()
 		return fmt.Errorf("no Chrome extensions found in %s (no manifest.json; repo authors can declare directories in cepm.toml)", url)
 	}
+	if err := applySelection(cmd, name, repo, flags); err != nil {
+		rollback()
+		return err
+	}
 
 	err = updater.WithLock(ctx, func() error {
 		st, err := state.Load()
@@ -112,14 +124,80 @@ func runInstall(cmd *cobra.Command, url, name, branch, track, tagPattern string)
 	} else {
 		fmt.Fprintf(out, " (tracking branch %s)", repo.Branch)
 	}
-	fmt.Fprintf(out, " with %d extension(s):\n\n", len(repo.Extensions))
+	var targets []loadTarget
+	available := 0
 	for _, e := range repo.Extensions {
-		fmt.Fprintf(out, "  %-24s %s\n", e.Name, filepath.Join(dir, e.Dir))
+		if e.Enabled() {
+			targets = append(targets, loadTarget{Name: e.Name, AbsDir: filepath.Join(dir, e.Dir), ID: e.ID})
+		} else {
+			available++
+		}
 	}
-	fmt.Fprintf(out, "\nOne-time step: open chrome://extensions, enable Developer mode,\n")
-	fmt.Fprintf(out, "and use \"Load unpacked\" for each directory above.\n")
-	fmt.Fprintf(out, "After that, updates are applied automatically.\n")
+	fmt.Fprintf(out, " — %d extension(s) enabled", len(targets))
+	if available > 0 {
+		fmt.Fprintf(out, ", %d available (enable later with: cepm enable %s)", available, name)
+	}
+	fmt.Fprintln(out)
+
+	runLoadCeremony(ctx, cmd, targets)
+	fmt.Fprintf(out, "\nAfter loading, updates are applied automatically.\n")
 	return nil
+}
+
+// applySelection decides which detected extensions start enabled, from flags
+// or an interactive prompt (multi-extension repos on a TTY).
+func applySelection(cmd *cobra.Command, repoName string, repo *state.Repo, flags installFlags) error {
+	if flags.all && len(flags.only) > 0 {
+		return fmt.Errorf("--all and --only are mutually exclusive")
+	}
+	switch {
+	case len(flags.only) > 0:
+		want := map[string]bool{}
+		for _, d := range flags.only {
+			want[filepath.Clean(d)] = true
+		}
+		for i := range repo.Extensions {
+			if !want[repo.Extensions[i].Dir] {
+				repo.Extensions[i].Disabled = true
+			}
+			delete(want, repo.Extensions[i].Dir)
+		}
+		if len(want) > 0 {
+			var missing []string
+			for d := range want {
+				missing = append(missing, d)
+			}
+			return fmt.Errorf("--only: no extension found at %v (detected: %v)", missing, extensionDirs(repo))
+		}
+	case flags.all || len(repo.Extensions) <= 1 || !assist.IsTTY():
+		// everything enabled (the default zero value)
+	default:
+		items := make([]string, len(repo.Extensions))
+		for i, e := range repo.Extensions {
+			items[i] = fmt.Sprintf("%-24s %s", e.Name, e.Dir)
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "\n%d extensions found in %s:\n\n", len(items), repoName)
+		picked, err := selectByNumbers(cmd, "Enable which?", items)
+		if err != nil {
+			return err
+		}
+		enabled := map[int]bool{}
+		for _, i := range picked {
+			enabled[i] = true
+		}
+		for i := range repo.Extensions {
+			repo.Extensions[i].Disabled = !enabled[i]
+		}
+	}
+	return nil
+}
+
+func extensionDirs(repo *state.Repo) []string {
+	dirs := make([]string, len(repo.Extensions))
+	for i, e := range repo.Extensions {
+		dirs[i] = e.Dir
+	}
+	return dirs
 }
 
 // buildRepo inspects a fresh clone and produces its state entry, resolving the

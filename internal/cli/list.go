@@ -54,18 +54,25 @@ func fetchChromeStatus(ctx context.Context) map[string]ipc.ChromeExt {
 	return m
 }
 
-func extStatus(chromeStatus map[string]ipc.ChromeExt, id string) string {
+func extStatus(chromeStatus map[string]ipc.ChromeExt, e state.Extension) string {
 	if chromeStatus == nil {
+		if !e.Enabled() {
+			return "available"
+		}
 		return "unknown (host not connected)"
 	}
-	e, ok := chromeStatus[id]
+	ce, loaded := chromeStatus[e.ID]
 	switch {
-	case !ok:
-		return "not loaded"
-	case e.Enabled:
-		return "loaded"
+	case !e.Enabled() && !loaded:
+		return "available"
+	case !e.Enabled() && loaded:
+		return "loaded but not enabled in cepm — cepm enable?"
+	case !loaded:
+		return "NOT LOADED — load it or run: cepm disable"
+	case !ce.Enabled:
+		return "loaded (disabled in Chrome)"
 	default:
-		return "loaded (disabled)"
+		return "loaded"
 	}
 }
 
@@ -87,7 +94,10 @@ func printListTable(cmd *cobra.Command, st *state.State, chromeStatus map[string
 		r := st.Repos[name]
 		for _, e := range r.Extensions {
 			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
-				name, trackRef(r), e.Name, e.ID, e.Dir, extStatus(chromeStatus, e.ID))
+				name, trackRef(r), e.Name, e.ID, e.Dir, extStatus(chromeStatus, e))
+		}
+		for _, s := range r.Stale {
+			fmt.Fprintf(w, "%s\t\t%s\t%s\t(%s)\tstale — run: cepm cleanup\n", name, s.Name, s.ID, s.Reason)
 		}
 		if r.LastError != "" {
 			fmt.Fprintf(w, "%s\t\t⚠ last update failed: %s\t\t\t\n", name, r.LastError)
@@ -98,11 +108,12 @@ func printListTable(cmd *cobra.Command, st *state.State, chromeStatus map[string
 
 func printListJSON(cmd *cobra.Command, st *state.State, chromeStatus map[string]ipc.ChromeExt) error {
 	type extOut struct {
-		Name   string `json:"name"`
-		Dir    string `json:"dir"`
-		AbsDir string `json:"absDir"`
-		ID     string `json:"id"`
-		Status string `json:"status"`
+		Name    string `json:"name"`
+		Dir     string `json:"dir"`
+		AbsDir  string `json:"absDir"`
+		ID      string `json:"id"`
+		Enabled bool   `json:"enabled"`
+		Status  string `json:"status"`
 	}
 	type repoOut struct {
 		Name       string    `json:"name"`
@@ -131,7 +142,7 @@ func printListJSON(cmd *cobra.Command, st *state.State, chromeStatus map[string]
 		for _, e := range r.Extensions {
 			ro.Extensions = append(ro.Extensions, extOut{
 				Name: e.Name, Dir: e.Dir, AbsDir: filepath.Join(dir, e.Dir),
-				ID: e.ID, Status: extStatus(chromeStatus, e.ID),
+				ID: e.ID, Enabled: e.Enabled(), Status: extStatus(chromeStatus, e),
 			})
 		}
 		repos = append(repos, ro)

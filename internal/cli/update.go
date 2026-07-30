@@ -76,10 +76,18 @@ func printUpdateResults(out io.Writer, results []updater.RepoResult) (failed boo
 			fmt.Fprintf(out, "  ⚠ %s\n", w)
 		}
 		for _, a := range r.Added {
-			fmt.Fprintf(out, "  + new extension %q — one-time step: Load unpacked %s\n", a.Name, a.AbsDir)
+			fmt.Fprintf(out, "  + new extension available: %q — enable with: cepm enable %s/%s\n", a.Name, r.Name, a.Dir)
+		}
+		for _, rn := range r.Renamed {
+			fmt.Fprintf(out, "  ~ %q moved: %s → %s\n", rn.Name, rn.OldDir, rn.NewDir)
+			if rn.Enabled {
+				fmt.Fprintf(out, "    Chrome cannot follow a path change — one-time re-load needed:\n")
+				fmt.Fprintf(out, "      1. Load unpacked the new dir: %s\n", rn.AbsDir)
+				fmt.Fprintf(out, "      2. Remove the old broken entry — run: cepm cleanup\n")
+			}
 		}
 		for _, rm := range r.Removed {
-			fmt.Fprintf(out, "  - extension %q was removed from the repo; remove it from chrome://extensions\n", rm.Name)
+			fmt.Fprintf(out, "  - %q was removed from the repo; its loaded copy is now broken — run: cepm cleanup\n", rm.Name)
 		}
 	}
 	return failed

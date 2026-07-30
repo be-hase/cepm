@@ -46,6 +46,7 @@ func (f *fakeHelper) run() {
 			Seq          int64    `json:"seq"`
 			RequestID    string   `json:"requestId"`
 			ExtensionIDs []string `json:"extensionIds"`
+			ExtensionID  string   `json:"extensionId"`
 		}
 		if err := json.Unmarshal(frame, &msg); err != nil {
 			continue
@@ -68,6 +69,12 @@ func (f *fakeHelper) run() {
 				"extensions": []map[string]any{
 					{"id": "aaaa", "name": "Fake Ext", "version": "1.0", "enabled": true},
 				},
+			})
+		case "uninstall":
+			// Emulate the user confirming Chrome's dialog.
+			f.send(map[string]any{
+				"type": "uninstallResult", "requestId": msg.RequestID,
+				"status": "uninstalled",
 			})
 		}
 	}
@@ -120,6 +127,14 @@ func TestHostEndToEnd(t *testing.T) {
 	}
 	if len(exts) != 1 || exts[0].Name != "Fake Ext" {
 		t.Errorf("unexpected extensions: %+v", exts)
+	}
+
+	status, err := ipc.Uninstall(ctx, "aaaa")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status != ipc.StatusUninstalled {
+		t.Errorf("uninstall status = %q, want %q", status, ipc.StatusUninstalled)
 	}
 
 	// Closing the "stdin" pipe simulates Chrome quitting: the host must exit

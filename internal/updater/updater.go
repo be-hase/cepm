@@ -31,6 +31,20 @@ type ExtChange struct {
 	Name     string
 }
 
+// RenameChange records an extension whose directory moved. Chrome derives
+// extension IDs from paths, so a rename mints a new identity: the enabled
+// flag carries over, but the user must re-load the new dir and clean up the
+// old Chrome entry.
+type RenameChange struct {
+	Name    string
+	OldDir  string
+	NewDir  string
+	AbsDir  string // absolute path of the new dir
+	OldID   string
+	NewID   string
+	Enabled bool
+}
+
 // RepoResult reports the outcome of updating one repository.
 type RepoResult struct {
 	Name       string
@@ -41,8 +55,9 @@ type RepoResult struct {
 	SkipReason string
 	Warnings   []string
 	Err        error
-	Changed    []ExtChange       // existing extensions whose files changed
-	Added      []ExtChange       // newly detected extensions (need manual load)
+	Changed    []ExtChange       // enabled extensions whose files changed
+	Added      []ExtChange       // newly detected extensions (registered as available)
+	Renamed    []RenameChange    // extensions whose directory moved
 	Removed    []state.Extension // extensions that disappeared from the repo
 }
 
@@ -251,8 +266,12 @@ func LatestTag(tags []string) (latest string, warning string) {
 	return tags[0], ""
 }
 
-// refreshExtensions re-scans the repo, updates r.Extensions, and fills
-// res.Changed/Added/Removed. changedFiles may be nil (no revision change).
+// refreshExtensions re-scans the repo, updates r.Extensions (preserving the
+// user's enabled/available intent), and fills res.Changed/Added/Renamed/
+// Removed. Renames are inferred by matching manifest names between vanished
+// and appeared directories; removed or renamed-away entries are recorded as
+// stale so "cepm cleanup" can clear the broken Chrome copies later.
+// changedFiles may be nil (no revision change).
 func refreshExtensions(name string, r *state.Repo, dir string, res *RepoResult, changedFiles []string) {
 	exts, err := scan.Detect(dir)
 	if err != nil {
@@ -264,6 +283,7 @@ func refreshExtensions(name string, r *state.Repo, dir string, res *RepoResult, 
 		old[e.Dir] = e
 	}
 	var newList []state.Extension
+	var added []ExtChange
 	for _, e := range exts {
 		abs := filepath.Join(dir, e.Dir)
 		id, err := extid.FromPath(abs)
@@ -272,14 +292,48 @@ func refreshExtensions(name string, r *state.Repo, dir string, res *RepoResult, 
 			continue
 		}
 		se := state.Extension{Dir: e.Dir, Name: e.Name, ID: id}
-		newList = append(newList, se)
-		if _, existed := old[e.Dir]; !existed {
-			res.Added = append(res.Added, ExtChange{RepoName: name, Dir: e.Dir, AbsDir: abs, ID: id, Name: e.Name})
+		if prev, existed := old[e.Dir]; existed {
+			se.Disabled = prev.Disabled
+		} else {
+			// New extensions arrive as "available"; the user opts in with
+			// cepm enable (renames inherit the old intent below).
+			se.Disabled = true
+			added = append(added, ExtChange{RepoName: name, Dir: e.Dir, AbsDir: abs, ID: id, Name: e.Name})
 		}
+		newList = append(newList, se)
 		delete(old, e.Dir)
 	}
-	for _, e := range old {
+
+	// Rename inference: a vanished dir and an appeared dir with the same
+	// manifest name (unique on both sides) is the same extension moving.
+	removed := old
+	for i := range added {
+		match, ok := uniqueNameMatch(added[i].Name, removed)
+		if !ok {
+			continue
+		}
+		for j := range newList {
+			if newList[j].Dir == added[i].Dir {
+				newList[j].Disabled = match.Disabled
+			}
+		}
+		res.Renamed = append(res.Renamed, RenameChange{
+			Name: match.Name, OldDir: match.Dir, NewDir: added[i].Dir,
+			AbsDir: added[i].AbsDir, OldID: match.ID, NewID: added[i].ID,
+			Enabled: match.Enabled(),
+		})
+		r.AddStale(state.StaleExtension{ID: match.ID, Name: match.Name, Reason: "renamed", NewDir: added[i].Dir})
+		delete(removed, match.Dir)
+		added[i].Name = "" // consumed by the rename
+	}
+	for _, a := range added {
+		if a.Name != "" {
+			res.Added = append(res.Added, a)
+		}
+	}
+	for _, e := range removed {
 		res.Removed = append(res.Removed, e)
+		r.AddStale(state.StaleExtension{ID: e.ID, Name: e.Name, Reason: "removed"})
 	}
 	r.Extensions = newList
 
@@ -293,12 +347,35 @@ func refreshExtensions(name string, r *state.Repo, dir string, res *RepoResult, 
 		}
 	}
 	for _, e := range newList {
-		if changedDirs[e.Dir] && !containsDir(res.Added, e.Dir) {
+		if changedDirs[e.Dir] && e.Enabled() && !containsDir(res.Added, e.Dir) && !renameTarget(res.Renamed, e.Dir) {
 			res.Changed = append(res.Changed, ExtChange{
 				RepoName: name, Dir: e.Dir, AbsDir: filepath.Join(dir, e.Dir), ID: e.ID, Name: e.Name,
 			})
 		}
 	}
+}
+
+// uniqueNameMatch finds the single removed extension with the given manifest
+// name; ambiguous names (duplicates) are not treated as renames.
+func uniqueNameMatch(name string, removed map[string]state.Extension) (state.Extension, bool) {
+	var found state.Extension
+	count := 0
+	for _, e := range removed {
+		if e.Name == name {
+			found = e
+			count++
+		}
+	}
+	return found, count == 1
+}
+
+func renameTarget(renames []RenameChange, dir string) bool {
+	for _, rn := range renames {
+		if rn.NewDir == dir {
+			return true
+		}
+	}
+	return false
 }
 
 // attribute maps a changed file to the extension owning it, preferring the

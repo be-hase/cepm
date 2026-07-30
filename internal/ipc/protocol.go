@@ -10,18 +10,22 @@ const (
 	CmdPing       = "ping"
 	CmdReload     = "reload"
 	CmdListChrome = "listChrome"
+	CmdUninstall  = "uninstall"
 )
 
-// Reload result statuses (mirrors the helper extension's report).
+// Result statuses (mirroring the helper extension's reports).
 const (
 	StatusReloaded     = "reloaded"
 	StatusNotInstalled = "not_installed"
 	StatusError        = "error"
+	StatusUninstalled  = "uninstalled"
+	StatusCancelled    = "cancelled"
 )
 
 type Request struct {
 	Cmd string   `json:"cmd"`
 	IDs []string `json:"ids,omitempty"` // extension IDs for CmdReload
+	ID  string   `json:"id,omitempty"`  // extension ID for CmdUninstall
 }
 
 type Response struct {
@@ -30,6 +34,7 @@ type Response struct {
 	Host       *HostInfo      `json:"host,omitempty"`
 	Results    []ReloadResult `json:"results,omitempty"`
 	Extensions []ChromeExt    `json:"extensions,omitempty"`
+	Status     string         `json:"status,omitempty"` // for CmdUninstall
 }
 
 // HostInfo describes the running native host (ping response).

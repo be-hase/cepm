@@ -136,6 +136,120 @@ func TestUpdateAttributesChangedExtensions(t *testing.T) {
 	}
 }
 
+func TestUpdateNewExtensionIsAvailable(t *testing.T) {
+	author := setupRepo(t, "mytools")
+	writeManifest(t, filepath.Join(author, "ext", "gamma"), "Gamma")
+	git(t, author, "add", "-A")
+	git(t, author, "commit", "-m", "add gamma")
+	git(t, author, "push", "origin", "main")
+
+	if _, err := Update(context.Background(), nil, Options{}); err != nil {
+		t.Fatal(err)
+	}
+	st, _ := state.Load()
+	gamma := st.Repos["mytools"].FindExtension(filepath.Join("ext", "gamma"))
+	if gamma == nil || gamma.Enabled() {
+		t.Errorf("new extension should be registered as available (disabled), got %+v", gamma)
+	}
+	// Pre-existing extensions keep their enabled intent.
+	alpha := st.Repos["mytools"].FindExtension(filepath.Join("ext", "alpha"))
+	if alpha == nil || !alpha.Enabled() {
+		t.Errorf("existing extension should stay enabled, got %+v", alpha)
+	}
+}
+
+func TestUpdateSkipsDisabledExtensionChanges(t *testing.T) {
+	author := setupRepo(t, "mytools")
+	// Mark beta as available (user opted out).
+	st, _ := state.Load()
+	st.Repos["mytools"].FindExtension(filepath.Join("ext", "beta")).Disabled = true
+	if err := st.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	writeFile(t, filepath.Join(author, "ext", "beta", "x.js"), "x")
+	writeFile(t, filepath.Join(author, "ext", "alpha", "y.js"), "y")
+	git(t, author, "add", "-A")
+	git(t, author, "commit", "-m", "update both")
+	git(t, author, "push", "origin", "main")
+
+	results, err := Update(context.Background(), nil, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := results[0]
+	if len(r.Changed) != 1 || r.Changed[0].Name != "Alpha" {
+		t.Errorf("disabled extension must not be a reload target, got %+v", r.Changed)
+	}
+	// The re-scan must not resurrect the disabled flag.
+	st2, _ := state.Load()
+	if st2.Repos["mytools"].FindExtension(filepath.Join("ext", "beta")).Enabled() {
+		t.Error("disabled intent was lost across an update")
+	}
+}
+
+func TestUpdateDetectsRename(t *testing.T) {
+	author := setupRepo(t, "mytools")
+	git(t, author, "mv", filepath.Join("ext", "alpha"), filepath.Join("ext", "alpha-v2"))
+	git(t, author, "commit", "-m", "rename alpha dir")
+	git(t, author, "push", "origin", "main")
+
+	results, err := Update(context.Background(), nil, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := results[0]
+	if r.Err != nil {
+		t.Fatal(r.Err)
+	}
+	if len(r.Renamed) != 1 {
+		t.Fatalf("expected 1 rename, got %+v (added=%v removed=%v)", r.Renamed, r.Added, r.Removed)
+	}
+	rn := r.Renamed[0]
+	if rn.Name != "Alpha" || rn.OldDir != filepath.Join("ext", "alpha") || rn.NewDir != filepath.Join("ext", "alpha-v2") {
+		t.Errorf("unexpected rename: %+v", rn)
+	}
+	if !rn.Enabled {
+		t.Error("rename must inherit the enabled intent")
+	}
+	if len(r.Added) != 0 || len(r.Removed) != 0 {
+		t.Errorf("rename should not be double-reported: added=%v removed=%v", r.Added, r.Removed)
+	}
+
+	st, _ := state.Load()
+	repo := st.Repos["mytools"]
+	newExt := repo.FindExtension(filepath.Join("ext", "alpha-v2"))
+	if newExt == nil || !newExt.Enabled() {
+		t.Errorf("renamed extension should exist and stay enabled: %+v", newExt)
+	}
+	if len(repo.Stale) != 1 || repo.Stale[0].Reason != "renamed" || repo.Stale[0].ID != rn.OldID {
+		t.Errorf("old Chrome entry should be recorded as stale: %+v", repo.Stale)
+	}
+}
+
+func TestUpdateRecordsRemovedAsStale(t *testing.T) {
+	author := setupRepo(t, "mytools")
+	git(t, author, "rm", "-r", filepath.Join("ext", "beta"))
+	git(t, author, "commit", "-m", "drop beta")
+	git(t, author, "push", "origin", "main")
+
+	results, err := Update(context.Background(), nil, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results[0].Removed) != 1 || results[0].Removed[0].Name != "Beta" {
+		t.Errorf("expected Beta removed, got %+v", results[0].Removed)
+	}
+	st, _ := state.Load()
+	repo := st.Repos["mytools"]
+	if len(repo.Stale) != 1 || repo.Stale[0].Reason != "removed" || repo.Stale[0].Name != "Beta" {
+		t.Errorf("removed extension should be stale: %+v", repo.Stale)
+	}
+	if repo.FindExtension(filepath.Join("ext", "beta")) != nil {
+		t.Error("removed extension should not stay registered")
+	}
+}
+
 func TestUpdateDetectsNewExtension(t *testing.T) {
 	author := setupRepo(t, "mytools")
 	writeManifest(t, filepath.Join(author, "ext", "gamma"), "Gamma")

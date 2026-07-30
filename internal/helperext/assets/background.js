@@ -52,7 +52,32 @@ async function onMessage(msg) {
     case "listExtensions":
       await handleList(msg);
       break;
+    case "uninstall":
+      await handleUninstall(msg);
+      break;
   }
+}
+
+async function handleUninstall(msg) {
+  // Chrome itself shows a confirmation dialog; the user stays in control.
+  let status = "uninstalled";
+  let error = "";
+  try {
+    await chrome.management.uninstall(msg.extensionId, {
+      showConfirmDialog: true,
+    });
+  } catch (e) {
+    const detail = String((e && e.message) || e);
+    if (/cancel/i.test(detail)) {
+      status = "cancelled";
+    } else if (/not (found|installed)/i.test(detail)) {
+      status = "not_installed";
+    } else {
+      status = "error";
+      error = detail;
+    }
+  }
+  post({ type: "uninstallResult", requestId: msg.requestId, status, error });
 }
 
 async function handleReload(msg) {

@@ -50,8 +50,8 @@ $ # one-time: chrome://extensions → Developer mode → "Load unpacked" → ~/.
 $ cepm doctor        # verify everything is green
 ```
 
-macOS is supported today (Linux/Windows: the OS-specific paths are stubbed
-out and contributions are welcome).
+macOS and Linux are supported (Windows needs registry-based host
+registration and a different extension-ID scheme; contributions welcome).
 
 ## Usage
 
@@ -59,11 +59,29 @@ out and contributions are welcome).
 $ cepm install <git-url>          # clone + register (then load unpacked once)
 $ cepm update                     # pull everything, reload what changed
 $ cepm list                       # what's registered, and is it loaded?
+$ cepm enable <repo>[/<dir>]      # start using an extension of a repo
+$ cepm disable <repo>[/<dir>]     # stop using one (kept as "available")
 $ cepm reload                     # reload without pulling (local hacking)
+$ cepm cleanup                    # remove broken Chrome entries after renames/deletes
 $ cepm uninstall <name>           # unregister + delete the clone
 $ cepm doctor                     # diagnose setup / connectivity
 $ cepm id <path>                  # print the extension ID for a directory
 ```
+
+### Picking extensions from a multi-extension repo
+
+When a repo contains several extensions, `cepm install` asks which ones you
+want (Enter = all; `--only dir,dir` / `--all` for scripts). The rest stay
+registered as *available* — invisible to updates and diagnostics until you
+opt in with `cepm enable`. cepm walks you through the one manual step:
+the directory path lands on your clipboard, chrome://extensions opens, and
+cepm confirms live once Chrome has actually loaded the right directory.
+
+Extensions added to a repo later arrive as available too — nothing gets
+loaded (or nagged about) without you opting in. If a repo renames or deletes
+an extension directory, cepm reports it, carries your enabled choice over to
+the new path, and `cepm cleanup` clears the now-broken entry from Chrome via
+Chrome's own confirmation dialog.
 
 ### Tracking release tags instead of a branch
 
@@ -88,6 +106,11 @@ extensions = ["dist/sidebar", "dist/search"]
 track = "tag"
 tag_pattern = "v*"
 ```
+
+Note for repo authors: renaming an extension directory is a breaking change
+for every consumer — Chrome derives extension IDs from paths, so each user
+must re-load the new directory once (cepm guides them through it). Prefer
+stable directory names.
 
 ### User configuration (`~/.cepm/config.toml`, optional)
 

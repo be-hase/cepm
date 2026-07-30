@@ -6,14 +6,16 @@ import "github.com/be-hase/cepm/internal/ipc"
 // internal/helperext/assets/background.js.
 
 const (
-	typeHello        = "hello"
-	typeHelloAck     = "helloAck"
-	typePing         = "ping"
-	typePong         = "pong"
-	typeReload       = "reload"
-	typeReloadResult = "reloadResult"
-	typeList         = "listExtensions"
-	typeListResult   = "listResult"
+	typeHello           = "hello"
+	typeHelloAck        = "helloAck"
+	typePing            = "ping"
+	typePong            = "pong"
+	typeReload          = "reload"
+	typeReloadResult    = "reloadResult"
+	typeList            = "listExtensions"
+	typeListResult      = "listResult"
+	typeUninstall       = "uninstall"
+	typeUninstallResult = "uninstallResult"
 )
 
 type envelope struct {
@@ -63,4 +65,17 @@ type listResultMsg struct {
 	Type       string          `json:"type"`
 	RequestID  string          `json:"requestId"`
 	Extensions []ipc.ChromeExt `json:"extensions"`
+}
+
+type uninstallReq struct {
+	Type        string `json:"type"`
+	RequestID   string `json:"requestId"`
+	ExtensionID string `json:"extensionId"`
+}
+
+type uninstallResultMsg struct {
+	Type      string `json:"type"`
+	RequestID string `json:"requestId"`
+	Status    string `json:"status"` // uninstalled | cancelled | not_installed | error
+	Error     string `json:"error,omitempty"`
 }

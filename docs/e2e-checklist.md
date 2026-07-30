@@ -53,13 +53,31 @@ Note: `cepm setup` still writes the native messaging manifest to the real
       skips it with a warning; `cepm update --force` succeeds and restores
       the local file.
 
-## 6. Tag tracking
+## 6. Selection & lifecycle
+
+- [ ] Install a repo with 2+ extensions on a TTY: the numbered prompt
+      appears; Enter enables all; "1" enables only the first.
+- [ ] The load ceremony copies the path to the clipboard, opens
+      chrome://extensions, and prints "✔ loaded!" within a second of
+      clicking Load unpacked. Loading a wrong directory prints the
+      mismatch warning.
+- [ ] `cepm enable <repo>` lists available extensions interactively;
+      after enabling, doctor tracks it until loaded.
+- [ ] `cepm disable` on a loaded extension offers Chrome-side removal and
+      Chrome shows its confirmation dialog; cancelling is reported.
+- [ ] Rename an extension dir in the repo, push, `cepm update`: the move is
+      reported, enabled intent carries over, `cepm list` shows a stale row,
+      and `cepm cleanup` removes the broken entry via the dialog.
+- [ ] Delete an extension dir, push, update: reported as removed; cleanup
+      clears the Chrome entry.
+
+## 7. Tag tracking
 
 - [ ] Install a repo with `--track tag`. Push commits to main without a tag:
       `cepm update` stays on the old tag. Push a higher semver tag: update
       checks it out and reloads.
 
-## 7. Upgrade path
+## 8. Upgrade path
 
 - [ ] Bump `helperext.Version`, rebuild, restart Chrome (no `cepm setup`):
       host.log shows "helper files refreshed" + "helper self-reload", and

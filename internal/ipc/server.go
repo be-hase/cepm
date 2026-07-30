@@ -44,7 +44,9 @@ func Serve(ctx context.Context, l net.Listener, h Handler) {
 
 func serveConn(ctx context.Context, conn net.Conn, h Handler) {
 	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(60 * time.Second))
+	// Generous: an uninstall request waits for the user to answer Chrome's
+	// confirmation dialog.
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Minute))
 	line, err := bufio.NewReader(conn).ReadBytes('\n')
 	if err != nil {
 		return
