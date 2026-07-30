@@ -1,0 +1,417 @@
+//go:build e2e
+
+package e2e
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"syscall"
+	"testing"
+	"time"
+
+	"github.com/be-hase/cepm/internal/extid"
+	"github.com/be-hase/cepm/internal/helperext"
+	"github.com/be-hase/cepm/internal/ipc"
+	"github.com/be-hase/cepm/internal/nmmanifest"
+)
+
+// TestE2E drives a real Chrome (Chrome for Testing, throwaway profile,
+// --load-extension standing in for the one manual "Load unpacked") against a
+// built cepm binary and verifies the full loop: helper connectivity, that
+// "cepm update" really makes Chrome run the new code, updates while Chrome
+// is closed, the periodic auto-update, and the helper self-refresh.
+func TestE2E(t *testing.T) {
+	if testing.Short() {
+		t.Skip("e2e is not run with -short")
+	}
+	chromeBin := ensureChrome(t) // before HOME is overridden
+
+	// Isolated world: fake HOME so neither the user's Chrome nor their
+	// ~/.cepm is touched. /tmp keeps the Unix socket path short; resolve
+	// symlinks (/tmp → /private/tmp) because extension IDs are path hashes
+	// and Chrome sees the canonical path.
+	home, err := os.MkdirTemp("/tmp", "cepm-e2e")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if home, err = filepath.EvalSymlinks(home); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(home) })
+	cepmHome := filepath.Join(home, "cepm")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CEPM_HOME", cepmHome)
+
+	// Registered after the RemoveAll cleanup so it runs before it (LIFO).
+	// The copy under /tmp survives the test for post-mortem debugging.
+	t.Cleanup(func() {
+		b, err := os.ReadFile(filepath.Join(cepmHome, "logs", "host.log"))
+		if err != nil {
+			return
+		}
+		_ = os.WriteFile("/tmp/cepm-e2e-host.log", b, 0o644)
+		if t.Failed() {
+			t.Logf("host.log (also at /tmp/cepm-e2e-host.log):\n%s", b)
+		}
+	})
+
+	bin := buildCepm(t, home)
+
+	// A git "origin" with one extension, plus an author clone to push from.
+	origin := filepath.Join(home, "origin.git")
+	author := filepath.Join(home, "author")
+	git(t, home, "init", "--bare", "--initial-branch=main", origin)
+	git(t, home, "clone", origin, author)
+	git(t, author, "checkout", "-b", "main")
+	writeSWExtension(t, filepath.Join(author, "widget"), "1.0.0", "BUILD-1")
+	git(t, author, "add", "-A")
+	git(t, author, "commit", "-m", "v1.0.0")
+	git(t, author, "push", "origin", "main")
+
+	runCepm(t, bin, "install", origin, "--name", "testrepo")
+	runCepm(t, bin, "setup")
+	// Shortest interval the config allows, so the periodic update scenario
+	// finishes in test time (the first run is shortened further via
+	// CEPM_BOOTSTRAP_UPDATE_DELAY when Chrome is launched).
+	if err := os.WriteFile(filepath.Join(cepmHome, "config.toml"),
+		[]byte("[update]\ninterval = \"1m\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	extDir := filepath.Join(cepmHome, "repos", "testrepo", "widget")
+	extID, err := extid.FromPath(extDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	helperDir := filepath.Join(cepmHome, "helper")
+	profile := filepath.Join(home, "profile")
+	placeNMManifest(t, home, profile)
+
+	chrome, cdp := launchChrome(t, chromeBin, profile, helperDir, extDir)
+
+	t.Log("scenario 1: helper connects and the extension runs BUILD-1")
+	waitPing(t, 90*time.Second)
+	if got := waitVersion(t, extID, "1.0.0", 30*time.Second); got != "1.0.0" {
+		t.Fatalf("extension not loaded with v1.0.0 (got %q)", got)
+	}
+	waitBuild(t, cdp, extID, "BUILD-1", 30*time.Second)
+
+	t.Log("scenario 2: cepm update makes Chrome run the new code")
+	writeSWExtension(t, filepath.Join(author, "widget"), "1.0.0", "BUILD-2")
+	git(t, author, "commit", "-am", "code update")
+	git(t, author, "push", "origin", "main")
+	out := runCepm(t, bin, "update")
+	if !strings.Contains(out, "reloaded") {
+		t.Errorf("update output should confirm the reload:\n%s", out)
+	}
+	waitBuild(t, cdp, extID, "BUILD-2", 30*time.Second)
+
+	t.Log("scenario 3: a manifest.json change is reported as needing a Chrome restart")
+	writeSWExtension(t, filepath.Join(author, "widget"), "1.1.0", "BUILD-3")
+	git(t, author, "commit", "-am", "v1.1.0")
+	git(t, author, "push", "origin", "main")
+	out = runCepm(t, bin, "update")
+	if !strings.Contains(out, "manifest.json changed") {
+		t.Errorf("update must warn that manifest changes need a restart:\n%s", out)
+	}
+	waitBuild(t, cdp, extID, "BUILD-3", 30*time.Second) // code still applies
+	if got := currentVersion(t, extID); got != "1.0.0" {
+		t.Logf("note: Chrome reports version %q after a manifest change (expected the cached 1.0.0)", got)
+	}
+	if out := runCepm(t, bin, "doctor"); !strings.Contains(out, "manifest.json on disk is 1.1.0") {
+		t.Errorf("doctor should flag the pending manifest change:\n%s", out)
+	}
+
+	t.Log("scenario 4: update while Chrome is closed applies on next launch")
+	stopChrome(t, chrome)
+	writeSWExtension(t, filepath.Join(author, "widget"), "1.2.0", "BUILD-4")
+	git(t, author, "commit", "-am", "v1.2.0")
+	git(t, author, "push", "origin", "main")
+	out = runCepm(t, bin, "update")
+	if !strings.Contains(out, "not running") {
+		t.Errorf("update should mention Chrome is not running:\n%s", out)
+	}
+
+	t.Log("scenario 5+6: on relaunch the host catches up (code pulled while closed) and refreshes the helper")
+	// Age the helper marker: the new host must rewrite the files on connect.
+	markerPath := filepath.Join(helperDir, ".cepm-helper-version")
+	if err := os.WriteFile(markerPath, []byte("0.0.1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Re-load both directories: like a real Chrome restart, this re-reads
+	// them from disk (path-derived IDs stay the same).
+	if onDisk, err := os.ReadFile(filepath.Join(extDir, "background.js")); err == nil {
+		t.Logf("on-disk background.js after closed-Chrome update: %q", string(onDisk))
+	}
+	chrome, cdp = launchChrome(t, chromeBin, profile, helperDir, extDir)
+	waitPing(t, 90*time.Second)
+	waitBuild(t, cdp, extID, "BUILD-4", 60*time.Second)
+	if got := waitVersion(t, extID, "1.2.0", 30*time.Second); got != "1.2.0" {
+		t.Errorf("a Chrome restart should apply the manifest version too (got %q)", got)
+	}
+	waitFor(t, "helper files refreshed by host", 60*time.Second, func() bool {
+		return helperext.InstalledVersion(helperDir) == helperext.Version
+	})
+	// Refreshing the helper must not cost us the connection (a self-reload
+	// would drop the native messaging port for good).
+	if _, err := ipc.Ping(context.Background()); err != nil {
+		t.Fatalf("host unreachable after the helper refresh: %v", err)
+	}
+
+	t.Log("scenario 7: the periodic auto-update applies a push with no CLI interaction")
+	writeSWExtension(t, filepath.Join(author, "widget"), "1.2.0", "BUILD-5")
+	git(t, author, "commit", "-am", "auto update code")
+	git(t, author, "push", "origin", "main")
+	waitBuild(t, cdp, extID, "BUILD-5", 2*time.Minute)
+
+	stopChrome(t, chrome)
+}
+
+// ---- helpers ----
+
+func buildCepm(t *testing.T, home string) string {
+	t.Helper()
+	bin := filepath.Join(home, "bin", "cepm")
+	cmd := exec.Command("go", "build", "-o", bin, "./cmd/cepm")
+	cmd.Dir = ".." // repo root
+	cmd.Env = os.Environ()
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("build cepm: %v\n%s", err, out)
+	}
+	return bin
+}
+
+func runCepm(t *testing.T, bin string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command(bin, args...)
+	cmd.Env = os.Environ()
+	out, err := cmd.CombinedOutput()
+	t.Logf("$ cepm %s\n%s", strings.Join(args, " "), out)
+	if err != nil {
+		t.Fatalf("cepm %v: %v", args, err)
+	}
+	return string(out)
+}
+
+func git(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	cmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=e2e", "GIT_AUTHOR_EMAIL=e2e@example.com",
+		"GIT_COMMITTER_NAME=e2e", "GIT_COMMITTER_EMAIL=e2e@example.com",
+	)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+}
+
+// writeSWExtension writes the test extension. Its service worker exposes a
+// build marker so the test can observe which code Chrome is actually running
+// — the manifest version alone is not enough, because Chrome keeps the
+// manifest it cached at install time until a full reload.
+func writeSWExtension(t *testing.T, dir, version, build string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	manifest := fmt.Sprintf(`{"manifest_version": 3, "name": "E2E Widget", "version": %q,
+  "permissions": ["alarms"], "background": {"service_worker": "background.js"}}`, version)
+	if err := os.WriteFile(filepath.Join(dir, "manifest.json"), []byte(manifest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The alarm keeps waking the worker so the test can query it.
+	sw := fmt.Sprintf("self.BUILD = %q;\n"+
+		"chrome.alarms.create('keep', {periodInMinutes: 0.5});\n"+
+		"chrome.alarms.onAlarm.addListener(() => {});\n", build)
+	if err := os.WriteFile(filepath.Join(dir, "background.js"), []byte(sw), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// currentVersion returns the extension version Chrome reports, or a marker.
+func currentVersion(t *testing.T, extID string) string {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	exts, err := ipc.ListChrome(ctx)
+	if err != nil {
+		return "(host error: " + err.Error() + ")"
+	}
+	for _, e := range exts {
+		if e.ID == extID {
+			return e.Version
+		}
+	}
+	return "(not loaded)"
+}
+
+// placeNMManifest copies the manifest "cepm setup" wrote (regular-Chrome
+// location under the fake HOME) into <profile>/NativeMessagingHosts — the
+// directory Chrome for Testing reads instead of the OS-level locations, by
+// design, for hermetic tests.
+func placeNMManifest(t *testing.T, home, profile string) {
+	t.Helper()
+	var src string
+	if runtime.GOOS == "darwin" {
+		src = filepath.Join(home, "Library", "Application Support",
+			"Google", "Chrome", "NativeMessagingHosts", nmmanifest.FileName())
+	} else {
+		src = filepath.Join(home, ".config", "google-chrome", "NativeMessagingHosts", nmmanifest.FileName())
+	}
+	data, err := os.ReadFile(src)
+	if err != nil {
+		t.Fatalf("setup did not write the NM manifest: %v", err)
+	}
+	dir := filepath.Join(profile, "NativeMessagingHosts")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, nmmanifest.FileName()), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// launchChrome starts Chrome for Testing with a CDP pipe attached. loadDirs
+// are installed via Extensions.loadUnpacked — true unpacked installs, the
+// same thing the "Load unpacked" button does (and they persist in the
+// profile across relaunches, so pass loadDirs only on the first launch).
+func launchChrome(t *testing.T, chromeBin, profile string, loadDirs ...string) (*exec.Cmd, *cdpPipe) {
+	t.Helper()
+	extraFiles, cdp, err := newCDPPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := startChromeWithFiles(t, chromeBin, profile, extraFiles)
+	t.Cleanup(func() { cdp.close(); stopChrome(t, cmd) })
+
+	for _, dir := range loadDirs {
+		id, err := cdp.loadUnpacked(dir)
+		if err != nil {
+			stopChrome(t, cmd)
+			t.Fatalf("Extensions.loadUnpacked %s: %v", dir, err)
+		}
+		t.Logf("loaded unpacked %s (id %s)", dir, id)
+	}
+	return cmd, cdp
+}
+
+// waitBuild polls the extension's service worker until it runs the expected
+// build marker — the ground truth for "did Chrome pick up the new code".
+func waitBuild(t *testing.T, cdp *cdpPipe, extID, want string, timeout time.Duration) {
+	t.Helper()
+	last := ""
+	var lastErr error
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		got, err := cdp.evalInServiceWorker(extID, "self.BUILD")
+		if err == nil {
+			last = got
+			if got == want {
+				return
+			}
+		} else {
+			lastErr = err
+		}
+		time.Sleep(time.Second)
+	}
+	t.Fatalf("extension never ran %s (last observed %q, last error %v)", want, last, lastErr)
+}
+
+// startChromeWithFiles starts Chrome with the CDP pipe fds attached. When no
+// args are given the standard test flags are used.
+func startChromeWithFiles(t *testing.T, chromeBin, profile string, extraFiles []*os.File, args ...string) *exec.Cmd {
+	t.Helper()
+	if len(args) == 0 {
+		args = chromeArgs(profile)
+	}
+	cmd := exec.Command(chromeBin, args...)
+	cmd.Env = append(os.Environ(), "CEPM_BOOTSTRAP_UPDATE_DELAY=5s")
+	cmd.ExtraFiles = extraFiles // fd 3 (commands), fd 4 (responses)
+	// Own process group so Chrome's children die with it.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("launch chrome: %v", err)
+	}
+	extraFiles[0].Close() // parent copies of Chrome's ends
+	extraFiles[1].Close()
+	return cmd
+}
+
+func chromeArgs(profile string) []string {
+	args := []string{
+		"--user-data-dir=" + profile,
+		"--no-first-run",
+		"--no-default-browser-check",
+		"--disable-background-networking",
+		"--remote-debugging-pipe",
+		"--enable-unsafe-extension-debugging",
+	}
+	if os.Getenv("CEPM_E2E_HEADED") == "" {
+		args = append(args, "--headless=new")
+	}
+	return append(args, "about:blank")
+}
+
+func stopChrome(t *testing.T, cmd *exec.Cmd) {
+	t.Helper()
+	if cmd.Process == nil {
+		return
+	}
+	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	_, _ = cmd.Process.Wait()
+	// Give the native host a moment to notice EOF and release the socket.
+	time.Sleep(500 * time.Millisecond)
+}
+
+func waitPing(t *testing.T, timeout time.Duration) {
+	t.Helper()
+	waitFor(t, "native host reachable (helper connected)", timeout, func() bool {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_, err := ipc.Ping(ctx)
+		return err == nil
+	})
+}
+
+// waitVersion polls Chrome for the extension's version until it matches want
+// or the timeout passes, returning the last observed version.
+func waitVersion(t *testing.T, extID, want string, timeout time.Duration) string {
+	t.Helper()
+	last := "(not loaded)"
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		exts, err := ipc.ListChrome(ctx)
+		cancel()
+		if err == nil {
+			for _, e := range exts {
+				if e.ID == extID {
+					last = e.Version
+				}
+			}
+			if last == want {
+				return last
+			}
+		}
+		time.Sleep(time.Second)
+	}
+	return last
+}
+
+func waitFor(t *testing.T, what string, timeout time.Duration, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(time.Second)
+	}
+	t.Fatalf("timed out waiting for %s", what)
+}

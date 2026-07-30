@@ -1,5 +1,13 @@
 # Manual E2E checklist
 
+> Most of the end-to-end behavior is now covered automatically by `make e2e`
+> (helper connectivity, reload actually changing the running code, updates
+> pulled while Chrome was closed, the periodic auto-update, and the helper
+> refresh). What remains below is what a machine cannot check: interactive
+> prompts, the clipboard, and Chrome's own confirmation dialogs. Sections 1-5
+> and 7-8 are largely redundant with `make e2e`; run them when touching that
+> area or before a release.
+
 Chrome's real behavior (service-worker lifetime, native messaging launch,
 reload-from-disk on setEnabled) can't be covered by unit tests. Run this
 checklist before tagging a release, on macOS with a normal Chrome profile.
@@ -80,11 +88,12 @@ Note: `cepm setup` still writes the native messaging manifest to the real
 ## 8. Upgrade path
 
 - [ ] Bump `helperext.Version`, rebuild, restart Chrome (no `cepm setup`):
-      host.log shows "helper files refreshed" + "helper self-reload", and
+      host.log shows "helper files refreshed"; after one more Chrome restart
       chrome://extensions shows the new helper version. This is the
       zero-user-action upgrade path.
-- [ ] `cepm setup` re-run also refreshes helper files and reloads a running
-      helper (legacy/manual path).
+- [ ] Change a manifest.json in a managed repo, push, `cepm update`: the
+      output warns that a restart is needed, `cepm doctor` flags the version
+      mismatch, and restarting Chrome clears it.
 - [ ] Move the cepm binary to a new path, run any cepm command (e.g.
       `cepm list`): `~/.cepm/bin/cepm-host` records the new path (self-heal)
       and `cepm doctor` stays green without re-running setup.

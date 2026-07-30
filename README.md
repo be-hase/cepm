@@ -132,6 +132,18 @@ restores them around the pull.
 - Loading an extension the first time is always manual — Chrome has no API
   for "load unpacked". cepm prints the exact directories to load, and only
   for brand-new extensions.
+- **manifest.json changes need a Chrome restart.** Reloading an unpacked
+  extension re-reads its code from disk, but Chrome keeps the manifest it
+  cached when the extension was loaded. Code updates therefore go live
+  immediately; a version bump, new permission, or newly declared file only
+  applies after Chrome restarts. cepm tells you when a pulled change touched
+  manifest.json, and `cepm doctor` keeps flagging it until it is applied.
+- When cepm pulls updates while Chrome is closed, the code lands on disk but
+  Chrome may still run what it cached; cepm therefore reloads every enabled
+  extension once, right after Chrome connects.
+- A cepm upgrade rewrites the helper extension's files automatically, but the
+  running helper keeps its current version until the next Chrome start
+  (self-reloading would drop its connection to cepm).
 - The helper extension needs the `management` permission (to toggle other
   extensions), `nativeMessaging`, and `alarms`. It never touches page data.
 - Everything lives under `~/.cepm/` (clones, state, logs at
@@ -141,12 +153,19 @@ restores them around the pull.
 
 ```console
 $ make build   # bin/cepm
-$ make test
+$ make test    # unit + integration tests
+$ make e2e     # drives a real Chrome (downloads Chrome for Testing once)
 $ make lint    # gofmt + go vet
 ```
 
-See `docs/e2e-checklist.md` for the manual end-to-end test plan (the pieces
-that need a real Chrome).
+`make e2e` is the real thing: it launches Chrome with a throwaway profile,
+installs the helper and a test extension, and asserts that a `git push`
+actually changes the code Chrome is running — including the auto-update path,
+updates applied while Chrome was closed, and the helper refresh. Use
+`CEPM_E2E_HEADED=1` to watch it happen.
+
+`docs/e2e-checklist.md` covers the few things a human still has to check
+(interactive prompts, clipboard, and Chrome's own confirmation dialogs).
 
 ## License
 

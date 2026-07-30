@@ -25,7 +25,7 @@ reloaded; otherwise pass repository names.`,
 			if len(targets) == 0 {
 				targets = st.RepoNames()
 			}
-			var ids, names []string
+			var items []reloadItem
 			skipped := 0
 			for _, name := range targets {
 				r, ok := st.Repos[name]
@@ -37,17 +37,16 @@ reloaded; otherwise pass repository names.`,
 						skipped++
 						continue
 					}
-					ids = append(ids, e.ID)
-					names = append(names, e.Name)
+					items = append(items, reloadItem{ID: e.ID, Name: e.Name})
 				}
 			}
-			if len(ids) == 0 {
+			if len(items) == 0 {
 				return fmt.Errorf("no enabled extensions to reload (see cepm list)")
 			}
 			if skipped > 0 {
 				fmt.Fprintf(cmd.OutOrStdout(), "(%d available extension(s) skipped)\n", skipped)
 			}
-			reloadExtensions(cmd.Context(), cmd.OutOrStdout(), ids, names)
+			reloadExtensions(cmd.Context(), cmd.OutOrStdout(), items)
 			return nil
 		},
 	}

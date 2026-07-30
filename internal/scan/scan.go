@@ -117,6 +117,24 @@ func walk(repoDir string) ([]Extension, error) {
 	return exts, nil
 }
 
+// ManifestVersion returns the "version" declared in <dir>/manifest.json.
+// Comparing it with what Chrome reports reveals manifest changes that a
+// setEnabled-based reload could not apply (Chrome keeps the manifest it
+// cached at install time until a full reload or restart).
+func ManifestVersion(dir string) (string, error) {
+	data, err := os.ReadFile(filepath.Join(dir, "manifest.json"))
+	if err != nil {
+		return "", err
+	}
+	var m struct {
+		Version string `json:"version"`
+	}
+	if err := json.Unmarshal(data, &m); err != nil {
+		return "", err
+	}
+	return m.Version, nil
+}
+
 // manifestName parses <dir>/manifest.json and returns the extension name.
 // It returns an error when the file is missing or not a valid extension
 // manifest (no manifest_version 2/3, or no name).

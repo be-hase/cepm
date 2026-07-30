@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -35,16 +36,14 @@ func newUpdateCmd() *cobra.Command {
 			out := cmd.OutOrStdout()
 			failed := printUpdateResults(out, results)
 
-			var reloadIDs []string
-			var reloadNames []string
+			var items []reloadItem
 			for _, r := range results {
 				for _, c := range r.Changed {
-					reloadIDs = append(reloadIDs, c.ID)
-					reloadNames = append(reloadNames, c.Name)
+					items = append(items, reloadItem{ID: c.ID, Name: c.Name, ManifestChanged: c.ManifestChanged})
 				}
 			}
-			if len(reloadIDs) > 0 && !noReload {
-				reloadExtensions(cmd.Context(), out, reloadIDs, reloadNames)
+			if len(items) > 0 && !noReload {
+				reloadExtensions(cmd.Context(), out, items)
 			}
 			if failed {
 				return errors.New("some repositories failed to update (see above)")
@@ -93,9 +92,20 @@ func printUpdateResults(out io.Writer, results []updater.RepoResult) (failed boo
 	return failed
 }
 
-// reloadExtensions asks the native host to reload IDs, degrading gracefully
-// when Chrome is not running.
-func reloadExtensions(ctx context.Context, out io.Writer, ids, names []string) {
+// reloadItem is one extension to reload.
+type reloadItem struct {
+	ID              string
+	Name            string
+	ManifestChanged bool
+}
+
+// reloadExtensions asks the native host to reload the given extensions,
+// degrading gracefully when Chrome is not running.
+func reloadExtensions(ctx context.Context, out io.Writer, items []reloadItem) {
+	ids := make([]string, len(items))
+	for i, it := range items {
+		ids[i] = it.ID
+	}
 	results, err := ipc.Reload(ctx, ids)
 	if errors.Is(err, ipc.ErrHostNotRunning) {
 		fmt.Fprintf(out, "\nChrome is not running (or the helper is not connected); updates will apply on next launch.\n")
@@ -110,18 +120,28 @@ func reloadExtensions(ctx context.Context, out io.Writer, ids, names []string) {
 		byID[r.ID] = r
 	}
 	fmt.Fprintln(out)
-	for i, id := range ids {
-		name := id
-		if i < len(names) && names[i] != "" {
-			name = names[i]
+	var manifestPending []string
+	for _, it := range items {
+		name := it.Name
+		if name == "" {
+			name = it.ID
 		}
-		switch r := byID[id]; r.Status {
+		switch r := byID[it.ID]; r.Status {
 		case ipc.StatusReloaded:
 			fmt.Fprintf(out, "↻ reloaded %s\n", name)
+			if it.ManifestChanged {
+				manifestPending = append(manifestPending, name)
+			}
 		case ipc.StatusNotInstalled:
 			fmt.Fprintf(out, "  %s is not loaded in Chrome (one-time \"Load unpacked\" still needed)\n", name)
 		default:
 			fmt.Fprintf(out, "✘ reload %s failed: %s\n", name, r.Error)
 		}
+	}
+	if len(manifestPending) > 0 {
+		fmt.Fprintf(out, "\n⚠ manifest.json changed for: %s\n", strings.Join(manifestPending, ", "))
+		fmt.Fprintf(out, "  Code changes are live, but Chrome keeps the manifest it cached at install\n")
+		fmt.Fprintf(out, "  time. Restart Chrome (or click Reload in chrome://extensions) to apply\n")
+		fmt.Fprintf(out, "  manifest changes such as new permissions or a version bump.\n")
 	}
 }

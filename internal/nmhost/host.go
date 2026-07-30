@@ -17,6 +17,7 @@ import (
 	"github.com/be-hase/cepm/internal/ipc"
 	"github.com/be-hase/cepm/internal/logx"
 	"github.com/be-hase/cepm/internal/paths"
+	"github.com/be-hase/cepm/internal/state"
 	"github.com/be-hase/cepm/internal/updater"
 )
 
@@ -50,6 +51,7 @@ type Host struct {
 	helperVersion   atomic.Value // string
 	lastPong        atomic.Int64 // unix nano
 	helperRefreshed atomic.Bool  // helper file refresh attempted (once per process)
+	caughtUp        atomic.Bool  // startup catch-up reload done (once per process)
 }
 
 // Run drives a host process until Chrome closes the port (stdin EOF).
@@ -160,11 +162,14 @@ func (h *Host) readLoop(ctx context.Context) error {
 				h.log.Info("helper connected", "helperVersion", msg.HelperVersion)
 			}
 			h.send(helloAckMsg{Type: typeHelloAck, HostVersion: h.version, MinHelperVersion: minHelperVersion})
+			// Both round-trip through this read loop, so run them off it.
 			// This host process is the freshly-installed binary (Chrome
 			// launches whatever the launcher resolves), so it may carry newer
-			// helper files than the ones Chrome just loaded. Runs in a
-			// goroutine: it round-trips through this read loop.
-			go h.maybeRefreshHelper(ctx)
+			// helper files than the ones Chrome just loaded.
+			go func() {
+				h.maybeRefreshHelper(ctx)
+				h.catchUpReload(ctx)
+			}()
 		case typePong:
 			h.lastPong.Store(time.Now().UnixNano())
 		case typeReloadResult, typeListResult, typeUninstallResult:
@@ -276,10 +281,15 @@ func (h *Host) Uninstall(ctx context.Context, extID string) (status string, err 
 }
 
 // maybeRefreshHelper brings ~/.cepm/helper up to date with the helper files
-// embedded in this binary and asks the running helper to reload itself, so a
-// cepm upgrade propagates to the helper extension with zero user action. The
-// reload only happens after the version marker was written successfully,
-// which is what terminates the refresh → reconnect → refresh cycle.
+// embedded in this binary, so a cepm upgrade propagates to the helper
+// extension with no user action.
+//
+// It deliberately does not ask the helper to reload itself: the only way an
+// extension can reload itself is chrome.runtime.reload(), which tears down
+// this native messaging port, and Chrome does not reliably restart the
+// helper's service worker afterwards — that would strand the connection
+// until the next Chrome start. The rewritten files take effect on the next
+// Chrome start anyway, which is exactly when the old code would stop running.
 func (h *Host) maybeRefreshHelper(ctx context.Context) {
 	if !h.helperRefreshed.CompareAndSwap(false, true) {
 		return
@@ -296,15 +306,41 @@ func (h *Host) maybeRefreshHelper(ctx context.Context) {
 		h.log.Error("refresh helper files failed", "err", err)
 		return
 	}
-	h.log.Info("helper files refreshed", "from", installed, "to", helperext.Version)
-	results, err := h.Reload(ctx, []string{helperext.ExtensionID()})
-	if err != nil {
-		h.log.Warn("helper self-reload not confirmed (it may reload on next Chrome start)", "err", err)
+	h.log.Info("helper files refreshed; new version applies on the next Chrome start",
+		"from", installed, "to", helperext.Version)
+}
+
+// catchUpReload reloads every enabled extension once, right after Chrome
+// connects. Updates pulled while Chrome was closed are on disk but Chrome may
+// still run the code it cached in the previous session (service worker
+// scripts in particular survive a restart), so without this the user would
+// silently keep running stale code until the next update.
+func (h *Host) catchUpReload(ctx context.Context) {
+	if !h.caughtUp.CompareAndSwap(false, true) {
 		return
 	}
-	for _, r := range results {
-		h.log.Info("helper self-reload", "status", r.Status, "err", r.Error)
+	st, err := state.Load()
+	if err != nil {
+		h.log.Error("catch-up reload: load state", "err", err)
+		return
 	}
+	var ids []string
+	for _, name := range st.RepoNames() {
+		for _, e := range st.Repos[name].Extensions {
+			if e.Enabled() {
+				ids = append(ids, e.ID)
+			}
+		}
+	}
+	if len(ids) == 0 {
+		return
+	}
+	results, err := h.Reload(ctx, ids)
+	if err != nil {
+		h.log.Warn("catch-up reload failed", "err", err)
+		return
+	}
+	h.log.Info("catch-up reload done", "extensions", len(results))
 }
 
 // runLeaderDuties keeps trying to become the leader; once it wins the lock it
@@ -405,6 +441,13 @@ func (h *Host) runScheduler(ctx context.Context) {
 		return
 	}
 	delay := time.Minute + rand.N(time.Minute)
+	// E2E tests shorten the first run to avoid multi-minute waits.
+	if v := os.Getenv("CEPM_BOOTSTRAP_UPDATE_DELAY"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			delay = d
+		}
+	}
+	h.log.Info("auto update scheduled", "interval", cfg.Update.Interval, "firstRunIn", delay)
 	for {
 		select {
 		case <-ctx.Done():

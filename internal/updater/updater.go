@@ -7,6 +7,7 @@ package updater
 import (
 	"context"
 	"fmt"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -29,6 +30,12 @@ type ExtChange struct {
 	AbsDir   string
 	ID       string
 	Name     string
+	// ManifestChanged marks updates that touched manifest.json. Reloading an
+	// unpacked extension through chrome.management.setEnabled re-reads its
+	// code from disk but keeps the manifest Chrome cached at install time, so
+	// such changes only take effect after Chrome restarts (or the user clicks
+	// Reload in chrome://extensions).
+	ManifestChanged bool
 }
 
 // RenameChange records an extension whose directory moved. Chrome derives
@@ -341,15 +348,22 @@ func refreshExtensions(name string, r *state.Repo, dir string, res *RepoResult, 
 		return
 	}
 	changedDirs := map[string]bool{}
+	manifestChanged := map[string]bool{}
 	for _, f := range changedFiles {
-		if ext, ok := attribute(f, newList); ok {
-			changedDirs[ext.Dir] = true
+		ext, ok := attribute(f, newList)
+		if !ok {
+			continue
+		}
+		changedDirs[ext.Dir] = true
+		if f == path.Join(filepath.ToSlash(ext.Dir), "manifest.json") || (ext.Dir == "." && f == "manifest.json") {
+			manifestChanged[ext.Dir] = true
 		}
 	}
 	for _, e := range newList {
 		if changedDirs[e.Dir] && e.Enabled() && !containsDir(res.Added, e.Dir) && !renameTarget(res.Renamed, e.Dir) {
 			res.Changed = append(res.Changed, ExtChange{
 				RepoName: name, Dir: e.Dir, AbsDir: filepath.Join(dir, e.Dir), ID: e.ID, Name: e.Name,
+				ManifestChanged: manifestChanged[e.Dir],
 			})
 		}
 	}

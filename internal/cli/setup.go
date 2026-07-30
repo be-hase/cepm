@@ -82,13 +82,14 @@ func runSetup(cmd *cobra.Command, variants []string, force bool) error {
 		fmt.Fprintf(out, "✔ Native messaging manifest written to %s\n", path)
 	}
 
-	// If a live helper is already connected, push the new helper files into
-	// Chrome by asking it to reload itself.
+	// A running helper keeps its current code until Chrome restarts: the only
+	// self-reload API (chrome.runtime.reload) drops the native messaging port
+	// and Chrome may not restart the helper's service worker afterwards.
 	if helperChanged && installedVersion != "" {
-		ctx, cancel := context.WithTimeout(cmd.Context(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(cmd.Context(), 3*time.Second)
 		defer cancel()
-		if _, err := ipc.Reload(ctx, []string{helperext.ExtensionID()}); err == nil {
-			fmt.Fprintln(out, "✔ Running helper extension reloaded")
+		if _, err := ipc.Ping(ctx); err == nil {
+			fmt.Fprintln(out, "  (the running helper keeps its current version until Chrome restarts)")
 		}
 	}
 

@@ -24,3 +24,14 @@ jobs:
         run: go test ./...
       - name: build
         run: go build ./cmd/cepm
+
+  e2e:
+    # Drives a real Chrome (downloaded Chrome for Testing) end to end.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: e2e
+        run: make e2e

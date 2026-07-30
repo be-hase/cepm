@@ -16,6 +16,7 @@ import (
 	"github.com/be-hase/cepm/internal/launcher"
 	"github.com/be-hase/cepm/internal/nmmanifest"
 	"github.com/be-hase/cepm/internal/paths"
+	"github.com/be-hase/cepm/internal/scan"
 	"github.com/be-hase/cepm/internal/state"
 	"github.com/be-hase/cepm/internal/updater"
 )
@@ -240,7 +241,18 @@ func checkRepos(ctx context.Context, hostReachable bool) []diagnostic {
 			if !hostReachable {
 				continue // cannot tell whether extensions are loaded
 			}
-			_, loaded := chromeStatus[e.ID]
+			ce, loaded := chromeStatus[e.ID]
+			if e.Enabled() && loaded {
+				if onDisk, err := scan.ManifestVersion(filepath.Join(dir, e.Dir)); err == nil &&
+					onDisk != "" && ce.Version != "" && onDisk != ce.Version {
+					diags = append(diags, diagnostic{
+						Name:   "extension " + e.Name,
+						Status: "warn",
+						Detail: fmt.Sprintf("manifest.json on disk is %s but Chrome still runs %s", onDisk, ce.Version),
+						Hint:   "code changes are live; restart Chrome (or click Reload in chrome://extensions) to apply manifest changes",
+					})
+				}
+			}
 			switch {
 			case e.Enabled() && !loaded:
 				diags = append(diags, diagnostic{
