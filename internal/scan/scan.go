@@ -4,12 +4,15 @@ package scan
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
+	"unicode"
 
 	toml "github.com/pelletier/go-toml/v2"
 )
@@ -50,7 +53,20 @@ func LoadRepoConfig(repoDir string) (*RepoConfig, error) {
 	if cfg.Track != "" && cfg.Track != "branch" && cfg.Track != "tag" {
 		return nil, fmt.Errorf(`cepm.toml: track must be "branch" or "tag", got %q`, cfg.Track)
 	}
+	if cfg.TagPattern != "" && !ValidTagPattern(cfg.TagPattern) {
+		return nil, fmt.Errorf("cepm.toml: invalid tag_pattern %q", cfg.TagPattern)
+	}
 	return &cfg, nil
+}
+
+var tagPatternRe = regexp.MustCompile(`^[A-Za-z0-9._*?\[\]{}/@+-]+$`)
+
+// ValidTagPattern reports whether a glob is safe to hand to git. Without this
+// a repository could set tag_pattern to something starting with "-" and have
+// git read it as an option (e.g. --format=...), taking over which revision
+// cepm follows.
+func ValidTagPattern(p string) bool {
+	return !strings.HasPrefix(p, "-") && tagPatternRe.MatchString(p)
 }
 
 // Detect finds extension directories in repoDir. If cepm.toml lists
@@ -69,18 +85,47 @@ func Detect(repoDir string) ([]Extension, error) {
 
 func fromConfig(repoDir string, dirs []string) ([]Extension, error) {
 	var exts []Extension
+	seen := map[string]bool{}
 	for _, dir := range dirs {
 		rel := filepath.Clean(dir)
 		if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
 			return nil, fmt.Errorf("cepm.toml: extension dir %q must be inside the repository", dir)
 		}
-		name, err := manifestName(filepath.Join(repoDir, rel))
+		if seen[rel] {
+			return nil, fmt.Errorf("cepm.toml: extension dir %q is listed twice", dir)
+		}
+		seen[rel] = true
+		abs := filepath.Join(repoDir, rel)
+		// Clean() does not follow symlinks, so re-check the resolved path:
+		// a symlink in the repo could otherwise point the "extension" at any
+		// directory on the machine.
+		if err := ensureInside(repoDir, abs); err != nil {
+			return nil, fmt.Errorf("cepm.toml: extension dir %q: %w", dir, err)
+		}
+		name, err := manifestName(abs)
 		if err != nil {
 			return nil, fmt.Errorf("cepm.toml: extension dir %q: %w", dir, err)
 		}
 		exts = append(exts, Extension{Dir: rel, Name: name})
 	}
 	return exts, nil
+}
+
+// ensureInside verifies that path, with symlinks resolved, stays under root.
+func ensureInside(root, path string) error {
+	realRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return err
+	}
+	realPath, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return err
+	}
+	rel, err := filepath.Rel(realRoot, realPath)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("resolves to %s, which is outside the repository", realPath)
+	}
+	return nil
 }
 
 func walk(repoDir string) ([]Extension, error) {
@@ -98,7 +143,15 @@ func walk(repoDir string) ([]Extension, error) {
 		}
 		name, err := manifestName(path)
 		if err != nil {
-			return nil // not an extension dir; keep walking
+			if errors.Is(err, errBadManifest) {
+				// A manifest.json that exists but does not parse means the
+				// tree is in a bad state (mid-conflict, partial checkout).
+				// Treating it as "not an extension" would unregister a
+				// working extension, so refuse to scan instead.
+				rel, _ := filepath.Rel(repoDir, path)
+				return fmt.Errorf("%s: %w", rel, err)
+			}
+			return nil // no manifest here; keep walking
 		}
 		rel, relErr := filepath.Rel(repoDir, path)
 		if relErr != nil {
@@ -136,9 +189,13 @@ func ManifestVersion(dir string) (string, error) {
 	return m.Version, nil
 }
 
+// errBadManifest marks a manifest.json that exists but cannot be used, as
+// opposed to a directory that simply has none.
+var errBadManifest = errors.New("manifest.json is present but unusable")
+
 // manifestName parses <dir>/manifest.json and returns the extension name.
-// It returns an error when the file is missing or not a valid extension
-// manifest (no manifest_version 2/3, or no name).
+// A missing file yields a plain error; a present-but-broken one wraps
+// errBadManifest so callers can tell the two apart.
 func manifestName(dir string) (string, error) {
 	data, err := os.ReadFile(filepath.Join(dir, "manifest.json"))
 	if err != nil {
@@ -149,18 +206,44 @@ func manifestName(dir string) (string, error) {
 		Name            string `json:"name"`
 	}
 	if err := json.Unmarshal(data, &m); err != nil {
-		return "", fmt.Errorf("manifest.json: %w", err)
+		return "", fmt.Errorf("%w: %v", errBadManifest, err)
 	}
 	if m.ManifestVersion != 2 && m.ManifestVersion != 3 {
+		// Not an extension manifest (some other tool's manifest.json).
 		return "", fmt.Errorf("manifest.json: unsupported manifest_version %d", m.ManifestVersion)
 	}
 	if m.Name == "" {
-		return "", fmt.Errorf("manifest.json: missing name")
+		return "", fmt.Errorf("%w: missing name", errBadManifest)
 	}
 	// i18n placeholder names are resolved from _locales at runtime; fall back
 	// to the directory name for display purposes.
 	if strings.HasPrefix(m.Name, "__MSG_") {
 		return filepath.Base(dir), nil
 	}
-	return m.Name, nil
+	return sanitizeName(m.Name), nil
+}
+
+// sanitizeName strips what a repository must not be able to put on a user's
+// terminal. Names are printed in tables and in the numbered menus people
+// answer, so an embedded newline or escape sequence could forge a row and
+// make someone enable a different extension than the one they read.
+func sanitizeName(name string) string {
+	cleaned := strings.Map(func(r rune) rune {
+		if r == '\t' {
+			return ' '
+		}
+		if unicode.IsControl(r) || r == '‎' || r == '‏' || r == '‮' {
+			return -1
+		}
+		return r
+	}, name)
+	cleaned = strings.TrimSpace(cleaned)
+	// Chrome itself caps the manifest name at 45 characters.
+	if len([]rune(cleaned)) > 45 {
+		cleaned = string([]rune(cleaned)[:45])
+	}
+	if cleaned == "" {
+		return "(unnamed)"
+	}
+	return cleaned
 }

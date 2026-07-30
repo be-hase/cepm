@@ -126,14 +126,19 @@ func reloadExtensions(ctx context.Context, out io.Writer, items []reloadItem) {
 		if name == "" {
 			name = it.ID
 		}
-		switch r := byID[it.ID]; r.Status {
-		case ipc.StatusReloaded:
+		r, answered := byID[it.ID]
+		switch {
+		case !answered:
+			fmt.Fprintf(out, "? %s: no reload result from Chrome; check with cepm doctor\n", name)
+		case r.Status == ipc.StatusReloaded:
 			fmt.Fprintf(out, "↻ reloaded %s\n", name)
 			if it.ManifestChanged {
 				manifestPending = append(manifestPending, name)
 			}
-		case ipc.StatusNotInstalled:
+		case r.Status == ipc.StatusNotInstalled:
 			fmt.Fprintf(out, "  %s is not loaded in Chrome (one-time \"Load unpacked\" still needed)\n", name)
+		case r.Status == ipc.StatusSkippedDisabled:
+			fmt.Fprintf(out, "  %s is turned off in Chrome; left as is\n", name)
 		default:
 			fmt.Fprintf(out, "✘ reload %s failed: %s\n", name, r.Error)
 		}

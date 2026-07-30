@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"text/tabwriter"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -37,18 +39,36 @@ func newDoctorCmd() *cobra.Command {
 		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			diags := runDiagnostics(cmd.Context())
+			failed := 0
+			for _, d := range diags {
+				if d.Status == "fail" {
+					failed++
+				}
+			}
 			if asJSON {
 				enc := json.NewEncoder(cmd.OutOrStdout())
 				enc.SetIndent("", "  ")
-				return enc.Encode(diags)
-			}
-			out := cmd.OutOrStdout()
-			for _, d := range diags {
-				symbol := map[string]string{"ok": "✔", "warn": "⚠", "fail": "✘"}[d.Status]
-				fmt.Fprintf(out, " %s %-22s %s\n", symbol, d.Name, d.Detail)
-				if d.Hint != "" {
-					fmt.Fprintf(out, "   %-22s → %s\n", "", d.Hint)
+				if err := enc.Encode(diags); err != nil {
+					return err
 				}
+			} else {
+				out := cmd.OutOrStdout()
+				w := tabwriter.NewWriter(out, 2, 4, 1, ' ', 0)
+				for _, d := range diags {
+					symbol := map[string]string{"ok": "✔", "warn": "⚠", "fail": "✘"}[d.Status]
+					fmt.Fprintf(w, " %s\t%s\t%s\n", symbol, d.Name, oneLine(d.Detail))
+					if d.Hint != "" {
+						fmt.Fprintf(w, " \t\t→ %s\n", oneLine(d.Hint))
+					}
+				}
+				if err := w.Flush(); err != nil {
+					return err
+				}
+			}
+			// A non-zero status makes doctor usable as a check in scripts,
+			// which is how setup tells people to verify their install.
+			if failed > 0 {
+				return fmt.Errorf("%d check(s) failed", failed)
 			}
 			return nil
 		},
@@ -96,6 +116,12 @@ func runDiagnostics(ctx context.Context) []diagnostic {
 		switch {
 		case info.HelperVersion == "":
 			add("helper ⇄ host", "warn", "helper has not said hello yet", "check chrome://extensions for the cepm helper")
+		case info.LastPong.IsZero():
+			// Keep-alives start one interval after the connection, so this is
+			// normal right after Chrome launches.
+			add("helper ⇄ host", "ok",
+				fmt.Sprintf("helper v%s connected %s ago (no keep-alive exchanged yet)",
+					info.HelperVersion, time.Since(info.StartedAt).Round(time.Second)), "")
 		case time.Since(info.LastPong) > 2*time.Minute:
 			add("helper ⇄ host", "warn",
 				fmt.Sprintf("last keep-alive from helper was %s ago", time.Since(info.LastPong).Round(time.Second)),
@@ -115,6 +141,14 @@ func checkHelperFiles() []diagnostic {
 	helperDir, err := paths.HelperDir()
 	if err != nil {
 		return []diagnostic{{Name: "helper extension", Status: "fail", Detail: err.Error()}}
+	}
+	// The version marker alone is not evidence: check the files it describes.
+	for _, f := range []string{"manifest.json", "background.js"} {
+		if st, err := os.Stat(filepath.Join(helperDir, f)); err != nil || st.Size() == 0 {
+			return []diagnostic{{Name: "helper extension", Status: "fail",
+				Detail: fmt.Sprintf("%s is missing or empty", filepath.Join(helperDir, f)),
+				Hint:   "run: cepm setup --force"}}
+		}
 	}
 	switch v := helperext.InstalledVersion(helperDir); {
 	case v == "":
@@ -173,17 +207,16 @@ func checkNMManifests() []diagnostic {
 		}
 		found = true
 		name := "NM manifest (" + variant + ")"
-		originOK := false
+		// allowed_origins is the authorization boundary for an extension that
+		// can disable any other one, so require it to name exactly the cepm
+		// helper — an extra entry would be someone else's grant.
 		wantOrigin := "chrome-extension://" + helperext.ExtensionID() + "/"
-		for _, o := range m.AllowedOrigins {
-			if o == wantOrigin {
-				originOK = true
-			}
-		}
+		originOK := len(m.AllowedOrigins) == 1 && m.AllowedOrigins[0] == wantOrigin
 		switch {
 		case !originOK:
 			diags = append(diags, diagnostic{Name: name, Status: "fail",
-				Detail: "allowed_origins does not include the helper extension", Hint: "run: cepm setup"})
+				Detail: fmt.Sprintf("allowed_origins should list only the cepm helper, but is %v", m.AllowedOrigins),
+				Hint:   "run: cepm setup"})
 		case m.Path != launcherPath:
 			diags = append(diags, diagnostic{Name: name, Status: "warn",
 				Detail: fmt.Sprintf("points to %s instead of the launcher %s", m.Path, launcherPath),
@@ -237,6 +270,14 @@ func checkRepos(ctx context.Context, hostReachable bool) []diagnostic {
 		}
 		diags = append(diags, repoDiag)
 
+		if !hostReachable && len(r.Extensions) > 0 {
+			// Say so rather than printing nothing, which reads as "all good".
+			diags = append(diags, diagnostic{
+				Name:   "repo " + name + " extensions",
+				Status: "warn",
+				Detail: fmt.Sprintf("cannot check whether %d extension(s) are loaded (host not reachable)", len(r.Extensions)),
+			})
+		}
 		for _, e := range r.Extensions {
 			if !hostReachable {
 				continue // cannot tell whether extensions are loaded
@@ -281,6 +322,12 @@ func checkRepos(ctx context.Context, hostReachable bool) []diagnostic {
 		}
 	}
 	return diags
+}
+
+// oneLine collapses embedded newlines so that a multi-line git error (which
+// is what LastError usually holds) cannot break column alignment.
+func oneLine(s string) string {
+	return strings.Join(strings.Fields(strings.ReplaceAll(s, "\n", " ")), " ")
 }
 
 func executablePath() string {

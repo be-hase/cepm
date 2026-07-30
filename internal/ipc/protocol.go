@@ -15,11 +15,15 @@ const (
 
 // Result statuses (mirroring the helper extension's reports).
 const (
-	StatusReloaded     = "reloaded"
-	StatusNotInstalled = "not_installed"
-	StatusError        = "error"
-	StatusUninstalled  = "uninstalled"
-	StatusCancelled    = "cancelled"
+	StatusReloaded = "reloaded"
+	// StatusSkippedDisabled: the user turned the extension off in Chrome, so
+	// the helper leaves it that way instead of re-enabling it on every update.
+	StatusSkippedDisabled = "skipped_disabled"
+	StatusSkippedSelf     = "skipped_self"
+	StatusNotInstalled    = "not_installed"
+	StatusError           = "error"
+	StatusUninstalled     = "uninstalled"
+	StatusCancelled       = "cancelled"
 )
 
 type Request struct {

@@ -69,6 +69,9 @@ func Execute() error {
 	// this binary directly (a pre-launcher manifest): the extension origin
 	// arrives as argv[1].
 	if len(os.Args) > 1 && strings.HasPrefix(os.Args[1], "chrome-extension://") {
+		if err := nmhost.CheckOrigin(os.Args[1]); err != nil {
+			return err
+		}
 		return nmhost.Run(context.Background(), Version)
 	}
 	return newRootCmd().Execute()

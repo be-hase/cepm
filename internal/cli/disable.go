@@ -26,21 +26,39 @@ remove it from Chrome too (Chrome shows its own confirmation dialog).`,
 		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			repoName, dir := parseExtRef(args[0])
+			// Choose before locking; see the note in cepm enable.
+			st, err := state.Load()
+			if err != nil {
+				return err
+			}
+			r, ok := st.Repos[repoName]
+			if !ok {
+				return fmt.Errorf("repository %q is not registered (see cepm list)", repoName)
+			}
+			picked, err := pickExtensions(cmd, r, dir, true)
+			if err != nil {
+				return err
+			}
+			dirs := make([]string, len(picked))
+			for i, e := range picked {
+				dirs[i] = e.Dir
+			}
+
 			var disabled []state.Extension
-			err := updater.WithLock(cmd.Context(), func() error {
+			err = updater.WithLock(cmd.Context(), func() error {
 				st, err := state.Load()
 				if err != nil {
 					return err
 				}
 				r, ok := st.Repos[repoName]
 				if !ok {
-					return fmt.Errorf("repository %q is not registered (see cepm list)", repoName)
+					return fmt.Errorf("repository %q is no longer registered", repoName)
 				}
-				picked, err := pickExtensions(cmd, r, dir, true)
-				if err != nil {
-					return err
-				}
-				for _, e := range picked {
+				for _, d := range dirs {
+					e := r.FindExtension(d)
+					if e == nil {
+						return fmt.Errorf("extension %q is no longer part of %s", d, repoName)
+					}
 					e.Disabled = true
 					disabled = append(disabled, *e)
 				}

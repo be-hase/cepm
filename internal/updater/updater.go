@@ -168,17 +168,22 @@ func updateRepo(ctx context.Context, name string, r *state.Repo, opts Options) R
 		return res
 	}
 
+	stashed := false
 	if dirty {
-		if err := repo.StashPush(ctx); err != nil {
+		if stashed, err = repo.StashPush(ctx); err != nil {
 			res.Err = fmt.Errorf("stash: %w", err)
 			return res
 		}
 	}
 	moveErr := moveToLatest(ctx, repo, r, &res)
-	if dirty {
+	if stashed {
 		if err := repo.StashPop(ctx); err != nil {
-			res.Warnings = append(res.Warnings,
-				fmt.Sprintf("stash pop failed, your changes are kept in the stash (git -C %s stash pop): %v", dir, err))
+			// The tree now holds conflict markers, so re-scanning it would
+			// misread manifests and unregister extensions. Stop here and let
+			// the user resolve it.
+			res.Err = fmt.Errorf("restoring your local changes failed; resolve the conflict in %s "+
+				"(your changes are still in the stash: git -C %s stash pop): %w", dir, dir, err)
+			return res
 		}
 	}
 	if moveErr != nil {
@@ -362,6 +367,12 @@ func refreshExtensions(name string, r *state.Repo, dir string, res *RepoResult, 
 		r.AddStale(state.StaleExtension{ID: e.ID, Name: e.Name, Reason: "removed"})
 	}
 	r.Extensions = newList
+	// Extension IDs are derived from paths, so reverting a deletion or a
+	// rename brings the old ID back to life. Clearing those keeps "cepm
+	// cleanup" from uninstalling an extension that works again.
+	for _, e := range newList {
+		r.RemoveStale(e.ID)
+	}
 
 	if len(changedFiles) == 0 {
 		return

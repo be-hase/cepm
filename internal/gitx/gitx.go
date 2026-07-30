@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os/exec"
+	"regexp"
 	"strings"
 )
 
@@ -17,12 +18,24 @@ type Repo struct {
 	Dir string
 }
 
+// credentialsRe matches the "user:password@" part of a URL.
+var credentialsRe = regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.-]*://)[^/\s@]*:[^/\s@]*@`)
+
+// RedactURL removes embedded credentials from any URL in s, so tokens do not
+// reach the terminal, the logs, or a pasted bug report.
+func RedactURL(s string) string {
+	return credentialsRe.ReplaceAllString(s, "${1}***@")
+}
+
 func run(ctx context.Context, dir string, args ...string) (string, error) {
-	cmdArgs := args
+	// core.quotePath would C-escape any path containing non-ASCII bytes
+	// ("ext/\343\202\242..."), which no caller un-escapes, silently breaking
+	// change attribution for such extensions.
+	cmdArgs := append([]string{"-c", "core.quotePath=false"}, args...)
 	if dir != "" {
-		cmdArgs = append([]string{"-C", dir}, args...)
+		cmdArgs = append([]string{"-C", dir}, cmdArgs...)
 	}
-	slog.Debug("git", "args", strings.Join(args, " "), "dir", dir)
+	slog.Debug("git", "args", RedactURL(strings.Join(args, " ")), "dir", dir)
 	cmd := exec.CommandContext(ctx, "git", cmdArgs...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -32,7 +45,9 @@ func run(ctx context.Context, dir string, args ...string) (string, error) {
 		if msg == "" {
 			msg = err.Error()
 		}
-		return "", fmt.Errorf("git %s: %s", strings.Join(args, " "), msg)
+		// Redact: args and git's own output can contain a URL with embedded
+		// credentials, and this text is shown, logged, and pasted into chats.
+		return "", fmt.Errorf("git %s: %s", RedactURL(strings.Join(args, " ")), RedactURL(msg))
 	}
 	return strings.TrimSpace(stdout.String()), nil
 }
@@ -80,8 +95,13 @@ func (r Repo) IsDirty(ctx context.Context) (bool, error) {
 }
 
 // Fetch fetches the remote, including tags and pruning deleted refs.
+//
+// --force and --prune-tags matter for repositories that move release tags:
+// without them a re-pushed tag makes fetch exit non-zero forever ("would
+// clobber existing tag"), which would block every later update of that repo,
+// and a tag deleted upstream would linger and keep being followed.
 func (r Repo) Fetch(ctx context.Context) error {
-	_, err := run(ctx, r.Dir, "fetch", "--tags", "--prune", "origin")
+	_, err := run(ctx, r.Dir, "fetch", "--tags", "--prune", "--prune-tags", "--force", "origin")
 	return err
 }
 
@@ -93,9 +113,10 @@ func (r Repo) MergeFFOnly(ctx context.Context, ref string) error {
 }
 
 // TagsByCreation returns tags matching the glob pattern, most recently
-// created first.
+// created first. The pattern comes from the repository, so it is passed
+// after "--" and callers validate it (see scan.ValidTagPattern).
 func (r Repo) TagsByCreation(ctx context.Context, pattern string) ([]string, error) {
-	out, err := run(ctx, r.Dir, "tag", "--list", pattern, "--sort=-creatordate")
+	out, err := run(ctx, r.Dir, "tag", "--sort=-creatordate", "--list", "--", pattern)
 	if err != nil {
 		return nil, err
 	}
@@ -129,10 +150,35 @@ func (r Repo) ChangedFiles(ctx context.Context, from, to string) ([]string, erro
 	return strings.Split(out, "\n"), nil
 }
 
-// StashPush stashes local changes including untracked files.
-func (r Repo) StashPush(ctx context.Context) error {
-	_, err := run(ctx, r.Dir, "stash", "push", "--include-untracked", "--message", "cepm auto-stash")
-	return err
+// StashPush stashes local changes including untracked files. It reports
+// whether an entry was actually created: "git status --porcelain" considers
+// e.g. a dirty submodule a change, but stash refuses to save it ("No local
+// changes to save") and still exits 0. Popping in that case would drop an
+// unrelated stash entry belonging to the user.
+func (r Repo) StashPush(ctx context.Context) (stashed bool, err error) {
+	before, err := r.stashTop(ctx)
+	if err != nil {
+		return false, err
+	}
+	if _, err := run(ctx, r.Dir, "stash", "push", "--include-untracked", "--message", "cepm auto-stash"); err != nil {
+		return false, err
+	}
+	after, err := r.stashTop(ctx)
+	if err != nil {
+		return false, err
+	}
+	return after != "" && after != before, nil
+}
+
+// stashTop returns the commit id of refs/stash, or "" when there is none.
+func (r Repo) stashTop(ctx context.Context) (string, error) {
+	out, err := run(ctx, r.Dir, "rev-parse", "-q", "--verify", "refs/stash")
+	if err != nil {
+		// No stash exists: rev-parse --verify exits non-zero, which is not a
+		// failure for us.
+		return "", nil
+	}
+	return out, nil
 }
 
 // StashPop restores the most recent stash. On conflict the stash entry is

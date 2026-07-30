@@ -65,6 +65,7 @@ type listResultMsg struct {
 	Type       string          `json:"type"`
 	RequestID  string          `json:"requestId"`
 	Extensions []ipc.ChromeExt `json:"extensions"`
+	Error      string          `json:"error,omitempty"`
 }
 
 type uninstallReq struct {

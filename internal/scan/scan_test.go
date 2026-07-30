@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -32,7 +34,6 @@ func TestDetectWalk(t *testing.T) {
 	writeManifest(t, filepath.Join(repo, ".hidden", "ext"), "Hidden")
 	writeManifest(t, filepath.Join(repo, "ext-b", "nested"), "Nested inside ext")
 	writeFile(t, filepath.Join(repo, "docs", "manifest.json"), `{"name": "not an extension"}`)
-	writeFile(t, filepath.Join(repo, "broken", "manifest.json"), `{invalid json`)
 
 	got, err := Detect(repo)
 	if err != nil {
@@ -44,6 +45,27 @@ func TestDetectWalk(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("Detect = %+v, want %+v", got, want)
+	}
+}
+
+// A manifest.json that exists but does not parse means the tree is in a bad
+// state (a conflicted stash pop, a partial checkout). Silently treating it as
+// "not an extension" would unregister a working extension and let cleanup
+// uninstall it from Chrome, so scanning must fail loudly instead.
+func TestDetectFailsOnBrokenManifest(t *testing.T) {
+	repo := t.TempDir()
+	writeManifest(t, filepath.Join(repo, "good"), "Good")
+	writeFile(t, filepath.Join(repo, "broken", "manifest.json"), `{invalid json`)
+
+	if _, err := Detect(repo); err == nil {
+		t.Fatal("Detect should fail when a manifest.json cannot be parsed")
+	}
+
+	// A conflicted merge leaves markers in the file; same requirement.
+	writeFile(t, filepath.Join(repo, "broken", "manifest.json"),
+		"<<<<<<< Updated upstream\n{\"manifest_version\":3,\"name\":\"A\"}\n=======\n{}\n>>>>>>> Stashed changes\n")
+	if _, err := Detect(repo); err == nil {
+		t.Fatal("Detect should fail on a conflicted manifest.json")
 	}
 }
 
@@ -114,6 +136,78 @@ func TestDetectConfigEscapingPath(t *testing.T) {
 	writeFile(t, filepath.Join(repo, "cepm.toml"), `extensions = ["../outside"]`)
 	if _, err := Detect(repo); err == nil {
 		t.Error("expected error for extension dir outside the repo")
+	}
+}
+
+// A repository controls its manifest, and cepm prints the name into tables
+// and into the numbered menu people answer. Control characters would let a
+// repo forge a row and misdirect which extension someone enables.
+func TestDetectSanitizesNames(t *testing.T) {
+	repo := t.TempDir()
+	writeFile(t, filepath.Join(repo, "evil", "manifest.json"),
+		"{\"manifest_version\":3,\"version\":\"1.0\",\"name\":\"Innocent\\u001b[2K\\rHACKED\\nBogus\\tzzz\"}")
+
+	got, err := Detect(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("unexpected result: %+v", got)
+	}
+	for _, r := range got[0].Name {
+		if r == '\n' || r == '\r' || r == 0x1b {
+			t.Fatalf("name still contains control characters: %q", got[0].Name)
+		}
+	}
+
+	writeFile(t, filepath.Join(repo, "evil", "manifest.json"),
+		`{"manifest_version":3,"version":"1.0","name":"`+strings.Repeat("x", 200)+`"}`)
+	got, err = Detect(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len([]rune(got[0].Name)) > 45 {
+		t.Errorf("name should be capped at Chrome's 45 characters, got %d", len([]rune(got[0].Name)))
+	}
+}
+
+func TestDetectRejectsEscapingConfig(t *testing.T) {
+	// Absolute paths and multi-level traversal, not just "..".
+	for _, dir := range []string{"/etc", "a/../../..", "../outside"} {
+		repo := t.TempDir()
+		writeFile(t, filepath.Join(repo, "cepm.toml"), `extensions = ["`+dir+`"]`)
+		if _, err := Detect(repo); err == nil {
+			t.Errorf("Detect should reject extension dir %q", dir)
+		}
+	}
+
+	// A symlink escapes filepath.Clean, so the resolved path must be checked.
+	outside := t.TempDir()
+	writeManifest(t, outside, "Outside")
+	repo := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(repo, "link")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	writeFile(t, filepath.Join(repo, "cepm.toml"), `extensions = ["link"]`)
+	if _, err := Detect(repo); err == nil {
+		t.Error("Detect should reject an extension dir that resolves outside the repo")
+	}
+}
+
+// tag_pattern reaches "git tag"; a value starting with "-" would be read as
+// an option and let the repo dictate which revision cepm follows.
+func TestLoadRepoConfigRejectsOptionLikeTagPattern(t *testing.T) {
+	for _, p := range []string{"--format=%(refname)", "-v", "v*; rm -rf /", "v*\n--sort=x"} {
+		repo := t.TempDir()
+		writeFile(t, filepath.Join(repo, "cepm.toml"), "tag_pattern = "+strconv.Quote(p))
+		if _, err := LoadRepoConfig(repo); err == nil {
+			t.Errorf("tag_pattern %q should be rejected", p)
+		}
+	}
+	repo := t.TempDir()
+	writeFile(t, filepath.Join(repo, "cepm.toml"), `tag_pattern = "release-v*"`)
+	if _, err := LoadRepoConfig(repo); err != nil {
+		t.Errorf("a normal glob should be accepted: %v", err)
 	}
 }
 

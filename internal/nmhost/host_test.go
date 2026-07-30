@@ -11,6 +11,7 @@ import (
 
 	"github.com/be-hase/cepm/internal/helperext"
 	"github.com/be-hase/cepm/internal/ipc"
+	"github.com/be-hase/cepm/internal/state"
 )
 
 // fakeHelper emulates the helper extension's side of the native messaging
@@ -88,6 +89,19 @@ func TestHostEndToEnd(t *testing.T) {
 	t.Cleanup(func() { os.RemoveAll(dir) })
 	t.Setenv("CEPM_HOME", dir)
 
+	// The host only acts on extensions cepm manages, so register them.
+	st := state.New()
+	st.Repos["testrepo"] = &state.Repo{
+		URL: "git@example.com:t/r.git", Track: state.TrackBranch, Branch: "main",
+		Extensions: []state.Extension{
+			{Dir: "a", Name: "A", ID: "aaaa"},
+			{Dir: "b", Name: "B", ID: "bbbb"},
+		},
+	}
+	if err := st.Save(); err != nil {
+		t.Fatal(err)
+	}
+
 	// chromeOut: host's "stdin" written by the fake helper.
 	// chromeIn: host's "stdout" read by the fake helper.
 	helperToHostR, helperToHostW := io.Pipe()
@@ -137,6 +151,16 @@ func TestHostEndToEnd(t *testing.T) {
 		t.Errorf("uninstall status = %q, want %q", status, ipc.StatusUninstalled)
 	}
 
+	// The helper can disable or remove *any* installed extension, so the host
+	// must refuse ids cepm does not manage — the socket is reachable by any
+	// process running as this user.
+	if _, err := ipc.Reload(ctx, []string{"unmanagedunmanagedunmanagedunma"}); err == nil {
+		t.Error("reload of an unmanaged extension should be refused")
+	}
+	if _, err := ipc.Uninstall(ctx, "unmanagedunmanagedunmanagedunma"); err == nil {
+		t.Error("uninstall of an unmanaged extension should be refused")
+	}
+
 	// Closing the "stdin" pipe simulates Chrome quitting: the host must exit
 	// cleanly and release the socket.
 	helperToHostW.Close()
@@ -148,6 +172,50 @@ func TestHostEndToEnd(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("host did not exit after stdin EOF")
 	}
+}
+
+// Updates pulled while Chrome was closed are on disk but Chrome may still run
+// the code it cached, so the host reloads managed extensions once on connect.
+// Without this assertion the whole catch-up path could be deleted and every
+// other unit test would still pass.
+func TestHostCatchUpReloadsEnabledExtensionsOnly(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "cepm-host")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	t.Setenv("CEPM_HOME", dir)
+
+	st := state.New()
+	st.Repos["testrepo"] = &state.Repo{
+		URL: "git@example.com:t/r.git", Track: state.TrackBranch, Branch: "main",
+		Extensions: []state.Extension{
+			{Dir: "on", Name: "On", ID: "aaaa"},
+			{Dir: "off", Name: "Off", ID: "bbbb", Disabled: true},
+		},
+	}
+	if err := st.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	helperToHostR, helperToHostW := io.Pipe()
+	hostToHelperR, hostToHelperW := io.Pipe()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go func() { _ = RunIO(ctx, "test", helperToHostR, hostToHelperW) }()
+	helper := &fakeHelper{t: t, toHost: helperToHostW, from: hostToHelperR,
+		reloads: make(chan []string, 4)}
+	go helper.run()
+
+	select {
+	case ids := <-helper.reloads:
+		if len(ids) != 1 || ids[0] != "aaaa" {
+			t.Errorf("catch-up should reload only enabled extensions, got %v", ids)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("host never performed the catch-up reload")
+	}
+	helperToHostW.Close()
 }
 
 // After a cepm upgrade the host binary carries newer helper files than the

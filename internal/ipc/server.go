@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net"
 	"os"
+	"sync"
 	"time"
 )
 
@@ -24,21 +25,42 @@ func Listen(sock string) (net.Listener, error) {
 	return net.Listen("unix", sock)
 }
 
-// Serve accepts connections until the listener closes or ctx is canceled.
+// Serve accepts connections until the listener closes or ctx is canceled,
+// then waits for in-flight requests so a reply is not cut off mid-write.
 func Serve(ctx context.Context, l net.Listener, h Handler) {
 	go func() {
 		<-ctx.Done()
 		l.Close()
 	}()
+	var wg sync.WaitGroup
+	defer wg.Wait()
+	var backoff time.Duration
 	for {
 		conn, err := l.Accept()
 		if err != nil {
 			if errors.Is(err, net.ErrClosed) || ctx.Err() != nil {
 				return
 			}
+			// A persistent error (fd exhaustion) would otherwise spin this
+			// loop at full speed for the life of the process.
+			if backoff == 0 {
+				backoff = 5 * time.Millisecond
+			} else if backoff < time.Second {
+				backoff *= 2
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(backoff):
+			}
 			continue
 		}
-		go serveConn(ctx, conn, h)
+		backoff = 0
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			serveConn(ctx, conn, h)
+		}()
 	}
 }
 

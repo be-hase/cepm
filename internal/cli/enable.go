@@ -33,25 +33,45 @@ one candidate exists).`,
 		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			repoName, dir := parseExtRef(args[0])
+			// Choose before locking: prompting with the update lock held
+			// would stall the background updater for as long as the user
+			// takes to answer.
+			st, err := state.Load()
+			if err != nil {
+				return err
+			}
+			r, ok := st.Repos[repoName]
+			if !ok {
+				return fmt.Errorf("repository %q is not registered (see cepm list)", repoName)
+			}
+			picked, err := pickExtensions(cmd, r, dir, false)
+			if err != nil {
+				return err
+			}
+			dirs := make([]string, len(picked))
+			for i, e := range picked {
+				dirs[i] = e.Dir
+			}
+
 			var targets []loadTarget
-			err := updater.WithLock(cmd.Context(), func() error {
-				st, err := state.Load()
+			err = updater.WithLock(cmd.Context(), func() error {
+				st, err := state.Load() // re-read: it may have changed while we prompted
 				if err != nil {
 					return err
 				}
 				r, ok := st.Repos[repoName]
 				if !ok {
-					return fmt.Errorf("repository %q is not registered (see cepm list)", repoName)
+					return fmt.Errorf("repository %q is no longer registered", repoName)
 				}
 				repoDir, err := updater.RepoDir(repoName)
 				if err != nil {
 					return err
 				}
-				picked, err := pickExtensions(cmd, r, dir, false)
-				if err != nil {
-					return err
-				}
-				for _, e := range picked {
+				for _, d := range dirs {
+					e := r.FindExtension(d)
+					if e == nil {
+						return fmt.Errorf("extension %q is no longer part of %s", d, repoName)
+					}
 					e.Disabled = false
 					targets = append(targets, loadTarget{
 						Name: e.Name, AbsDir: filepath.Join(repoDir, e.Dir), ID: e.ID,

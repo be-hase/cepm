@@ -74,15 +74,45 @@ func Install(dir string) error {
 	if err != nil {
 		return err
 	}
-	files := map[string][]byte{
-		"manifest.json": []byte(manifest.String()),
-		"background.js": bg,
-		versionMarker:   []byte(Version + "\n"),
+	// Order matters: the version marker is what everything else uses to
+	// decide whether the helper is up to date, so it must be written last
+	// and only after the files it describes are in place. (A map would give
+	// Go's randomized iteration order and could leave the marker claiming a
+	// version whose files failed to write.)
+	files := []struct {
+		name    string
+		content []byte
+	}{
+		{"manifest.json", []byte(manifest.String())},
+		{"background.js", bg},
+		{versionMarker, []byte(Version + "\n")},
 	}
-	for name, content := range files {
-		if err := os.WriteFile(filepath.Join(dir, name), content, 0o644); err != nil {
-			return fmt.Errorf("write %s: %w", name, err)
+	for _, f := range files {
+		if err := writeAtomic(filepath.Join(dir, f.name), f.content); err != nil {
+			return fmt.Errorf("write %s: %w", f.name, err)
 		}
 	}
 	return nil
+}
+
+// writeAtomic replaces path in one step, so Chrome never observes a
+// half-written manifest or worker script.
+func writeAtomic(path string, content []byte) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".cepm-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.Write(content); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(0o644); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), path)
 }

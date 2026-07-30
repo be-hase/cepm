@@ -2,6 +2,7 @@ package launcher
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -67,6 +68,65 @@ func TestInstallAddsShimFallback(t *testing.T) {
 	data, _ := os.ReadFile(path)
 	if !strings.Contains(string(data), shim) {
 		t.Errorf("launcher should fall back to the mise shim:\n%s", data)
+	}
+}
+
+// The launcher is a shell script that Chrome executes, so the recorded path
+// must survive as data — never as something the shell evaluates.
+func TestInstallQuotesHostilePaths(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "pwned")
+	hostile := []string{
+		"/tmp/a b/cepm",
+		"/tmp/a$(touch " + marker + ")/cepm",
+		"/tmp/a`touch " + marker + "`/cepm",
+		`/tmp/it's/cepm`,
+		`/tmp/a"b/cepm`,
+		"/tmp/a${HOME}/cepm",
+	}
+	for _, p := range hostile {
+		t.Setenv("CEPM_HOME", t.TempDir())
+		t.Setenv("HOME", t.TempDir())
+		if err := Install(p); err != nil {
+			t.Fatalf("Install(%q): %v", p, err)
+		}
+		got, err := RecordedPath()
+		if err != nil {
+			t.Fatalf("RecordedPath after Install(%q): %v", p, err)
+		}
+		if got != p {
+			t.Errorf("round trip changed the path: got %q, want %q", got, p)
+		}
+
+		// Ask a real shell what the script resolves $CEPM to. The final exec
+		// line is dropped so the shell only performs the assignments.
+		launcherPath, err := paths.LauncherPath()
+		if err != nil {
+			t.Fatal(err)
+		}
+		script, err := os.ReadFile(launcherPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var assignments []string
+		for _, line := range strings.Split(string(script), "\n") {
+			if !strings.HasPrefix(line, "exec ") {
+				assignments = append(assignments, line)
+			}
+		}
+		probe := filepath.Join(t.TempDir(), "probe.sh")
+		if err := os.WriteFile(probe, []byte(strings.Join(assignments, "\n")), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		out, err := exec.Command("sh", "-c", ". "+shellQuote(probe)+`; printf %s "$CEPM"`).Output()
+		if err != nil {
+			t.Fatalf("sourcing the launcher for %q: %v", p, err)
+		}
+		if string(out) != p {
+			t.Errorf("shell resolved CEPM to %q, want %q", out, p)
+		}
+		if _, err := os.Stat(marker); err == nil {
+			t.Fatalf("path %q caused command execution (created %s)", p, marker)
+		}
 	}
 }
 

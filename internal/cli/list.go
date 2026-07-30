@@ -10,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/be-hase/cepm/internal/gitx"
 	"github.com/be-hase/cepm/internal/ipc"
 	"github.com/be-hase/cepm/internal/state"
 	"github.com/be-hase/cepm/internal/updater"
@@ -99,11 +100,18 @@ func printListTable(cmd *cobra.Command, st *state.State, chromeStatus map[string
 		for _, s := range r.Stale {
 			fmt.Fprintf(w, "%s\t\t%s\t%s\t(%s)\tstale — run: cepm cleanup\n", name, s.Name, s.ID, s.Reason)
 		}
-		if r.LastError != "" {
-			fmt.Fprintf(w, "%s\t\t⚠ last update failed: %s\t\t\t\n", name, r.LastError)
+	}
+	if err := w.Flush(); err != nil {
+		return err
+	}
+	// Errors go below the table: they are multi-line git output, which would
+	// otherwise split rows and destroy the column alignment.
+	for _, name := range st.RepoNames() {
+		if e := st.Repos[name].LastError; e != "" {
+			fmt.Fprintf(cmd.OutOrStdout(), "\n⚠ %s: last update failed: %s\n", name, oneLine(e))
 		}
 	}
-	return w.Flush()
+	return nil
 }
 
 func printListJSON(cmd *cobra.Command, st *state.State, chromeStatus map[string]ipc.ChromeExt) error {
@@ -135,7 +143,7 @@ func printListJSON(cmd *cobra.Command, st *state.State, chromeStatus map[string]
 		Extensions []extOut   `json:"extensions"`
 		Stale      []staleOut `json:"stale,omitempty"`
 	}
-	var repos []repoOut
+	repos := []repoOut{} // never null: scripts iterate this
 	for _, name := range st.RepoNames() {
 		r := st.Repos[name]
 		dir, err := updater.RepoDir(name)
@@ -143,9 +151,10 @@ func printListJSON(cmd *cobra.Command, st *state.State, chromeStatus map[string]
 			return err
 		}
 		ro := repoOut{
-			Name: name, URL: r.URL, Track: r.Track, Branch: r.Branch,
+			Name: name, URL: gitx.RedactURL(r.URL), Track: r.Track, Branch: r.Branch,
 			Tag: r.Tag, TagPattern: r.TagPattern, Prerelease: r.Prerelease, Head: r.Head,
 			LastPull: r.LastPull, LastError: r.LastError,
+			Extensions: []extOut{},
 		}
 		for _, e := range r.Extensions {
 			ro.Extensions = append(ro.Extensions, extOut{

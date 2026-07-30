@@ -67,10 +67,13 @@ async function handleUninstall(msg) {
       showConfirmDialog: true,
     });
   } catch (e) {
+    // Chrome reports these as free-text messages ("Failed to find extension
+    // with id ...", "Extension ... uninstall canceled by user."), so match
+    // generously and treat anything unrecognised as a real error.
     const detail = String((e && e.message) || e);
     if (/cancel/i.test(detail)) {
       status = "cancelled";
-    } else if (/not (found|installed)/i.test(detail)) {
+    } else if (/failed to find|no such|not (found|installed)/i.test(detail)) {
       status = "not_installed";
     } else {
       status = "error";
@@ -81,42 +84,65 @@ async function handleUninstall(msg) {
 }
 
 async function handleReload(msg) {
-  const results = [];
-  let reloadSelf = false;
-  for (const id of msg.extensionIds || []) {
-    if (id === chrome.runtime.id) {
-      // We cannot setEnabled ourselves; use runtime.reload after replying.
-      reloadSelf = true;
-      results.push({ id, status: "reloaded" });
-      continue;
-    }
-    results.push(await reloadOne(id));
-  }
+  const ids = msg.extensionIds || [];
+  // Reload concurrently: the host's reply timeout does not grow with the
+  // number of managed extensions.
+  const results = await Promise.all(ids.map((id) => reloadOne(id)));
   post({ type: "reloadResult", requestId: msg.requestId, results });
-  if (reloadSelf) {
-    setTimeout(() => chrome.runtime.reload(), 200);
-  }
 }
 
 async function reloadOne(id) {
+  if (id === chrome.runtime.id) {
+    // Reloading ourselves would tear down the native messaging port, and
+    // Chrome does not reliably restart this worker afterwards.
+    return { id, status: "skipped_self" };
+  }
+  let info;
   try {
-    await chrome.management.get(id);
+    info = await chrome.management.get(id);
   } catch (e) {
     return { id, status: "not_installed" };
+  }
+  if (info.installType !== "development") {
+    // cepm only ever manages unpacked extensions; refuse to touch anything
+    // the user installed from the Web Store.
+    return { id, status: "skipped_not_unpacked" };
+  }
+  if (!info.enabled) {
+    // The user turned it off in chrome://extensions; re-enabling it here
+    // would override that on every update.
+    return { id, status: "skipped_disabled" };
   }
   try {
     // Disabling and re-enabling an unpacked extension makes Chrome re-read
     // its files from disk.
     await chrome.management.setEnabled(id, false);
+  } catch (e) {
+    return { id, status: "error", error: String((e && e.message) || e) };
+  }
+  try {
     await chrome.management.setEnabled(id, true);
     return { id, status: "reloaded" };
   } catch (e) {
-    return { id, status: "error", error: String((e && e.message) || e) };
+    // Never leave an extension disabled because of us: a broken manifest in
+    // a pulled commit can make re-enabling fail.
+    const detail = String((e && e.message) || e);
+    try {
+      await chrome.management.setEnabled(id, true);
+      return { id, status: "reloaded" };
+    } catch (e2) {
+      return {
+        id,
+        status: "error",
+        error: detail + " — the extension is now DISABLED in Chrome",
+      };
+    }
   }
 }
 
 async function handleList(msg) {
   let extensions = [];
+  let error = "";
   try {
     const all = await chrome.management.getAll();
     extensions = all
@@ -128,9 +154,11 @@ async function handleList(msg) {
         enabled: e.enabled,
       }));
   } catch (e) {
-    // Fall through with an empty list; the host reports it upstream.
+    // Report the failure: "no extensions" and "could not look" lead to very
+    // different decisions upstream (cleanup would drop its records).
+    error = String((e && e.message) || e);
   }
-  post({ type: "listResult", requestId: msg.requestId, extensions });
+  post({ type: "listResult", requestId: msg.requestId, extensions, error });
 }
 
 chrome.runtime.onStartup.addListener(connect);

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"time"
 
@@ -105,7 +106,7 @@ type State struct {
 }
 
 func New() *State {
-	return &State{Version: 1, Repos: map[string]*Repo{}}
+	return &State{Version: Version, Repos: map[string]*Repo{}}
 }
 
 // RepoNames returns registered repo names, sorted.
@@ -135,10 +136,36 @@ func Load() (*State, error) {
 	if err := json.Unmarshal(data, &s); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
+	if s.Version > Version {
+		return nil, fmt.Errorf("%s was written by a newer cepm (state version %d); upgrade cepm", path, s.Version)
+	}
 	if s.Repos == nil {
 		s.Repos = map[string]*Repo{}
 	}
+	// Validate rather than trust: a null entry would panic every caller that
+	// dereferences it — including the native host, whose crash loop leaves no
+	// diagnosis behind — and a name with path separators would let uninstall
+	// delete an arbitrary directory.
+	for name, r := range s.Repos {
+		if r == nil {
+			return nil, fmt.Errorf("%s: repository %q has no data (edit or delete the file)", path, name)
+		}
+		if !ValidRepoName(name) {
+			return nil, fmt.Errorf("%s: invalid repository name %q", path, name)
+		}
+	}
 	return &s, nil
+}
+
+// Version is the state schema version this build writes and understands.
+const Version = 1
+
+var repoNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+
+// ValidRepoName reports whether name is safe to use as a directory under
+// ~/.cepm/repos (no separators, no traversal).
+func ValidRepoName(name string) bool {
+	return name != "." && name != ".." && repoNameRe.MatchString(name)
 }
 
 // Save writes state.json atomically.

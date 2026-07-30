@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"strings"
+
 	"github.com/spf13/cobra"
 
 	"github.com/be-hase/cepm/internal/nmhost"
@@ -13,6 +15,13 @@ func newNativeHostCmd() *cobra.Command {
 		Hidden: true,
 		Args:   cobra.ArbitraryArgs, // Chrome passes the extension origin
 		RunE: func(cmd *cobra.Command, args []string) error {
+			for _, a := range args {
+				if strings.HasPrefix(a, "chrome-extension://") {
+					if err := nmhost.CheckOrigin(a); err != nil {
+						return err
+					}
+				}
+			}
 			return nmhost.Run(cmd.Context(), Version)
 		},
 	}

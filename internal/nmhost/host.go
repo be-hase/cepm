@@ -3,11 +3,14 @@ package nmhost
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"math/rand/v2"
+	"net"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -22,8 +25,14 @@ import (
 )
 
 const (
-	pingInterval   = 25 * time.Second // keeps the helper's service worker alive
-	requestTimeout = 10 * time.Second
+	pingInterval = 25 * time.Second // keeps the helper's service worker alive
+	// requestTimeout is the budget for a request with no per-item work;
+	// reloads add perExtensionTimeout for each extension so that a large
+	// installation does not time out while the helper is still working.
+	requestTimeout      = 10 * time.Second
+	perExtensionTimeout = 3 * time.Second
+	sendTimeout         = 5 * time.Second
+	shutdownGrace       = 5 * time.Second
 	// uninstallTimeout is long because the helper waits for the user to
 	// answer Chrome's confirmation dialog.
 	uninstallTimeout = 2 * time.Minute
@@ -52,6 +61,18 @@ type Host struct {
 	lastPong        atomic.Int64 // unix nano
 	helperRefreshed atomic.Bool  // helper file refresh attempted (once per process)
 	caughtUp        atomic.Bool  // startup catch-up reload done (once per process)
+}
+
+// CheckOrigin verifies the caller identified itself as the cepm helper.
+// Chrome enforces allowed_origins itself, so this guards the case where the
+// manifest was tampered with or the binary was started by something else.
+func CheckOrigin(origin string) error {
+	want := "chrome-extension://" + helperext.ExtensionID() + "/"
+	if strings.TrimSuffix(origin, "/")+"/" != want {
+		return fmt.Errorf("refusing to serve unknown extension %q (expected the cepm helper %s)",
+			origin, helperext.ExtensionID())
+	}
+	return nil
 }
 
 // Run drives a host process until Chrome closes the port (stdin EOF).
@@ -122,7 +143,9 @@ func RunIO(ctx context.Context, version string, in io.Reader, outW io.Writer) er
 				return
 			case <-t.C:
 				seq++
-				h.send(pingMsg{Type: typePing, Seq: seq})
+				if err := h.send(ctx, pingMsg{Type: typePing, Seq: seq}); err != nil && ctx.Err() == nil {
+					h.log.Warn("keep-alive ping not sent", "err", err)
+				}
 			}
 		}
 	}()
@@ -132,12 +155,29 @@ func RunIO(ctx context.Context, version string, in io.Reader, outW io.Writer) er
 		h.runLeaderDuties(ctx)
 	}()
 
-	// Reader loop on the main goroutine; EOF means Chrome is gone.
-	err = h.readLoop(ctx)
-	cancel()
-	wg.Wait()
+	// The reader blocks in a read that cannot be canceled, so it runs on its
+	// own goroutine: if the writer dies (Chrome closed stdout) we must exit
+	// rather than linger as a process that holds nothing and answers nothing.
+	readErr := make(chan error, 1)
+	go func() { readErr <- h.readLoop(ctx) }()
+
+	select {
+	case err = <-readErr: // stdin EOF: Chrome is gone
+		cancel()
+	case <-ctx.Done(): // writer failed, or the caller canceled
+		err = ctx.Err()
+	}
+	// Bound the wait: a git subprocess in the periodic update can outlive
+	// its context, and Chrome kills hosts that do not exit promptly.
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(shutdownGrace):
+		log.Warn("shutdown timed out; exiting anyway")
+	}
 	log.Info("host exiting", "err", err)
-	if err == io.EOF {
+	if err == io.EOF || errors.Is(err, context.Canceled) {
 		return nil
 	}
 	return err
@@ -161,12 +201,18 @@ func (h *Host) readLoop(ctx context.Context) error {
 				h.helperVersion.Store(msg.HelperVersion)
 				h.log.Info("helper connected", "helperVersion", msg.HelperVersion)
 			}
-			h.send(helloAckMsg{Type: typeHelloAck, HostVersion: h.version, MinHelperVersion: minHelperVersion})
-			// Both round-trip through this read loop, so run them off it.
-			// This host process is the freshly-installed binary (Chrome
-			// launches whatever the launcher resolves), so it may carry newer
-			// helper files than the ones Chrome just loaded.
+			// Everything here is off the read loop: sending can block for
+			// seconds if the writer is wedged, and the follow-ups round-trip
+			// through this very loop. This host process is the
+			// freshly-installed binary (Chrome launches whatever the launcher
+			// resolves), so it may carry newer helper files than the ones
+			// Chrome just loaded.
 			go func() {
+				ack := helloAckMsg{Type: typeHelloAck, HostVersion: h.version, MinHelperVersion: minHelperVersion}
+				if err := h.send(ctx, ack); err != nil {
+					h.log.Error("hello ack not sent", "err", err)
+					return
+				}
 				h.maybeRefreshHelper(ctx)
 				h.catchUpReload(ctx)
 			}()
@@ -186,16 +232,21 @@ func (h *Host) readLoop(ctx context.Context) error {
 	}
 }
 
-func (h *Host) send(msg any) {
+// send queues a message for the writer goroutine. It reports failure instead
+// of dropping silently, so a caller waiting for a reply can fail fast rather
+// than wait out its whole timeout for an answer to a message never sent.
+func (h *Host) send(ctx context.Context, msg any) error {
 	frame, err := json.Marshal(msg)
 	if err != nil {
-		h.log.Error("marshal outgoing message", "err", err)
-		return
+		return fmt.Errorf("marshal outgoing message: %w", err)
 	}
 	select {
 	case h.out <- frame:
-	case <-time.After(5 * time.Second):
-		h.log.Error("writer stalled; dropping message")
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(sendTimeout):
+		return fmt.Errorf("cannot send to Chrome: the connection is stalled")
 	}
 }
 
@@ -211,7 +262,9 @@ func (h *Host) requestCtx(ctx context.Context, requestID string, msg any) (json.
 		delete(h.pending, requestID)
 		h.mu.Unlock()
 	}()
-	h.send(msg)
+	if err := h.send(ctx, msg); err != nil {
+		return nil, err
+	}
 	select {
 	case raw := <-ch:
 		return raw, nil
@@ -231,10 +284,14 @@ func (h *Host) nextRequestID() string {
 	return fmt.Sprintf("%d-%d", os.Getpid(), h.reqSeq.Add(1))
 }
 
-// Reload asks the helper to reload the given extension IDs.
+// Reload asks the helper to reload the given extension IDs. The deadline
+// grows with the batch size so that reloading many extensions is not
+// misreported as an unresponsive helper.
 func (h *Host) Reload(ctx context.Context, ids []string) ([]ipc.ReloadResult, error) {
 	id := h.nextRequestID()
-	raw, err := h.request(ctx, id, reloadReq{Type: typeReload, RequestID: id, ExtensionIDs: ids})
+	ctx, cancel := context.WithTimeout(ctx, requestTimeout+time.Duration(len(ids))*perExtensionTimeout)
+	defer cancel()
+	raw, err := h.requestCtx(ctx, id, reloadReq{Type: typeReload, RequestID: id, ExtensionIDs: ids})
 	if err != nil {
 		return nil, err
 	}
@@ -255,6 +312,11 @@ func (h *Host) ListChrome(ctx context.Context) ([]ipc.ChromeExt, error) {
 	var msg listResultMsg
 	if err := json.Unmarshal(raw, &msg); err != nil {
 		return nil, err
+	}
+	if msg.Error != "" {
+		// Never let "could not look" masquerade as "nothing is loaded":
+		// callers act destructively on an empty list.
+		return nil, fmt.Errorf("helper could not list extensions: %s", msg.Error)
 	}
 	return msg.Extensions, nil
 }
@@ -291,7 +353,7 @@ func (h *Host) Uninstall(ctx context.Context, extID string) (status string, err 
 // until the next Chrome start. The rewritten files take effect on the next
 // Chrome start anyway, which is exactly when the old code would stop running.
 func (h *Host) maybeRefreshHelper(ctx context.Context) {
-	if !h.helperRefreshed.CompareAndSwap(false, true) {
+	if h.helperRefreshed.Load() {
 		return
 	}
 	dir, err := paths.HelperDir()
@@ -300,14 +362,47 @@ func (h *Host) maybeRefreshHelper(ctx context.Context) {
 	}
 	installed := helperext.InstalledVersion(dir)
 	if installed == helperext.Version {
+		h.helperRefreshed.Store(true)
 		return
 	}
 	if err := helperext.Install(dir); err != nil {
+		// Retried on the next connect rather than skipped for the session.
 		h.log.Error("refresh helper files failed", "err", err)
 		return
 	}
+	h.helperRefreshed.Store(true)
 	h.log.Info("helper files refreshed; new version applies on the next Chrome start",
 		"from", installed, "to", helperext.Version)
+}
+
+// managedIDs restricts what the control socket may act on to extensions cepm
+// registered (plus stale records it is meant to clean up). The socket is only
+// reachable by this user, but the helper holds the management permission for
+// *every* installed extension, so the host must not relay arbitrary IDs.
+func managedIDs(ids []string) ([]string, error) {
+	if len(ids) == 0 {
+		return nil, fmt.Errorf("no extension ids given")
+	}
+	st, err := state.Load()
+	if err != nil {
+		return nil, err
+	}
+	known := map[string]bool{}
+	for _, name := range st.RepoNames() {
+		r := st.Repos[name]
+		for _, e := range r.Extensions {
+			known[e.ID] = true
+		}
+		for _, s := range r.Stale {
+			known[s.ID] = true
+		}
+	}
+	for _, id := range ids {
+		if !known[id] {
+			return nil, fmt.Errorf("extension %s is not managed by cepm", id)
+		}
+	}
+	return ids, nil
 }
 
 // catchUpReload reloads every enabled extension once, right after Chrome
@@ -316,7 +411,7 @@ func (h *Host) maybeRefreshHelper(ctx context.Context) {
 // scripts in particular survive a restart), so without this the user would
 // silently keep running stale code until the next update.
 func (h *Host) catchUpReload(ctx context.Context) {
-	if !h.caughtUp.CompareAndSwap(false, true) {
+	if h.caughtUp.Load() {
 		return
 	}
 	st, err := state.Load()
@@ -337,9 +432,12 @@ func (h *Host) catchUpReload(ctx context.Context) {
 	}
 	results, err := h.Reload(ctx, ids)
 	if err != nil {
-		h.log.Warn("catch-up reload failed", "err", err)
+		// Leave the flag unset: a later hello (the service worker restarts
+		// often) retries, rather than silently running stale code all session.
+		h.log.Warn("catch-up reload failed; will retry on the next helper connect", "err", err)
 		return
 	}
+	h.caughtUp.Store(true)
 	h.log.Info("catch-up reload done", "extensions", len(results))
 }
 
@@ -369,10 +467,19 @@ func (h *Host) runLeaderDuties(ctx context.Context) {
 		h.log.Error("resolve socket path", "err", err)
 		return
 	}
-	l, err := ipc.Listen(sock)
-	if err != nil {
-		h.log.Error("bind control socket", "err", err)
-		return
+	// Retry: giving up here would leave a host that talks to Chrome fine but
+	// is invisible to the CLI for the rest of the session.
+	var l net.Listener
+	for attempt := 1; ; attempt++ {
+		if l, err = ipc.Listen(sock); err == nil {
+			break
+		}
+		h.log.Error("bind control socket", "attempt", attempt, "err", err)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(5 * time.Second):
+		}
 	}
 	defer l.Close()
 
@@ -403,7 +510,11 @@ func (h *Host) handleIPC(ctx context.Context, req ipc.Request) ipc.Response {
 		}
 		return ipc.Response{OK: true, Host: info}
 	case ipc.CmdReload:
-		results, err := h.Reload(ctx, req.IDs)
+		ids, err := managedIDs(req.IDs)
+		if err != nil {
+			return ipc.Response{Error: err.Error()}
+		}
+		results, err := h.Reload(ctx, ids)
 		if err != nil {
 			return ipc.Response{Error: err.Error()}
 		}
@@ -415,6 +526,9 @@ func (h *Host) handleIPC(ctx context.Context, req ipc.Request) ipc.Response {
 		}
 		return ipc.Response{OK: true, Extensions: exts}
 	case ipc.CmdUninstall:
+		if _, err := managedIDs([]string{req.ID}); err != nil {
+			return ipc.Response{Error: err.Error()}
+		}
 		status, err := h.Uninstall(ctx, req.ID)
 		if err != nil {
 			return ipc.Response{Error: err.Error()}
