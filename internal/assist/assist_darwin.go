@@ -7,16 +7,16 @@ import (
 	"strings"
 )
 
-// CopyToClipboard puts s on the system clipboard.
-func CopyToClipboard(s string) error {
+// copyToClipboard puts s on the system clipboard.
+func copyToClipboard(s string) error {
 	cmd := exec.Command("pbcopy")
 	cmd.Stdin = strings.NewReader(s)
 	return cmd.Run()
 }
 
-// OpenExtensionsPage opens chrome://extensions in Chrome. chrome:// URLs
+// openExtensionsPage opens chrome://extensions in Chrome. chrome:// URLs
 // cannot be opened through the default URL handler, so target Chrome
 // explicitly.
-func OpenExtensionsPage() error {
+func openExtensionsPage() error {
 	return exec.Command("open", "-a", "Google Chrome", "chrome://extensions/").Run()
 }

@@ -880,6 +880,38 @@ func TestCleanupSpareseLiveExtensionThatWasOrphaned(t *testing.T) {
 	}
 }
 
+// The load ceremony really does reach for the browser and the clipboard —
+// this is why the package stubs them in TestMain. Asserting the calls happen
+// keeps that stubbing necessary and visible: without it, every run of the
+// suite opens a tab in the developer's Chrome and overwrites what they copied.
+func TestLoadCeremonyUsesTheStubbedSideEffects(t *testing.T) {
+	interactive(t)
+	startFakeHost(t)
+	opened, copied := 0, 0
+	origOpen, origCopy := assist.OpenExtensionsPage, assist.CopyToClipboard
+	assist.OpenExtensionsPage = func() error { opened++; return nil }
+	assist.CopyToClipboard = func(string) error { copied++; return nil }
+	t.Cleanup(func() { assist.OpenExtensionsPage, assist.CopyToClipboard = origOpen, origCopy })
+
+	seedRepo(t, "tools", state.Extension{Dir: "ext", Name: "Ext", ID: "aaaa", Disabled: true})
+	// The extension is not in Chrome, so the ceremony would poll; a short
+	// context keeps the test quick.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	root := newRootCmd()
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetIn(strings.NewReader(""))
+	root.SetArgs([]string{"enable", "tools/ext"})
+	resetPromptReader()
+	_ = root.ExecuteContext(ctx)
+
+	if opened == 0 || copied == 0 {
+		t.Errorf("the ceremony should have tried to open Chrome and copy the path (opened=%d copied=%d)", opened, copied)
+	}
+}
+
 func TestEnableDisableRoundTrip(t *testing.T) {
 	interactive(t)
 	// Both are already in Chrome, so the load ceremony confirms at once

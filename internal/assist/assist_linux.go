@@ -8,8 +8,8 @@ import (
 	"strings"
 )
 
-// CopyToClipboard puts s on the clipboard, trying Wayland then X11 helpers.
-func CopyToClipboard(s string) error {
+// copyToClipboard puts s on the clipboard, trying Wayland then X11 helpers.
+func copyToClipboard(s string) error {
 	for _, c := range [][]string{
 		{"wl-copy"},
 		{"xclip", "-selection", "clipboard"},
@@ -25,9 +25,9 @@ func CopyToClipboard(s string) error {
 	return errors.New("no clipboard helper found (install wl-clipboard or xclip)")
 }
 
-// OpenExtensionsPage opens chrome://extensions in Chrome. xdg-open cannot
+// openExtensionsPage opens chrome://extensions in Chrome. xdg-open cannot
 // handle chrome:// URLs, so invoke a Chrome binary directly.
-func OpenExtensionsPage() error {
+func openExtensionsPage() error {
 	for _, bin := range []string{"google-chrome", "google-chrome-stable", "chromium", "chromium-browser"} {
 		if _, err := exec.LookPath(bin); err == nil {
 			return exec.Command(bin, "chrome://extensions/").Start()

@@ -9,11 +9,21 @@ import (
 )
 
 // IsTTY reports whether the CLI is talking to an interactive terminal (both
-// directions), which gates prompts and the load-confirmation ceremony. It is
-// a variable so tests can exercise the interactive paths.
+// directions), which gates prompts and the load-confirmation ceremony.
+//
+// This and the two below are variables because the interactive paths have to
+// be reachable from tests — and because these are the functions that reach
+// out of the process and touch the developer's own browser and clipboard,
+// which a test run must never do.
 var IsTTY = func() bool {
 	return isCharDevice(os.Stdin) && isCharDevice(os.Stdout)
 }
+
+// CopyToClipboard puts s on the system clipboard.
+var CopyToClipboard = copyToClipboard
+
+// OpenExtensionsPage opens chrome://extensions in the user's Chrome.
+var OpenExtensionsPage = openExtensionsPage
 
 func isCharDevice(f *os.File) bool {
 	fi, err := f.Stat()
