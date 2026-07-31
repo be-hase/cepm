@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/be-hase/cepm/internal/paths"
+	"github.com/be-hase/cepm/internal/term"
 )
 
 const (
@@ -261,7 +262,10 @@ type ExtRef struct {
 	Dir  string
 }
 
-func (r ExtRef) String() string { return r.Repo + "/" + r.Dir }
+// String is a display form: state on disk may predate the rule that rejects
+// control characters in directory names, and these refs reach the terminal
+// through validation errors and doctor.
+func (r ExtRef) String() string { return term.Safe(r.Repo + "/" + r.Dir) }
 
 // DuplicateLiveID returns the id two registered extensions share, together
 // with both owners, or ("", …) when every live id has exactly one owner.
@@ -284,39 +288,49 @@ func (s *State) DuplicateLiveID() (id string, a, b ExtRef) {
 	return "", ExtRef{}, ExtRef{}
 }
 
-// DuplicateIDs returns every id claimed by more than one registered
-// extension.
-func (s *State) DuplicateIDs() map[string]bool {
-	count := map[string]int{}
+// IDClaims counts how many registered extensions claim each id.
+func (s *State) IDClaims() map[string]int {
+	claims := map[string]int{}
 	for _, name := range s.RepoNames() {
 		for _, e := range s.Repos[name].Extensions {
-			count[e.ID]++
+			claims[e.ID]++
 		}
 	}
-	dups := map[string]bool{}
-	for id, n := range count {
+	return claims
+}
+
+// excessClaims is how far a state is from having one owner per id. Counting
+// claims rather than colliding ids is what lets a three-way collision be
+// repaired one repository at a time: dropping one of three claimants leaves
+// the same id colliding, but brings the state measurably closer.
+func excessClaims(claims map[string]int) int {
+	total := 0
+	for _, n := range claims {
 		if n > 1 {
-			dups[id] = true
+			total += n - 1
 		}
 	}
-	return dups
+	return total
 }
 
 // SaveRepair writes a state that may still be invalid, provided it is
-// strictly closer to valid than before: no new collision, and at least one
-// resolved. Repairing a file with several independent collisions has to be
-// possible one repository at a time, which a plain Save — all or nothing —
-// cannot express.
+// strictly closer to valid than before: no id gains claimants, none appears
+// that was not already contested, and the overall excess shrinks. Repairing a
+// file with several collisions — or one shared by three repositories — has to
+// be possible a repository at a time, which a plain Save cannot express.
 func (s *State) SaveRepair(before *State) error {
-	was, now := before.DuplicateIDs(), s.DuplicateIDs()
-	for id := range now {
-		if !was[id] {
+	was, now := before.IDClaims(), s.IDClaims()
+	for id, n := range now {
+		if n > 1 && was[id] <= 1 {
 			return fmt.Errorf("refusing to save: this would create a new duplicate extension id %s", id)
 		}
+		if n > was[id] {
+			return fmt.Errorf("refusing to save: extension id %s would gain a claimant (%d → %d)", id, was[id], n)
+		}
 	}
-	if len(now) >= len(was) {
-		return fmt.Errorf("refusing to save: %d duplicate extension id(s) before and %d after, no progress",
-			len(was), len(now))
+	if excessClaims(now) >= excessClaims(was) {
+		return fmt.Errorf("refusing to save: %d duplicate claim(s) before and %d after, no progress",
+			excessClaims(was), excessClaims(now))
 	}
 	s.normalize()
 	s.Version = Version

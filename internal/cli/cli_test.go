@@ -379,6 +379,103 @@ func TestUninstallRepairsSeveralDuplicateGroups(t *testing.T) {
 	}
 }
 
+// When two registrations claim an id, nothing can tell which directory
+// Chrome loaded. Removing one side must therefore keep its files and point
+// the user at the surviving directory — otherwise Chrome may be left running
+// a copy from a path cepm just deleted, with doctor none the wiser.
+func TestUninstallRepairGuidesRebindAndKeepsFiles(t *testing.T) {
+	interactive(t)
+	startFakeHost(t, "xxxx")
+	writeRawState(t, `{"version":2,"repos":{
+      "keepme":{"url":"u","track":"branch","branch":"main","head":"h",
+                "extensions":[{"dir":"ext","name":"Ext","id":"xxxx","key":"K"}]},
+      "dropme":{"url":"u","track":"branch","branch":"main","head":"h",
+                "extensions":[{"dir":"ext","name":"Ext","id":"xxxx","key":"K"}]}}}`)
+	dropped, err := updaterRepoDir("dropme")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dropped, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	survivor, err := updaterRepoDir("keepme")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := run(t, "", "uninstall", "dropme")
+	if err != nil {
+		t.Fatalf("uninstall: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, filepath.Join(survivor, "ext")) {
+		t.Errorf("the guidance must name the surviving directory to load:\n%s", out)
+	}
+	if _, err := os.Stat(dropped); err != nil {
+		t.Errorf("the clone must be kept until Chrome is re-pointed: %v", err)
+	}
+	if strings.Contains(out, "run: cepm cleanup") {
+		t.Errorf("cleanup cannot help here (the id is live again); do not suggest it:\n%s", out)
+	}
+}
+
+// Three repositories sharing one id: each removal leaves the id colliding,
+// so progress has to be measured in claims, not in colliding ids.
+func TestUninstallRepairsThreeWayCollision(t *testing.T) {
+	interactive(t)
+	startFakeHost(t, "xxxx")
+	writeRawState(t, `{"version":2,"repos":{
+      "a":{"url":"u","track":"branch","branch":"main","head":"h",
+           "extensions":[{"dir":"ext","name":"A","id":"xxxx","key":"K"}]},
+      "b":{"url":"u","track":"branch","branch":"main","head":"h",
+           "extensions":[{"dir":"ext","name":"B","id":"xxxx","key":"K"}]},
+      "c":{"url":"u","track":"branch","branch":"main","head":"h",
+           "extensions":[{"dir":"ext","name":"C","id":"xxxx","key":"K"}]}}}`)
+
+	if out, err := run(t, "", "uninstall", "b"); err != nil {
+		t.Fatalf("first repair must be savable even though the id still collides: %v\n%s", err, out)
+	}
+	st, _ := state.Load()
+	if err := st.Validate(); err == nil {
+		t.Error("two claimants remain, so the state is still invalid")
+	}
+	if len(st.Repos) != 2 {
+		t.Fatalf("the first removal was not persisted: %+v", st.RepoNames())
+	}
+	if out, err := run(t, "", "uninstall", "c"); err != nil {
+		t.Fatalf("second repair: %v\n%s", err, out)
+	}
+	st, _ = state.Load()
+	if err := st.Validate(); err != nil {
+		t.Errorf("state should be repaired now: %v", err)
+	}
+}
+
+// State written before directory names were validated can still hold control
+// characters, and those refs reach the terminal through validation errors.
+func TestControlCharactersInStateCannotForgeOutput(t *testing.T) {
+	startFakeHost(t)
+	writeRawState(t, `{"version":2,"repos":{
+      "a":{"url":"u","track":"branch","branch":"main","head":"h",
+           "extensions":[{"dir":"ext\nFORGED[2K","name":"A","id":"xxxx","key":"K"}]},
+      "b":{"url":"u","track":"branch","branch":"main","head":"h",
+           "extensions":[{"dir":"other","name":"B","id":"xxxx","key":"K"}]}}}`)
+
+	// preflight (a Chrome-affecting command) and doctor both print the refs.
+	_, err := run(t, "", "reload")
+	if err == nil {
+		t.Fatal("reload should refuse a duplicated state")
+	}
+	docOut, _ := run(t, "", "doctor")
+	for label, s := range map[string]string{"reload error": err.Error(), "doctor output": docOut} {
+		if strings.Contains(s, "\x1b") {
+			t.Errorf("%s contains a raw escape sequence:\n%q", label, s)
+		}
+		if strings.Contains(s, "ext\nFORGED") {
+			t.Errorf("%s contains a raw newline from the directory name:\n%q", label, s)
+		}
+	}
+}
+
 // Records predating normalization can name an id that is live again. Cleanup
 // must drop them, or doctor asks forever for a cleanup that does nothing.
 func TestCleanupDropsRecordsForLiveIDs(t *testing.T) {

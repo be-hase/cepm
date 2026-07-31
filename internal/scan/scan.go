@@ -149,6 +149,17 @@ func walk(repoDir string) ([]Extension, error) {
 		if path != repoDir && (base == "node_modules" || strings.HasPrefix(base, ".")) {
 			return filepath.SkipDir
 		}
+		rel, relErr := filepath.Rel(repoDir, path)
+		if relErr != nil {
+			return relErr
+		}
+		// Check the name before anything that might print it. Directory names
+		// end up in tables, menus and suggested commands, and unlike the
+		// manifest name they cannot be rewritten (they are paths), so refuse
+		// them rather than escape them everywhere.
+		if term.HasControl(rel) {
+			return fmt.Errorf("extension directory name contains control characters: %q", term.Safe(rel))
+		}
 		m, err := readManifest(path)
 		if err != nil {
 			if errors.Is(err, errBadManifest) {
@@ -156,20 +167,9 @@ func walk(repoDir string) ([]Extension, error) {
 				// tree is in a bad state (mid-conflict, partial checkout).
 				// Treating it as "not an extension" would unregister a
 				// working extension, so refuse to scan instead.
-				rel, _ := filepath.Rel(repoDir, path)
-				return fmt.Errorf("%s: %w", rel, err)
+				return fmt.Errorf("%s: %w", term.Safe(rel), err)
 			}
 			return nil // no manifest here; keep walking
-		}
-		rel, relErr := filepath.Rel(repoDir, path)
-		if relErr != nil {
-			return relErr
-		}
-		// Directory names end up in tables, menus and suggested commands, and
-		// unlike the manifest name they cannot be rewritten (they are paths).
-		// Refuse them instead.
-		if term.HasControl(rel) {
-			return fmt.Errorf("extension directory name contains control characters: %q", rel)
 		}
 		exts = append(exts, Extension{Dir: rel, Name: m.Name, Key: m.Key})
 		// An extension does not contain another extension; don't descend.
