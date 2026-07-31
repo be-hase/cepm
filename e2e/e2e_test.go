@@ -31,6 +31,11 @@ func TestE2E(t *testing.T) {
 	}
 	chromeBin := ensureChrome(t) // before HOME is overridden
 
+	// A killed run (a timeout, a Ctrl-C) never reaches its cleanup, and each
+	// leftover holds a Chrome profile worth ~15MB. Sweep old ones first so
+	// they cannot pile up on a developer's machine.
+	sweepStaleWorkDirs(t)
+
 	// Isolated world: fake HOME so neither the user's Chrome nor their
 	// ~/.cepm is touched. /tmp keeps the Unix socket path short; resolve
 	// symlinks (/tmp → /private/tmp) because extension IDs are path hashes
@@ -193,6 +198,27 @@ func TestE2E(t *testing.T) {
 }
 
 // ---- helpers ----
+
+// sweepStaleWorkDirs removes work directories from earlier runs that ended
+// before their cleanup could run. Only directories older than an hour go, so
+// a concurrent run is left alone.
+func sweepStaleWorkDirs(t *testing.T) {
+	t.Helper()
+	entries, err := os.ReadDir("/tmp")
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if !e.IsDir() || !strings.HasPrefix(e.Name(), "cepm-e2e") {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil || time.Since(info.ModTime()) < time.Hour {
+			continue
+		}
+		_ = os.RemoveAll(filepath.Join("/tmp", e.Name()))
+	}
+}
 
 func buildCepm(t *testing.T, home string) string {
 	t.Helper()
