@@ -16,6 +16,7 @@ import (
 	"github.com/be-hase/cepm/internal/paths"
 	"github.com/be-hase/cepm/internal/scan"
 	"github.com/be-hase/cepm/internal/state"
+	"github.com/be-hase/cepm/internal/term"
 	"github.com/be-hase/cepm/internal/updater"
 )
 
@@ -123,7 +124,7 @@ func runInstall(cmd *cobra.Command, url string, flags installFlags) error {
 		// two directories can pin the same manifest "key".
 		st.Repos[name] = repo
 		if err := st.Validate(); err != nil {
-			return fmt.Errorf("cannot install %s: %w", url, err)
+			return fmt.Errorf("cannot install %q: %w", name, err)
 		}
 		return st.Save()
 	})
@@ -188,7 +189,7 @@ func applySelection(cmd *cobra.Command, repoName string, repo *state.Repo, flags
 	default:
 		items := make([]string, len(repo.Extensions))
 		for i, e := range repo.Extensions {
-			items[i] = fmt.Sprintf("%-24s %s", e.Name, e.Dir)
+			items[i] = fmt.Sprintf("%-24s %s", e.Name, term.Safe(e.Dir))
 		}
 		fmt.Fprintf(cmd.OutOrStdout(), "\n%d extensions found in %s:\n\n", len(items), repoName)
 		picked, err := selectByNumbers(cmd, "Enable which?", items)

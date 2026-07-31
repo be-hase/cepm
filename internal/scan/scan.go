@@ -15,6 +15,8 @@ import (
 	"unicode"
 
 	toml "github.com/pelletier/go-toml/v2"
+
+	"github.com/be-hase/cepm/internal/term"
 )
 
 // MaxAutoDetect is the number of auto-detected extensions above which we ask
@@ -97,6 +99,9 @@ func fromConfig(repoDir string, dirs []string) ([]Extension, error) {
 		if seen[rel] {
 			return nil, fmt.Errorf("cepm.toml: extension dir %q is listed twice", dir)
 		}
+		if term.HasControl(rel) {
+			return nil, fmt.Errorf("cepm.toml: extension dir name contains control characters: %q", rel)
+		}
 		seen[rel] = true
 		abs := filepath.Join(repoDir, rel)
 		// Clean() does not follow symlinks, so re-check the resolved path:
@@ -159,6 +164,12 @@ func walk(repoDir string) ([]Extension, error) {
 		rel, relErr := filepath.Rel(repoDir, path)
 		if relErr != nil {
 			return relErr
+		}
+		// Directory names end up in tables, menus and suggested commands, and
+		// unlike the manifest name they cannot be rewritten (they are paths).
+		// Refuse them instead.
+		if term.HasControl(rel) {
+			return fmt.Errorf("extension directory name contains control characters: %q", rel)
 		}
 		exts = append(exts, Extension{Dir: rel, Name: m.Name, Key: m.Key})
 		// An extension does not contain another extension; don't descend.

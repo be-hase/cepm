@@ -20,6 +20,7 @@ import (
 	"github.com/be-hase/cepm/internal/paths"
 	"github.com/be-hase/cepm/internal/scan"
 	"github.com/be-hase/cepm/internal/state"
+	"github.com/be-hase/cepm/internal/term"
 	"github.com/be-hase/cepm/internal/updater"
 )
 
@@ -251,7 +252,7 @@ func checkRepos(ctx context.Context, hostReachable bool) []diagnostic {
 			Name:   "duplicate extension id",
 			Status: "fail",
 			Detail: fmt.Sprintf("%s and %s both claim %s (they pin the same manifest \"key\")", a, b, id),
-			Hint:   fmt.Sprintf("uninstall one of them, e.g. cepm uninstall %s", shellQuote(b.Repo)),
+			Hint:   fmt.Sprintf("uninstall one of them, e.g. cepm uninstall %s", term.Quote(b.Repo)),
 		})
 	}
 	if len(st.Orphans) > 0 {
@@ -284,7 +285,7 @@ func checkRepos(ctx context.Context, hostReachable bool) []diagnostic {
 		if dirty, err := (gitx.Repo{Dir: dir}).IsDirty(ctx); err != nil {
 			repoDiag = diagnostic{Name: "repo " + name, Status: "fail", Detail: err.Error(),
 				Hint: fmt.Sprintf("clone may be broken; try: cepm uninstall %s && cepm install %s",
-					shellQuote(name), shellQuote(gitx.RedactURL(r.URL)))}
+					term.Quote(name), term.Quote(gitx.RedactURL(r.URL)))}
 		} else if dirty {
 			repoDiag = diagnostic{Name: "repo " + name, Status: "warn",
 				Detail: "working tree has local changes — auto update will skip this repo",
@@ -325,15 +326,15 @@ func checkRepos(ctx context.Context, hostReachable bool) []diagnostic {
 					Name:   "extension " + e.Name,
 					Status: "fail",
 					Detail: "enabled but not loaded in Chrome",
-					Hint: fmt.Sprintf("one-time step: Load unpacked %s (or opt out with: cepm disable %s/%s)",
-						filepath.Join(dir, e.Dir), name, e.Dir),
+					Hint: fmt.Sprintf("one-time step: Load unpacked %s (or opt out with: cepm disable %s)",
+						term.Quote(filepath.Join(dir, e.Dir)), term.Quote(name+"/"+e.Dir)),
 				})
 			case !e.Enabled() && loaded:
 				diags = append(diags, diagnostic{
 					Name:   "extension " + e.Name,
 					Status: "warn",
 					Detail: "loaded in Chrome but not enabled in cepm — updates will NOT reload it",
-					Hint:   fmt.Sprintf("run: cepm enable %s/%s", name, e.Dir),
+					Hint:   fmt.Sprintf("run: cepm enable %s", term.Quote(name+"/"+e.Dir)),
 				})
 			}
 		}
@@ -353,12 +354,6 @@ func checkRepos(ctx context.Context, hostReachable bool) []diagnostic {
 // is what LastError usually holds) cannot break column alignment.
 func oneLine(s string) string {
 	return strings.Join(strings.Fields(strings.ReplaceAll(s, "\n", " ")), " ")
-}
-
-// shellQuote makes a value safe to paste into a shell, since doctor's hints
-// are commands people copy and run.
-func shellQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 func executablePath() string {

@@ -22,6 +22,7 @@ import (
 	"github.com/be-hase/cepm/internal/paths"
 	"github.com/be-hase/cepm/internal/scan"
 	"github.com/be-hase/cepm/internal/state"
+	"github.com/be-hase/cepm/internal/term"
 )
 
 // ExtChange identifies an extension affected by an update.
@@ -307,8 +308,8 @@ func moveToLatest(ctx context.Context, repo gitx.Repo, r *state.Repo, res *RepoR
 		if current != "" {
 			where = "branch " + current
 		}
-		return fmt.Errorf("the clone is on %s but cepm tracks %s; switch back with: git -C %s checkout %s",
-			where, branch, repo.Dir, branch)
+		return fmt.Errorf("the clone is on %s but cepm tracks %s; switch back with: git -C %s checkout -- %s",
+			term.Safe(where), term.Safe(branch), term.Quote(repo.Dir), term.Quote(branch))
 	}
 	if err := repo.MergeFFOnly(ctx, "origin/"+branch); err != nil {
 		return fmt.Errorf("cannot fast-forward %s (history rewritten?): %w", branch, err)

@@ -171,6 +171,26 @@ func TestDetectSanitizesNames(t *testing.T) {
 	}
 }
 
+// Directory names are paths, so unlike manifest names they cannot be
+// rewritten for display — a name with a newline or an escape sequence could
+// forge a row in the table or a line in the selection menu, so refuse it.
+func TestDetectRejectsControlCharactersInDirNames(t *testing.T) {
+	for _, dir := range []string{"ext\nBogus", "ext\x1b[2K", "ext\rX"} {
+		repo := t.TempDir()
+		writeManifest(t, filepath.Join(repo, dir), "Ext")
+		if _, err := Detect(repo); err == nil {
+			t.Errorf("Detect should reject directory name %q", dir)
+		}
+	}
+	// The same via cepm.toml.
+	repo := t.TempDir()
+	writeManifest(t, filepath.Join(repo, "ext\nBogus"), "Ext")
+	writeFile(t, filepath.Join(repo, "cepm.toml"), "extensions = [\"ext\\nBogus\"]")
+	if _, err := Detect(repo); err == nil {
+		t.Error("cepm.toml should not be able to name a directory with control characters")
+	}
+}
+
 func TestDetectRejectsEscapingConfig(t *testing.T) {
 	// Absolute paths and multi-level traversal, not just "..".
 	for _, dir := range []string{"/etc", "a/../../..", "../outside"} {

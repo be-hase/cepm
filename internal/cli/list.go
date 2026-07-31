@@ -13,6 +13,7 @@ import (
 	"github.com/be-hase/cepm/internal/gitx"
 	"github.com/be-hase/cepm/internal/ipc"
 	"github.com/be-hase/cepm/internal/state"
+	"github.com/be-hase/cepm/internal/term"
 	"github.com/be-hase/cepm/internal/updater"
 )
 
@@ -98,7 +99,7 @@ func printListTable(cmd *cobra.Command, st *state.State, chromeStatus map[string
 		r := st.Repos[name]
 		for _, e := range r.Extensions {
 			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
-				name, trackRef(r), e.Name, e.ID, e.Dir, extStatus(chromeStatus, e))
+				name, trackRef(r), e.Name, e.ID, term.Safe(e.Dir), extStatus(chromeStatus, e))
 		}
 		for _, s := range r.Stale {
 			fmt.Fprintf(w, "%s\t\t%s\t%s\t(%s)\tstale — run: cepm cleanup\n", name, s.Name, s.ID, s.Reason)

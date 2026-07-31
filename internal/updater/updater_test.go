@@ -373,6 +373,40 @@ func TestUpdateFollowsForceMovedTag(t *testing.T) {
 	}
 }
 
+// Branch names come from the remote and git allows characters a shell reads
+// as separators. The command cepm tells a user to run must survive being
+// pasted, so the branch has to arrive as one quoted argument.
+func TestUpdateQuotesBranchInSuggestedCommand(t *testing.T) {
+	setupRepo(t, "mytools")
+	dir, _ := RepoDir("mytools")
+	const hostile = `release;touch${IFS}/tmp/cepm-pwn`
+	st, _ := state.Load()
+	st.Repos["mytools"].Branch = hostile
+	if err := st.Save(); err != nil {
+		t.Fatal(err)
+	}
+	git(t, dir, "checkout", "-q", "-b", "something-else")
+
+	results, err := Update(context.Background(), nil, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg := ""
+	if results[0].Err != nil {
+		msg = results[0].Err.Error()
+	}
+	if !strings.Contains(msg, "checkout") {
+		t.Fatalf("expected a checkout suggestion, got %q", msg)
+	}
+	// The dangerous part must be inside single quotes, not loose in the line.
+	if strings.Contains(msg, "checkout -- "+hostile) {
+		t.Errorf("branch name is not quoted in the suggested command: %s", msg)
+	}
+	if !strings.Contains(msg, "'"+hostile+"'") {
+		t.Errorf("branch name should appear as one quoted word: %s", msg)
+	}
+}
+
 // The clone belongs to cepm, but users do poke at it; merging origin/main
 // into whatever they checked out would rewrite their branch.
 func TestUpdateRefusesWhenOnAnotherBranch(t *testing.T) {

@@ -9,6 +9,7 @@ import (
 
 	"github.com/be-hase/cepm/internal/assist"
 	"github.com/be-hase/cepm/internal/state"
+	"github.com/be-hase/cepm/internal/term"
 	"github.com/be-hase/cepm/internal/updater"
 )
 
@@ -124,7 +125,7 @@ func pickExtensions(cmd *cobra.Command, r *state.Repo, dir string, wantEnabled b
 	default:
 		items := make([]string, len(candidates))
 		for i, e := range candidates {
-			items[i] = fmt.Sprintf("%-24s %s", e.Name, e.Dir)
+			items[i] = fmt.Sprintf("%-24s %s", e.Name, term.Safe(e.Dir))
 		}
 		picked, err := selectByNumbers(cmd, prompt, items)
 		if err != nil {

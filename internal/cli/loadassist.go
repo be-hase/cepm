@@ -15,6 +15,7 @@ import (
 	"github.com/be-hase/cepm/internal/assist"
 	"github.com/be-hase/cepm/internal/helperext"
 	"github.com/be-hase/cepm/internal/ipc"
+	"github.com/be-hase/cepm/internal/term"
 )
 
 // loadTarget is one extension the user needs to "Load unpacked".
@@ -107,7 +108,7 @@ func runLoadCeremony(ctx context.Context, cmd *cobra.Command, targets []loadTarg
 		fmt.Fprintf(out, "\nOne-time step: open chrome://extensions, enable Developer mode,\n")
 		fmt.Fprintf(out, "and use \"Load unpacked\" for:\n")
 		for _, t := range targets {
-			fmt.Fprintf(out, "  %-24s %s\n", t.Name, t.AbsDir)
+			fmt.Fprintf(out, "  %-24s %s\n", t.Name, term.Quote(t.AbsDir))
 		}
 		return
 	}
@@ -131,7 +132,7 @@ func runLoadCeremony(ctx context.Context, cmd *cobra.Command, targets []loadTarg
 		if copied {
 			fmt.Fprintf(out, "  %d. Click \"Load unpacked\", press ⌘⇧G, paste (path copied!), Enter\n", step)
 		} else {
-			fmt.Fprintf(out, "  %d. Click \"Load unpacked\" and select: %s\n", step, t.AbsDir)
+			fmt.Fprintf(out, "  %d. Click \"Load unpacked\" and select: %s\n", step, term.Quote(t.AbsDir))
 		}
 
 		// Other targets of this same ceremony are not "the wrong directory".

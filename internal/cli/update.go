@@ -11,6 +11,7 @@ import (
 
 	"github.com/be-hase/cepm/internal/config"
 	"github.com/be-hase/cepm/internal/ipc"
+	"github.com/be-hase/cepm/internal/term"
 	"github.com/be-hase/cepm/internal/updater"
 )
 
@@ -75,13 +76,13 @@ func printUpdateResults(out io.Writer, results []updater.RepoResult) (failed boo
 			fmt.Fprintf(out, "  ⚠ %s\n", w)
 		}
 		for _, a := range r.Added {
-			fmt.Fprintf(out, "  + new extension available: %q — enable with: cepm enable %s/%s\n", a.Name, r.Name, a.Dir)
+			fmt.Fprintf(out, "  + new extension available: %q — enable with: cepm enable %s\n", a.Name, term.Quote(r.Name+"/"+a.Dir))
 		}
 		for _, rn := range r.Renamed {
-			fmt.Fprintf(out, "  ~ %q moved: %s → %s\n", rn.Name, rn.OldDir, rn.NewDir)
+			fmt.Fprintf(out, "  ~ %q moved: %s → %s\n", rn.Name, term.Safe(rn.OldDir), term.Safe(rn.NewDir))
 			if rn.Enabled {
 				fmt.Fprintf(out, "    Chrome cannot follow a path change — one-time re-load needed:\n")
-				fmt.Fprintf(out, "      1. Load unpacked the new dir: %s\n", rn.AbsDir)
+				fmt.Fprintf(out, "      1. Load unpacked the new dir: %s\n", term.Quote(rn.AbsDir))
 				fmt.Fprintf(out, "      2. Remove the old broken entry — run: cepm cleanup\n")
 			}
 		}
@@ -89,7 +90,7 @@ func printUpdateResults(out io.Writer, results []updater.RepoResult) (failed boo
 			fmt.Fprintf(out, "  ~ %q changed its extension id (manifest \"key\"): %s → %s\n", ic.Name, ic.OldID, ic.NewID)
 			if ic.Enabled {
 				fmt.Fprintf(out, "    Chrome sees a different extension now — one-time steps:\n")
-				fmt.Fprintf(out, "      1. Load unpacked %s\n", ic.AbsDir)
+				fmt.Fprintf(out, "      1. Load unpacked %s\n", term.Quote(ic.AbsDir))
 				fmt.Fprintf(out, "      2. Remove the old entry — run: cepm cleanup\n")
 			}
 		}

@@ -62,7 +62,7 @@ those entries via Chrome's own confirmation dialog.`,
 			// number of entries — three unanswered dialogs already exceed the
 			// five minutes an update waits, and a background update that
 			// fails does not retry until its next interval.
-			var removedIDs, goneIDs, leftIDs []string
+			var removedIDs, goneIDs, leftIDs, revivedIDs []string
 			handled := map[string]bool{}
 			for _, p := range records {
 				if handled[p.s.ID] {
@@ -79,8 +79,18 @@ those entries via Chrome's own confirmation dialog.`,
 						return err
 					}
 					if st.IsLive(p.s.ID) {
-						fmt.Fprintf(out, "%s: %q is registered again; leaving it alone\n", p.repo, p.s.Name)
-						return nil
+						// Registered again. Chrome is not ours to touch, but
+						// the record still has to go, or doctor keeps asking
+						// for a cleanup that can never do anything. (Records
+						// like this predate normalization, or came from a
+						// hand-edited file.)
+						fmt.Fprintf(out, "%s: %q is registered again; leaving Chrome alone\n", p.repo, p.s.Name)
+						for _, r := range st.Repos {
+							r.RemoveStale(p.s.ID)
+						}
+						st.RemoveOrphan(p.s.ID)
+						revivedIDs = append(revivedIDs, p.s.ID)
+						return st.Save()
 					}
 					listCtx, cancel := context.WithTimeout(cmd.Context(), 5*time.Second)
 					loaded, err := ipc.ListChrome(listCtx)
@@ -123,6 +133,9 @@ those entries via Chrome's own confirmation dialog.`,
 			}
 			if len(goneIDs) > 0 {
 				fmt.Fprintf(out, "✔ Dropped %d record(s) for entries no longer in Chrome.\n", len(goneIDs))
+			}
+			if len(revivedIDs) > 0 {
+				fmt.Fprintf(out, "✔ Dropped %d record(s) for extensions that are registered again.\n", len(revivedIDs))
 			}
 			if len(leftIDs) > 0 {
 				fmt.Fprintf(out, "%d entr%s left in Chrome (cancelled or failed); run cepm cleanup again to retry.\n",

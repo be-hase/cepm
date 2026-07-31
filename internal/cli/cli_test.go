@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/be-hase/cepm/internal/assist"
+	"github.com/be-hase/cepm/internal/extid"
 	"github.com/be-hase/cepm/internal/ipc"
 	"github.com/be-hase/cepm/internal/nmhost"
 	"github.com/be-hase/cepm/internal/nmmanifest"
@@ -342,6 +344,75 @@ func TestDuplicateIDsInExistingStateStopChromeSideEffects(t *testing.T) {
 	}
 }
 
+// Repairing has to work one repository at a time: with two independent
+// collisions, a plain all-or-nothing save would reject every intermediate
+// step and leave the file unfixable.
+func TestUninstallRepairsSeveralDuplicateGroups(t *testing.T) {
+	interactive(t)
+	host := startFakeHost(t, "xxxx", "yyyy")
+	writeRawState(t, `{"version":2,"repos":{
+      "a":{"url":"u","track":"branch","branch":"main","head":"h",
+           "extensions":[{"dir":"ext","name":"A","id":"xxxx","key":"K1"}]},
+      "b":{"url":"u","track":"branch","branch":"main","head":"h",
+           "extensions":[{"dir":"ext","name":"B","id":"xxxx","key":"K1"}]},
+      "c":{"url":"u","track":"branch","branch":"main","head":"h",
+           "extensions":[{"dir":"ext","name":"C","id":"yyyy","key":"K2"}]},
+      "d":{"url":"u","track":"branch","branch":"main","head":"h",
+           "extensions":[{"dir":"ext","name":"D","id":"yyyy","key":"K2"}]}}}`)
+
+	for _, repo := range []string{"b", "d"} {
+		if out, err := run(t, "y\n", "uninstall", repo); err != nil {
+			t.Fatalf("uninstall %s: %v\n%s", repo, err, out)
+		}
+	}
+	st, err := state.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Validate(); err != nil {
+		t.Errorf("state should be repaired after both uninstalls: %v", err)
+	}
+	host.mu.Lock()
+	defer host.mu.Unlock()
+	if len(host.uninstalled) != 0 {
+		t.Errorf("repairing must not touch Chrome, got %v", host.uninstalled)
+	}
+}
+
+// Records predating normalization can name an id that is live again. Cleanup
+// must drop them, or doctor asks forever for a cleanup that does nothing.
+func TestCleanupDropsRecordsForLiveIDs(t *testing.T) {
+	interactive(t)
+	host := startFakeHost(t, "aaaa")
+	writeRawState(t, `{"version":2,"repos":{
+      "tools":{"url":"u","track":"branch","branch":"main","head":"h",
+               "extensions":[{"dir":"ext","name":"Ext","id":"aaaa"}],
+               "stale":[{"id":"aaaa","name":"Ext","reason":"removed"}]}},
+      "orphans":[{"id":"aaaa","name":"Ext","reason":"uninstalled"}]}`)
+
+	out, err := run(t, "", "cleanup")
+	if err != nil {
+		t.Fatalf("cleanup: %v\n%s", err, out)
+	}
+	host.mu.Lock()
+	sent := len(host.uninstalled)
+	host.mu.Unlock()
+	if sent != 0 {
+		t.Errorf("a live extension must not be removed from Chrome, got %v", host.uninstalled)
+	}
+	st, _ := state.Load()
+	if len(st.Orphans) != 0 || len(st.Repos["tools"].Stale) != 0 {
+		t.Errorf("records for a live id should be gone: orphans=%+v stale=%+v", st.Orphans, st.Repos["tools"].Stale)
+	}
+	out, err = run(t, "", "cleanup")
+	if err != nil {
+		t.Fatalf("second cleanup: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "Nothing to clean up.") {
+		t.Errorf("a second run should have nothing to do:\n%s", out)
+	}
+}
+
 // The lock must be released between entries: holding it across a whole batch
 // scales with the number of dialogs and starves the background updater.
 func TestCleanupReleasesLockBetweenEntries(t *testing.T) {
@@ -517,6 +588,82 @@ func TestSetupRegistersExactlyOneChrome(t *testing.T) {
 	}
 	if _, err := os.Stat(manifestPath(v0)); !os.IsNotExist(err) {
 		t.Errorf("manifest for %s should be removed after switching", v0)
+	}
+}
+
+// Every install failure path prints something; none of them may print the
+// URL as given, because it can carry a token.
+func TestInstallErrorsDoNotLeakCredentials(t *testing.T) {
+	startFakeHost(t)
+	const url = "https://user:TOKEN@example.com/team/repo.git"
+
+	dir, err := updaterRepoDir("repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	out, err := run(t, "", "install", url)
+	if err == nil {
+		t.Fatal("install should fail here")
+	}
+	if combined := out + err.Error(); strings.Contains(combined, "TOKEN") {
+		t.Errorf("install leaked the token:\n%s", combined)
+	}
+}
+
+// The id-collision path is the newest install error and the one that echoed
+// its argument. Drive it for real: a repository whose extension pins a key
+// another registration already owns.
+func TestInstallCollisionErrorDoesNotEchoTheURL(t *testing.T) {
+	startFakeHost(t)
+	const key = "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA0lLejiTvG5ElQmwA+FNOPTFTArbjNA65OVcj5zk3efV/myX/PK/TWO7oGT1BE/9zZfbozbaAMwrk6l8FoRVMGqmPaPCfdDdbtJ+ogS+6Evw9EJ3Tx+2oLUS+ddyzLbsMkoeXe0wvDIX4vOnwi1tULgTpxBlsSQ2zF5e8oZG+wMZRb3s8iPDwskfxrqFSgAaDuNH1vmZiRzOqnz+uLNwdjGHpMrP4KTeGbrAW71EBhYFT0eT47ScdgYodPS1LnfnIobpC5ALPIsIcJnDPKNfL//rlfi4/pGXRq08jOSb1z9nz4sMNTfiHl7shswdTSM1aUu9rsIF1fWmJPXVdQ2IbZQIDAQAB"
+	keyID, err := extid.ForExtension("/unused-with-key", key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedRepo(t, "existing", state.Extension{Dir: "ext", Name: "Ext", ID: keyID, Key: key})
+
+	// A local repository providing an extension with the same key.
+	src := t.TempDir()
+	origin := filepath.Join(src, "origin.git")
+	work := filepath.Join(src, "work")
+	gitCmd(t, src, "init", "-q", "--bare", "--initial-branch=main", origin)
+	gitCmd(t, src, "clone", "-q", origin, work)
+	gitCmd(t, work, "checkout", "-q", "-b", "main")
+	if err := os.MkdirAll(filepath.Join(work, "ext"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(work, "ext", "manifest.json"),
+		[]byte(`{"manifest_version":3,"name":"Same","version":"1.0","key":"`+key+`"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, work, "add", "-A")
+	gitCmd(t, work, "commit", "-qm", "init")
+	gitCmd(t, work, "push", "-q", "origin", "main")
+
+	out, err := run(t, "", "install", origin, "--name", "newone")
+	if err == nil {
+		t.Fatal("install should refuse the colliding extension")
+	}
+	combined := out + err.Error()
+	if !strings.Contains(combined, "newone") {
+		t.Errorf("the error should name the repository:\n%s", combined)
+	}
+	if strings.Contains(err.Error(), origin) {
+		t.Errorf("the error must not echo the URL (it can carry a token):\n%s", err.Error())
+	}
+}
+
+func gitCmd(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	cmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t",
+		"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
 	}
 }
 

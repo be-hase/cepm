@@ -62,6 +62,10 @@ func newUninstallCmd() *cobra.Command {
 			}
 
 			err = updater.WithLock(cmd.Context(), func() error {
+				before, err := state.Load()
+				if err != nil {
+					return err
+				}
 				st, err := state.Load()
 				if err != nil {
 					return err
@@ -71,6 +75,12 @@ func newUninstallCmd() *cobra.Command {
 				}
 				delete(st.Repos, name)
 				st.AddOrphans(orphans)
+				if before.Validate() != nil {
+					// Repairing a file with several independent collisions has
+					// to work one repository at a time, so accept a state that
+					// is still invalid as long as it is strictly better.
+					return st.SaveRepair(before)
+				}
 				return st.Save()
 			})
 			if err != nil {

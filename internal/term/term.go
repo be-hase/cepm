@@ -1,0 +1,58 @@
+// Package term prepares values for the terminal.
+//
+// Much of what cepm prints comes from a repository: branch names, extension
+// directories, manifest names. Two things must never happen with such values:
+// they must not become extra commands when a user copies a suggested command,
+// and they must not forge lines or hide text with control characters.
+package term
+
+import (
+	"strings"
+	"unicode"
+)
+
+// Quote renders s as a single POSIX shell word, so a value with spaces,
+// semicolons or $(...) stays one argument when pasted into a shell.
+func Quote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// Safe makes s printable: control characters (newlines, carriage returns,
+// escape sequences) are replaced with a visible form so a value cannot forge
+// a table row, blank a line, or dress itself up with colour.
+func Safe(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r == '\t':
+			b.WriteByte(' ')
+		case unicode.IsControl(r):
+			b.WriteString("\\x")
+			const hex = "0123456789abcdef"
+			b.WriteByte(hex[(r>>4)&0xF])
+			b.WriteByte(hex[r&0xF])
+		case isBidi(r):
+			// Bidirectional overrides can visually reorder a line.
+			b.WriteString("\\u200e")
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// isBidi reports whether r can reorder how a line is displayed.
+func isBidi(r rune) bool {
+	return (r >= 0x200E && r <= 0x200F) || (r >= 0x202A && r <= 0x202E) || (r >= 0x2066 && r <= 0x2069)
+}
+
+// HasControl reports whether s contains characters that have no place in a
+// value cepm will print or pass around.
+func HasControl(s string) bool {
+	for _, r := range s {
+		if unicode.IsControl(r) || isBidi(r) {
+			return true
+		}
+	}
+	return false
+}

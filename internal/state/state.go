@@ -284,6 +284,45 @@ func (s *State) DuplicateLiveID() (id string, a, b ExtRef) {
 	return "", ExtRef{}, ExtRef{}
 }
 
+// DuplicateIDs returns every id claimed by more than one registered
+// extension.
+func (s *State) DuplicateIDs() map[string]bool {
+	count := map[string]int{}
+	for _, name := range s.RepoNames() {
+		for _, e := range s.Repos[name].Extensions {
+			count[e.ID]++
+		}
+	}
+	dups := map[string]bool{}
+	for id, n := range count {
+		if n > 1 {
+			dups[id] = true
+		}
+	}
+	return dups
+}
+
+// SaveRepair writes a state that may still be invalid, provided it is
+// strictly closer to valid than before: no new collision, and at least one
+// resolved. Repairing a file with several independent collisions has to be
+// possible one repository at a time, which a plain Save — all or nothing —
+// cannot express.
+func (s *State) SaveRepair(before *State) error {
+	was, now := before.DuplicateIDs(), s.DuplicateIDs()
+	for id := range now {
+		if !was[id] {
+			return fmt.Errorf("refusing to save: this would create a new duplicate extension id %s", id)
+		}
+	}
+	if len(now) >= len(was) {
+		return fmt.Errorf("refusing to save: %d duplicate extension id(s) before and %d after, no progress",
+			len(was), len(now))
+	}
+	s.normalize()
+	s.Version = Version
+	return s.save()
+}
+
 // Validate reports a state that cepm must not act on. It exists because
 // earlier versions could write duplicate ids: the file on disk may already be
 // inconsistent, and finding that out only at save time would be too late —
