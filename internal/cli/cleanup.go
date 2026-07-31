@@ -31,72 +31,72 @@ those entries via Chrome's own confirmation dialog.`,
 				return errors.New("cepm cleanup needs a terminal: Chrome asks for confirmation before removing an extension")
 			}
 
-			// Everything — including the dialog waits — runs under the update
-			// lock. An automatic update pausing for a few minutes is cheap;
-			// the alternative is a window in which an update revives an
-			// extension after we checked it and before the user confirms the
-			// dialog, and cleanup uninstalls something that works again.
-			// (Dialog waits are bounded by the host's uninstall timeout, so
-			// the lock cannot be held indefinitely.)
+			// Which entries to consider. Collected without the lock: each one
+			// is re-checked under it before anything happens to it.
+			st, err := state.Load()
+			if err != nil {
+				return err
+			}
+			type staleRef struct {
+				repo string
+				s    state.StaleExtension
+			}
+			var records []staleRef
+			for _, name := range st.RepoNames() {
+				for _, s := range st.Repos[name].Stale {
+					records = append(records, staleRef{name, s})
+				}
+			}
+			// Entries whose repository was uninstalled before they were
+			// removed from Chrome.
+			for _, o := range st.Orphans {
+				records = append(records, staleRef{"(uninstalled repo)", o})
+			}
+			if len(records) == 0 {
+				fmt.Fprintln(out, "Nothing to clean up.")
+				return nil
+			}
+
+			// One id at a time, each holding the update lock only for its own
+			// dialog. Holding it across the whole batch would scale with the
+			// number of entries — three unanswered dialogs already exceed the
+			// five minutes an update waits, and a background update that
+			// fails does not retry until its next interval.
 			var removedIDs, goneIDs, leftIDs []string
-			err := updater.WithLock(cmd.Context(), func() error {
-				listCtx, cancel := context.WithTimeout(cmd.Context(), 5*time.Second)
-				loaded, err := ipc.ListChrome(listCtx)
-				cancel()
-				if errors.Is(err, ipc.ErrHostNotRunning) {
-					return errors.New("Chrome is not reachable; start Chrome (with the helper loaded) and retry")
+			handled := map[string]bool{}
+			for _, p := range records {
+				if handled[p.s.ID] {
+					continue // the same id can be recorded more than once
 				}
-				if err != nil {
-					return err
-				}
-				loadedSet := map[string]bool{}
-				for _, e := range loaded {
-					loadedSet[e.ID] = true
-				}
+				handled[p.s.ID] = true
 
-				st, err := state.Load()
-				if err != nil {
-					return err
-				}
-				type staleRef struct {
-					repo string
-					s    state.StaleExtension
-				}
-				var records []staleRef
-				for _, name := range st.RepoNames() {
-					for _, s := range st.Repos[name].Stale {
-						records = append(records, staleRef{name, s})
+				err := updater.WithLock(cmd.Context(), func() error {
+					// Re-read inside the lock: an update between entries may
+					// have registered this extension again, and removing a
+					// live extension is the one thing cleanup must never do.
+					st, err := state.Load()
+					if err != nil {
+						return err
 					}
-				}
-				// Entries whose repository was uninstalled before they were
-				// removed from Chrome.
-				for _, o := range st.Orphans {
-					records = append(records, staleRef{"(uninstalled repo)", o})
-				}
-				if len(records) == 0 {
-					fmt.Fprintln(out, "Nothing to clean up.")
-					return nil
-				}
-
-				// One decision per id: the same id can be recorded by more
-				// than one repo, and counting records would misreport what
-				// happened in Chrome.
-				handled := map[string]bool{}
-				for _, p := range records {
-					if handled[p.s.ID] {
-						continue
-					}
-					handled[p.s.ID] = true
-					switch {
-					case st.IsLive(p.s.ID):
-						// Registered again (a reinstall, a reverted deletion):
-						// no longer ours to remove. The record is dropped by
-						// Save's normalization below.
+					if st.IsLive(p.s.ID) {
 						fmt.Fprintf(out, "%s: %q is registered again; leaving it alone\n", p.repo, p.s.Name)
-					case !loadedSet[p.s.ID]:
+						return nil
+					}
+					listCtx, cancel := context.WithTimeout(cmd.Context(), 5*time.Second)
+					loaded, err := ipc.ListChrome(listCtx)
+					cancel()
+					if errors.Is(err, ipc.ErrHostNotRunning) {
+						return errors.New("Chrome is not reachable; start Chrome (with the helper loaded) and retry")
+					}
+					if err != nil {
+						return err
+					}
+					if !containsID(loaded, p.s.ID) {
 						goneIDs = append(goneIDs, p.s.ID) // already gone from Chrome
-					default:
+					} else {
 						fmt.Fprintf(out, "%s: %q (%s)\n", p.repo, p.s.Name, p.s.Reason)
+						// The dialog wait stays inside the lock: this is the
+						// window where a revival would be fatal.
 						uninstallViaChrome(cmd.Context(), cmd, p.s.ID, p.s.Name)
 						stillCtx, cancel := context.WithTimeout(cmd.Context(), 5*time.Second)
 						still, listErr := ipc.ListChrome(stillCtx)
@@ -105,20 +105,18 @@ those entries via Chrome's own confirmation dialog.`,
 							removedIDs = append(removedIDs, p.s.ID)
 						} else {
 							leftIDs = append(leftIDs, p.s.ID)
+							return nil // nothing to clear from state
 						}
 					}
-				}
-
-				for _, id := range append(append([]string(nil), goneIDs...), removedIDs...) {
 					for _, r := range st.Repos {
-						r.RemoveStale(id)
+						r.RemoveStale(p.s.ID)
 					}
-					st.RemoveOrphan(id)
+					st.RemoveOrphan(p.s.ID)
+					return st.Save()
+				})
+				if err != nil {
+					return err
 				}
-				return st.Save()
-			})
-			if err != nil {
-				return err
 			}
 			if len(removedIDs) > 0 {
 				fmt.Fprintf(out, "✔ Removed %d extension(s) from Chrome.\n", len(removedIDs))

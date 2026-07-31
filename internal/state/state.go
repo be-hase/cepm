@@ -253,30 +253,53 @@ func (s *State) normalize() {
 	}
 }
 
-// DuplicateLiveID returns the two repo names sharing a live extension id, or
-// ("", "") when every live id has exactly one owner. Chrome has one entity
-// per id, so two registered extensions with the same id (same manifest key in
-// two places) would fight over it: uninstalling one repo would remove the
-// other's extension, and nothing could tell which directory Chrome actually
-// loaded.
-func (s *State) DuplicateLiveID() (id, repoA, repoB string) {
-	owner := map[string]string{}
+// ExtRef names one registered extension: the repository and the directory
+// inside it. Directories are what a user loads into Chrome, so this — not the
+// repository alone — is the unit that must own an extension id.
+type ExtRef struct {
+	Repo string
+	Dir  string
+}
+
+func (r ExtRef) String() string { return r.Repo + "/" + r.Dir }
+
+// DuplicateLiveID returns the id two registered extensions share, together
+// with both owners, or ("", …) when every live id has exactly one owner.
+// Chrome has one entity per id, so two registrations claiming the same id
+// (the same manifest "key" in two places, whether or not they are in the same
+// repository) would fight over it: there is no way to say which directory
+// Chrome loaded, disabling one loses the other's extension too, and reload
+// and doctor cannot tell them apart.
+func (s *State) DuplicateLiveID() (id string, a, b ExtRef) {
+	owner := map[string]ExtRef{}
 	for _, name := range s.RepoNames() {
 		for _, e := range s.Repos[name].Extensions {
-			if prev, taken := owner[e.ID]; taken && prev != name {
-				return e.ID, prev, name
+			ref := ExtRef{Repo: name, Dir: e.Dir}
+			if prev, taken := owner[e.ID]; taken {
+				return e.ID, prev, ref
 			}
-			owner[e.ID] = name
+			owner[e.ID] = ref
 		}
 	}
-	return "", "", ""
+	return "", ExtRef{}, ExtRef{}
+}
+
+// Validate reports a state that cepm must not act on. It exists because
+// earlier versions could write duplicate ids: the file on disk may already be
+// inconsistent, and finding that out only at save time would be too late —
+// by then a command may have removed something from Chrome.
+func (s *State) Validate() error {
+	if id, a, b := s.DuplicateLiveID(); id != "" {
+		return fmt.Errorf("%s and %s both claim extension id %s "+
+			"(they pin the same manifest \"key\"); uninstall one of them", a, b, id)
+	}
+	return nil
 }
 
 // Save writes state.json atomically.
 func (s *State) Save() error {
-	if id, a, b := s.DuplicateLiveID(); id != "" {
-		return fmt.Errorf("refusing to save: repositories %q and %q both register extension id %s "+
-			"(two copies of an extension that pins its id with a manifest \"key\")", a, b, id)
+	if err := s.Validate(); err != nil {
+		return fmt.Errorf("refusing to save: %w", err)
 	}
 	s.normalize()
 	s.Version = Version

@@ -285,6 +285,119 @@ func TestCleanupCountsUniqueIDs(t *testing.T) {
 	}
 }
 
+// writeRawState puts a state.json on disk without going through Save, so a
+// test can reproduce a file an older cepm was able to write.
+func writeRawState(t *testing.T, content string) {
+	t.Helper()
+	p, err := paths.StateFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Versions before the uniqueness rule could save two extensions sharing an
+// id. Acting on such a file would remove one repository's extension from
+// Chrome on behalf of another, so commands that touch Chrome must stop first
+// — and uninstall, the way out, must not touch Chrome either.
+func TestDuplicateIDsInExistingStateStopChromeSideEffects(t *testing.T) {
+	interactive(t)
+	host := startFakeHost(t, "xxxx")
+	writeRawState(t, `{"version":2,"repos":{
+      "a":{"url":"u1","track":"branch","branch":"main","head":"h",
+           "extensions":[{"dir":"ext","name":"One","id":"xxxx","key":"K"}]},
+      "b":{"url":"u2","track":"branch","branch":"main","head":"h",
+           "extensions":[{"dir":"other","name":"Two","id":"xxxx","key":"K"}]}}}`)
+
+	for _, args := range [][]string{{"cleanup"}, {"reload"}, {"update"}, {"enable", "a"}} {
+		if _, err := run(t, "", args...); err == nil {
+			t.Errorf("%v should refuse to run on a state with duplicate ids", args)
+		}
+	}
+
+	// uninstall is the repair path: it unregisters, but must not act on an
+	// id it cannot attribute.
+	out, err := run(t, "y\n", "uninstall", "b")
+	if err != nil {
+		t.Fatalf("uninstall should still work: %v\n%s", err, out)
+	}
+	host.mu.Lock()
+	sent := len(host.uninstalled)
+	host.mu.Unlock()
+	if sent != 0 {
+		t.Errorf("nothing should have been removed from Chrome, got %v", host.uninstalled)
+	}
+	st, err := state.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Validate(); err != nil {
+		t.Errorf("uninstalling one side should resolve the duplicate: %v", err)
+	}
+	// And now the normal commands work again.
+	if _, err := run(t, "", "reload"); err != nil && strings.Contains(err.Error(), "claim extension id") {
+		t.Errorf("commands should work once the duplicate is gone: %v", err)
+	}
+}
+
+// The lock must be released between entries: holding it across a whole batch
+// scales with the number of dialogs and starves the background updater.
+func TestCleanupReleasesLockBetweenEntries(t *testing.T) {
+	interactive(t)
+	host := startFakeHost(t, "aaaa", "bbbb")
+	seedRepo(t, "tools",
+		state.Extension{Dir: "a", Name: "A", ID: "aaaa"},
+		state.Extension{Dir: "b", Name: "B", ID: "bbbb"},
+	)
+	st, _ := state.Load()
+	st.Repos["tools"].Extensions = nil
+	st.Repos["tools"].AddStale(state.StaleExtension{ID: "aaaa", Name: "A", Reason: "removed"})
+	st.Repos["tools"].AddStale(state.StaleExtension{ID: "bbbb", Name: "B", Reason: "removed"})
+	if err := st.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Observed at each dialog: is the lock held, and has the previous entry
+	// already been committed? Committing per entry is what proves the lock is
+	// taken and released once per id — with a single batch-wide lock the
+	// state would only change after the last dialog.
+	var priorCommitted []bool
+	host.onUninstall = func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := updater.WithLock(ctx, func() error { return nil }); err == nil {
+			t.Error("the lock must be held while a dialog is pending")
+		}
+		st, err := state.Load()
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		stillRecorded := false
+		for _, s := range st.Repos["tools"].Stale {
+			if s.ID == "aaaa" {
+				stillRecorded = true
+			}
+		}
+		priorCommitted = append(priorCommitted, !stillRecorded)
+	}
+
+	if out, err := run(t, "", "cleanup"); err != nil {
+		t.Fatalf("cleanup: %v\n%s", err, out)
+	}
+	if len(priorCommitted) != 2 {
+		t.Fatalf("expected two dialogs, saw %d", len(priorCommitted))
+	}
+	if priorCommitted[0] {
+		t.Error("nothing should be committed before the first dialog")
+	}
+	if !priorCommitted[1] {
+		t.Error("the first entry must be committed before the second dialog: the lock is per entry, not per batch")
+	}
+}
+
 // Extension ids are derived deterministically, so reinstalling a repo brings
 // back an id that an earlier uninstall recorded as an orphan. Cleanup must
 // not then remove the extension that is working again.

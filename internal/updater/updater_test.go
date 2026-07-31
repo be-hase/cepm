@@ -310,6 +310,32 @@ func TestUpdateRefusesKeyCollisionAcrossRepos(t *testing.T) {
 	}
 }
 
+// Two directories in one repository pinning the same key collide just as
+// badly as two repositories doing it.
+func TestUpdateRefusesKeyCollisionWithinRepo(t *testing.T) {
+	const key = "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA0lLejiTvG5ElQmwA+FNOPTFTArbjNA65OVcj5zk3efV/myX/PK/TWO7oGT1BE/9zZfbozbaAMwrk6l8FoRVMGqmPaPCfdDdbtJ+ogS+6Evw9EJ3Tx+2oLUS+ddyzLbsMkoeXe0wvDIX4vOnwi1tULgTpxBlsSQ2zF5e8oZG+wMZRb3s8iPDwskfxrqFSgAaDuNH1vmZiRzOqnz+uLNwdjGHpMrP4KTeGbrAW71EBhYFT0eT47ScdgYodPS1LnfnIobpC5ALPIsIcJnDPKNfL//rlfi4/pGXRq08jOSb1z9nz4sMNTfiHl7shswdTSM1aUu9rsIF1fWmJPXVdQ2IbZQIDAQAB"
+	author := setupRepo(t, "mytools")
+	for _, dir := range []string{"alpha", "beta"} {
+		writeFile(t, filepath.Join(author, "ext", dir, "manifest.json"),
+			`{"manifest_version":3,"name":"`+dir+`","version":"1.0","key":"`+key+`"}`)
+	}
+	git(t, author, "add", "-A")
+	git(t, author, "commit", "-m", "same key twice")
+	git(t, author, "push", "origin", "main")
+
+	results, err := Update(context.Background(), nil, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if results[0].Err == nil {
+		t.Fatal("two directories with the same key must fail the refresh")
+	}
+	st, _ := state.Load()
+	if len(st.Repos["mytools"].Extensions) != 2 {
+		t.Errorf("the previous registration must survive: %+v", st.Repos["mytools"].Extensions)
+	}
+}
+
 // A release can be re-tagged onto a new commit; following the tag name alone
 // would leave the working tree on the old one forever.
 func TestUpdateFollowsForceMovedTag(t *testing.T) {

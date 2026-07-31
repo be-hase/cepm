@@ -133,13 +133,32 @@ func TestSaveDropsRecordsForLiveIDs(t *testing.T) {
 // repo is uninstalled first would take the other's extension with it.
 func TestSaveRefusesDuplicateLiveIDs(t *testing.T) {
 	t.Setenv("CEPM_HOME", t.TempDir())
+
+	// Across repositories.
 	s := New()
 	s.Repos["a"] = &Repo{URL: "u1", Track: TrackBranch, Branch: "main",
 		Extensions: []Extension{{Dir: "ext", Name: "One", ID: "xxxx", Key: "K"}}}
 	s.Repos["b"] = &Repo{URL: "u2", Track: TrackBranch, Branch: "main",
 		Extensions: []Extension{{Dir: "other", Name: "Two", ID: "xxxx", Key: "K"}}}
 	if err := s.Save(); err == nil {
-		t.Fatal("Save must refuse two live extensions with the same id")
+		t.Error("Save must refuse two live extensions with the same id")
+	}
+
+	// And within one repository: two directories can pin the same key, and
+	// the resulting ambiguity is identical — Chrome still has one entity.
+	s2 := New()
+	s2.Repos["a"] = &Repo{URL: "u1", Track: TrackBranch, Branch: "main",
+		Extensions: []Extension{
+			{Dir: "one", Name: "One", ID: "xxxx", Key: "K"},
+			{Dir: "two", Name: "Two", ID: "xxxx", Key: "K"},
+		}}
+	if err := s2.Save(); err == nil {
+		t.Error("Save must refuse duplicate ids inside a single repository")
+	}
+	// The report has to name the directories, not just the repository.
+	id, a, b := s2.DuplicateLiveID()
+	if id != "xxxx" || a.Dir == b.Dir {
+		t.Errorf("DuplicateLiveID should identify both directories, got %s: %s and %s", id, a, b)
 	}
 }
 

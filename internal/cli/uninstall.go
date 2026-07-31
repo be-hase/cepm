@@ -38,7 +38,17 @@ func newUninstallCmd() *cobra.Command {
 			for _, s := range repo.Stale {
 				candidates = append(candidates, state.Extension{Name: s.Name, ID: s.ID})
 			}
-			gone := offerChromeRemoval(cmd, candidates)
+			// With duplicate ids on record, an id does not identify one
+			// extension, so removing it from Chrome could take another
+			// registration's extension with it. Unregister anyway — that is
+			// how the duplicate is resolved — but touch nothing in Chrome.
+			gone := map[string]bool{}
+			if err := st.Validate(); err != nil {
+				fmt.Fprintf(out, "⚠ Not touching Chrome: %v\n", err)
+				fmt.Fprintf(out, "  Unregistering %q anyway; run cepm cleanup afterwards.\n", name)
+			} else {
+				gone = offerChromeRemoval(cmd, candidates)
+			}
 
 			// Whatever is still in Chrome outlives its repository; keep a
 			// record so cleanup can finish later.

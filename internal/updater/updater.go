@@ -390,12 +390,15 @@ func refreshExtensions(name string, r *state.Repo, dir string, res *RepoResult, 
 		}
 		if owner, taken := takenIDs[id]; taken {
 			// Chrome has one entity per id: two live registrations would
-			// fight over it (uninstalling one repo removes the other's
-			// extension). Refuse the whole refresh, keeping the old state.
-			res.Err = fmt.Errorf("%s would get extension id %s, which repository %q already registers "+
+			// fight over it (uninstalling one removes the other's extension).
+			// Refuse the whole refresh, keeping the old state. takenIDs also
+			// accumulates this repo's own directories, so two of them pinning
+			// the same key is caught here too.
+			res.Err = fmt.Errorf("%s would get extension id %s, which %s already registers "+
 				"(both pin the same manifest \"key\")", e.Dir, id, owner)
 			return
 		}
+		takenIDs[id] = name + "/" + e.Dir
 		se := state.Extension{Dir: e.Dir, Name: e.Name, Key: e.Key, ID: id}
 		if prev, existed := old[e.Dir]; existed {
 			se.Disabled = prev.Disabled
