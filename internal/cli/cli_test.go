@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/be-hase/cepm/internal/assist"
 	"github.com/be-hase/cepm/internal/ipc"
@@ -16,6 +17,7 @@ import (
 	"github.com/be-hase/cepm/internal/nmmanifest"
 	"github.com/be-hase/cepm/internal/paths"
 	"github.com/be-hase/cepm/internal/state"
+	"github.com/be-hase/cepm/internal/updater"
 )
 
 // fakeHost stands in for the native messaging host: it serves the control
@@ -29,6 +31,9 @@ type fakeHost struct {
 	// reposAtUninstall records how many repositories were still registered
 	// when a removal request arrived, which is what pins the ordering.
 	reposAtUninstall []int
+	// onUninstall runs while a removal request is being handled — the moment
+	// the real Chrome would be showing its confirmation dialog.
+	onUninstall func()
 }
 
 func startFakeHost(t *testing.T, loaded ...string) *fakeHost {
@@ -81,6 +86,9 @@ func (h *fakeHost) handle(_ context.Context, req ipc.Request) ipc.Response {
 		}
 		if st, err := state.Load(); err == nil {
 			h.reposAtUninstall = append(h.reposAtUninstall, len(st.Repos))
+		}
+		if h.onUninstall != nil {
+			h.onUninstall()
 		}
 		if !h.loaded[req.ID] {
 			return ipc.Response{OK: true, Status: ipc.StatusNotInstalled}
@@ -220,6 +228,60 @@ func TestUninstallKeepsOrphanWhenUserDeclines(t *testing.T) {
 	st, _ = state.Load()
 	if len(st.Orphans) != 0 {
 		t.Errorf("cleanup should clear the orphan, got %+v", st.Orphans)
+	}
+}
+
+// While cleanup waits on Chrome's confirmation dialog it must hold the update
+// lock: otherwise an automatic update can revive the extension between the
+// liveness check and the user pressing "Remove", and the removal then hits a
+// working extension. The fake host stands in for the dialog and probes the
+// lock at exactly that moment.
+func TestCleanupExcludesUpdatesWhileDialogIsOpen(t *testing.T) {
+	interactive(t)
+	host := startFakeHost(t, "aaaa")
+	host.onUninstall = func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if err := updater.WithLock(ctx, func() error { return nil }); err == nil {
+			t.Error("the update lock must be held while a removal dialog is pending")
+		}
+	}
+	seedRepo(t, "tools", state.Extension{Dir: "ext", Name: "Ext", ID: "aaaa"})
+	if out, err := run(t, "n\n", "uninstall", "tools"); err != nil {
+		t.Fatalf("uninstall: %v\n%s", err, out)
+	}
+	if out, err := run(t, "", "cleanup"); err != nil {
+		t.Fatalf("cleanup: %v\n%s", err, out)
+	}
+}
+
+// One id, several records (a stale entry and an orphan): the summary counts
+// what happened in Chrome, not how many records pointed at it.
+func TestCleanupCountsUniqueIDs(t *testing.T) {
+	interactive(t)
+	startFakeHost(t, "aaaa")
+	seedRepo(t, "tools", state.Extension{Dir: "ext", Name: "Ext", ID: "aaaa"})
+	if out, err := run(t, "n\n", "uninstall", "tools"); err != nil { // → orphan aaaa
+		t.Fatalf("uninstall: %v\n%s", err, out)
+	}
+	// A second record for the same id, via a repo-level stale entry.
+	st, _ := state.Load()
+	seedRepo(t, "other", state.Extension{Dir: "x", Name: "X", ID: "bbbb"})
+	st, _ = state.Load()
+	st.Repos["other"].AddStale(state.StaleExtension{ID: "aaaa", Name: "Ext", Reason: "removed"})
+	if err := st.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := run(t, "", "cleanup")
+	if err != nil {
+		t.Fatalf("cleanup: %v\n%s", err, out)
+	}
+	if strings.Contains(out, "left in Chrome") {
+		t.Errorf("nothing failed, so no retry message should appear:\n%s", out)
+	}
+	if !strings.Contains(out, "Removed 1 extension(s)") {
+		t.Errorf("one unique id was removed once:\n%s", out)
 	}
 }
 

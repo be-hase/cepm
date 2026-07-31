@@ -172,7 +172,9 @@ restores them around the pull.
   files updated but keep running old code until it restarts. Across Chrome
   *variants* (Stable, Beta, Canary, Chromium) this is enforced for you:
   `cepm setup --chrome-variant <x>` registers exactly that Chrome and removes
-  the registration from any other, so switching Chromes is one command.
+  the registration from any other, so switching Chromes is one command —
+  plus quitting the previous Chrome, which otherwise keeps its already-running
+  connection until it exits (setup warns when it detects that).
   Within a single Chrome, profiles share that registration, so keeping the
   helper out of second profiles stays your job.
 - The helper extension needs the `management` permission (to toggle other

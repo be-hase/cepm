@@ -268,6 +268,48 @@ func TestUpdateReportsIdentityChangeWhenKeyAppears(t *testing.T) {
 	}
 }
 
+// A key pushed to one repo that collides with an id another repo already
+// registers must fail that repo's refresh without corrupting either.
+func TestUpdateRefusesKeyCollisionAcrossRepos(t *testing.T) {
+	const key = "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA0lLejiTvG5ElQmwA+FNOPTFTArbjNA65OVcj5zk3efV/myX/PK/TWO7oGT1BE/9zZfbozbaAMwrk6l8FoRVMGqmPaPCfdDdbtJ+ogS+6Evw9EJ3Tx+2oLUS+ddyzLbsMkoeXe0wvDIX4vOnwi1tULgTpxBlsSQ2zF5e8oZG+wMZRb3s8iPDwskfxrqFSgAaDuNH1vmZiRzOqnz+uLNwdjGHpMrP4KTeGbrAW71EBhYFT0eT47ScdgYodPS1LnfnIobpC5ALPIsIcJnDPKNfL//rlfi4/pGXRq08jOSb1z9nz4sMNTfiHl7shswdTSM1aUu9rsIF1fWmJPXVdQ2IbZQIDAQAB"
+	author := setupRepo(t, "mytools")
+
+	// Another repo already owns the id this key derives to.
+	keyID, err := extid.ForExtension("/irrelevant-with-key", key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, _ := state.Load()
+	st.Repos["other"] = &state.Repo{
+		URL: "u2", Track: state.TrackBranch, Branch: "main", Head: "abc",
+		Extensions: []state.Extension{{Dir: "pinned", Name: "Pinned", ID: keyID, Key: key}},
+	}
+	if err := st.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	writeFile(t, filepath.Join(author, "ext", "alpha", "manifest.json"),
+		`{"manifest_version":3,"name":"Alpha","version":"1.0","key":"`+key+`"}`)
+	git(t, author, "add", "-A")
+	git(t, author, "commit", "-m", "collide")
+	git(t, author, "push", "origin", "main")
+
+	results, err := Update(context.Background(), []string{"mytools"}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if results[0].Err == nil {
+		t.Fatal("the colliding refresh must fail")
+	}
+	st2, _ := state.Load()
+	if st2.Repos["mytools"].FindExtension(filepath.Join("ext", "alpha")) == nil {
+		t.Error("mytools' registration must survive the failed refresh")
+	}
+	if st2.Repos["other"].FindExtension("pinned") == nil {
+		t.Error("the other repo must be untouched")
+	}
+}
+
 // A release can be re-tagged onto a new commit; following the tag name alone
 // would leave the working tree on the old one forever.
 func TestUpdateFollowsForceMovedTag(t *testing.T) {

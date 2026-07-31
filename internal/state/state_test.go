@@ -128,6 +128,21 @@ func TestSaveDropsRecordsForLiveIDs(t *testing.T) {
 	}
 }
 
+// Chrome has one entity per extension id, so two live registrations with the
+// same id (the same manifest "key" in two places) cannot coexist: whichever
+// repo is uninstalled first would take the other's extension with it.
+func TestSaveRefusesDuplicateLiveIDs(t *testing.T) {
+	t.Setenv("CEPM_HOME", t.TempDir())
+	s := New()
+	s.Repos["a"] = &Repo{URL: "u1", Track: TrackBranch, Branch: "main",
+		Extensions: []Extension{{Dir: "ext", Name: "One", ID: "xxxx", Key: "K"}}}
+	s.Repos["b"] = &Repo{URL: "u2", Track: TrackBranch, Branch: "main",
+		Extensions: []Extension{{Dir: "other", Name: "Two", ID: "xxxx", Key: "K"}}}
+	if err := s.Save(); err == nil {
+		t.Fatal("Save must refuse two live extensions with the same id")
+	}
+}
+
 func TestStaleBookkeeping(t *testing.T) {
 	r := &Repo{}
 	r.AddStale(StaleExtension{ID: "aaa", Name: "A", Reason: "removed"})

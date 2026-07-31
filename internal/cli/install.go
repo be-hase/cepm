@@ -119,6 +119,19 @@ func runInstall(cmd *cobra.Command, url string, flags installFlags) error {
 		if _, exists := st.Repos[name]; exists {
 			return fmt.Errorf("repository %q is already registered", name)
 		}
+		// One owner per extension id: a second copy of an extension that
+		// pins its id with a manifest "key" would fight over the same Chrome
+		// entity as the first.
+		for _, e := range repo.Extensions {
+			for _, other := range st.RepoNames() {
+				for _, oe := range st.Repos[other].Extensions {
+					if oe.ID == e.ID {
+						return fmt.Errorf("extension %q would get id %s, which repository %q already registers "+
+							"(both pin the same manifest \"key\"); uninstall it first", e.Name, e.ID, other)
+					}
+				}
+			}
+		}
 		st.Repos[name] = repo
 		return st.Save()
 	})

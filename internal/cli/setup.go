@@ -90,6 +90,19 @@ func runSetup(cmd *cobra.Command, variant string, force bool) error {
 	for _, p := range removed {
 		fmt.Fprintf(out, "✔ Removed registration for a previously used Chrome: %s\n", p)
 	}
+	if len(removed) > 0 {
+		// Removing a manifest does not touch a host the old Chrome already
+		// started — and as long as that Chrome runs the helper, it restarts
+		// the host (and can hold the leader role) no matter what we do here.
+		// The switch is only complete once the old Chrome exits.
+		pingCtx, pingCancel := context.WithTimeout(cmd.Context(), 2*time.Second)
+		_, pingErr := ipc.Ping(pingCtx)
+		pingCancel()
+		if pingErr == nil {
+			fmt.Fprintf(out, "\n⚠ A cepm host is still running — likely started by the previous Chrome.\n")
+			fmt.Fprintf(out, "  Quit that Chrome completely; until then it may keep receiving the updates.\n")
+		}
+	}
 
 	// A running helper keeps its current code until Chrome restarts: the only
 	// self-reload API (chrome.runtime.reload) drops the native messaging port

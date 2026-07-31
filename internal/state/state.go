@@ -253,8 +253,31 @@ func (s *State) normalize() {
 	}
 }
 
+// DuplicateLiveID returns the two repo names sharing a live extension id, or
+// ("", "") when every live id has exactly one owner. Chrome has one entity
+// per id, so two registered extensions with the same id (same manifest key in
+// two places) would fight over it: uninstalling one repo would remove the
+// other's extension, and nothing could tell which directory Chrome actually
+// loaded.
+func (s *State) DuplicateLiveID() (id, repoA, repoB string) {
+	owner := map[string]string{}
+	for _, name := range s.RepoNames() {
+		for _, e := range s.Repos[name].Extensions {
+			if prev, taken := owner[e.ID]; taken && prev != name {
+				return e.ID, prev, name
+			}
+			owner[e.ID] = name
+		}
+	}
+	return "", "", ""
+}
+
 // Save writes state.json atomically.
 func (s *State) Save() error {
+	if id, a, b := s.DuplicateLiveID(); id != "" {
+		return fmt.Errorf("refusing to save: repositories %q and %q both register extension id %s "+
+			"(two copies of an extension that pins its id with a manifest \"key\")", a, b, id)
+	}
 	s.normalize()
 	s.Version = Version
 	return s.save()

@@ -133,7 +133,7 @@ func Update(ctx context.Context, names []string, opts Options) ([]RepoResult, er
 				})
 				continue
 			}
-			res := updateRepo(ctx, name, repo, opts)
+			res := updateRepo(ctx, name, repo, opts, liveIDsExcept(st, name))
 			repo.LastPull = time.Now()
 			if res.Err != nil {
 				repo.LastError = res.Err.Error()
@@ -150,7 +150,22 @@ func Update(ctx context.Context, names []string, opts Options) ([]RepoResult, er
 	return results, nil
 }
 
-func updateRepo(ctx context.Context, name string, r *state.Repo, opts Options) RepoResult {
+// liveIDsExcept maps every registered extension id to its repo, skipping one
+// repo — the set a refresh of that repo must not collide with.
+func liveIDsExcept(st *state.State, skip string) map[string]string {
+	taken := map[string]string{}
+	for _, name := range st.RepoNames() {
+		if name == skip {
+			continue
+		}
+		for _, e := range st.Repos[name].Extensions {
+			taken[e.ID] = name
+		}
+	}
+	return taken
+}
+
+func updateRepo(ctx context.Context, name string, r *state.Repo, opts Options, takenIDs map[string]string) RepoResult {
 	res := RepoResult{Name: name}
 	dir, err := RepoDir(name)
 	if err != nil {
@@ -219,7 +234,7 @@ func updateRepo(ctx context.Context, name string, r *state.Repo, opts Options) R
 	slog.Debug("repo moved", "repo", name, "from", res.OldRef, "to", res.NewRef, "track", r.Track)
 	if newHead == oldHead || oldHead == "" {
 		r.Head = newHead
-		refreshExtensions(name, r, dir, &res, nil)
+		refreshExtensions(name, r, dir, &res, nil, takenIDs)
 		return res
 	}
 	res.Updated = true
@@ -230,7 +245,7 @@ func updateRepo(ctx context.Context, name string, r *state.Repo, opts Options) R
 		return res
 	}
 	r.Head = newHead
-	refreshExtensions(name, r, dir, &res, changedFiles)
+	refreshExtensions(name, r, dir, &res, changedFiles, takenIDs)
 	return res
 }
 
@@ -351,7 +366,7 @@ func LatestTag(tags []string, includePrerelease bool) (latest string, warning st
 // and appeared directories; removed or renamed-away entries are recorded as
 // stale so "cepm cleanup" can clear the broken Chrome copies later.
 // changedFiles may be nil (no revision change).
-func refreshExtensions(name string, r *state.Repo, dir string, res *RepoResult, changedFiles []string) {
+func refreshExtensions(name string, r *state.Repo, dir string, res *RepoResult, changedFiles []string, takenIDs map[string]string) {
 	exts, err := scan.Detect(dir)
 	if err != nil {
 		res.Warnings = append(res.Warnings, fmt.Sprintf("extension scan failed: %v", err))
@@ -371,6 +386,14 @@ func refreshExtensions(name string, r *state.Repo, dir string, res *RepoResult, 
 			// working extension (losing its enable choice and marking it for
 			// cleanup) because a pulled commit has a malformed "key".
 			res.Err = fmt.Errorf("%s: %w", e.Dir, err)
+			return
+		}
+		if owner, taken := takenIDs[id]; taken {
+			// Chrome has one entity per id: two live registrations would
+			// fight over it (uninstalling one repo removes the other's
+			// extension). Refuse the whole refresh, keeping the old state.
+			res.Err = fmt.Errorf("%s would get extension id %s, which repository %q already registers "+
+				"(both pin the same manifest \"key\")", e.Dir, id, owner)
 			return
 		}
 		se := state.Extension{Dir: e.Dir, Name: e.Name, Key: e.Key, ID: id}
