@@ -72,12 +72,33 @@ func TestDetectFailsOnBrokenManifest(t *testing.T) {
 func TestDetectRepoRootExtension(t *testing.T) {
 	repo := t.TempDir()
 	writeManifest(t, repo, "Root Ext")
+	// Anything below a directory that is itself an extension belongs to it:
+	// a fixture or example manifest must not become a second registration.
+	writeManifest(t, filepath.Join(repo, "test", "fixtures", "sample"), "Fixture")
+
 	got, err := Detect(repo)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(got) != 1 || got[0].Dir != "." || got[0].Name != "Root Ext" {
-		t.Errorf("Detect = %+v, want single root extension", got)
+		t.Errorf("Detect = %+v, want only the root extension", got)
+	}
+}
+
+// An oddly named directory that is not an extension is not cepm's problem;
+// failing the whole repository over it would break install and update.
+func TestDetectIgnoresControlCharactersOutsideExtensions(t *testing.T) {
+	repo := t.TempDir()
+	writeManifest(t, filepath.Join(repo, "ext"), "Ext")
+	if err := os.MkdirAll(filepath.Join(repo, "docs\nweird"), 0o755); err != nil {
+		t.Skipf("filesystem rejects the name: %v", err)
+	}
+	got, err := Detect(repo)
+	if err != nil {
+		t.Fatalf("an unrelated directory should not fail the scan: %v", err)
+	}
+	if len(got) != 1 || got[0].Dir != "ext" {
+		t.Errorf("Detect = %+v, want just the extension", got)
 	}
 }
 

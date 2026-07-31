@@ -153,30 +153,31 @@ func walk(repoDir string) ([]Extension, error) {
 		if relErr != nil {
 			return relErr
 		}
-		// Check the name before anything that might print it. Directory names
-		// end up in tables, menus and suggested commands, and unlike the
-		// manifest name they cannot be rewritten (they are paths), so refuse
-		// them rather than escape them everywhere.
-		if term.HasControl(rel) {
-			return fmt.Errorf("extension directory name contains control characters: %q", term.Safe(rel))
-		}
 		m, err := readManifest(path)
 		if err != nil {
 			if errors.Is(err, errBadManifest) {
 				// A manifest.json that exists but does not parse means the
 				// tree is in a bad state (mid-conflict, partial checkout).
 				// Treating it as "not an extension" would unregister a
-				// working extension, so refuse to scan instead.
+				// working extension, so refuse to scan instead. The path is
+				// escaped: it reaches a terminal from here.
 				return fmt.Errorf("%s: %w", term.Safe(rel), err)
 			}
 			return nil // no manifest here; keep walking
 		}
-		exts = append(exts, Extension{Dir: rel, Name: m.Name, Key: m.Key})
-		// An extension does not contain another extension; don't descend.
-		if path != repoDir {
-			return filepath.SkipDir
+		// Only directories cepm will actually register have to be printable:
+		// an unrelated directory with an odd name is none of our business,
+		// and failing the whole repository over it would be wrong. Extension
+		// directories are paths, so unlike manifest names they cannot be
+		// rewritten for display — refuse them instead.
+		if term.HasControl(rel) {
+			return fmt.Errorf("extension directory name contains control characters: %q", term.Safe(rel))
 		}
-		return nil
+		exts = append(exts, Extension{Dir: rel, Name: m.Name, Key: m.Key})
+		// An extension does not contain another extension; don't descend —
+		// including from the repository root, where fixtures and examples
+		// below it would otherwise be registered as separate extensions.
+		return filepath.SkipDir
 	})
 	if err != nil {
 		return nil, err

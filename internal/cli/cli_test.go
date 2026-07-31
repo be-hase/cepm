@@ -418,6 +418,89 @@ func TestUninstallRepairGuidesRebindAndKeepsFiles(t *testing.T) {
 	}
 }
 
+// Mid-repair, with two claimants still left, there is no single directory to
+// re-point Chrome at — guidance naming both would ask for two directories
+// under one id.
+func TestUninstallRepairSaysNothingToRebindWhileAmbiguous(t *testing.T) {
+	interactive(t)
+	startFakeHost(t, "xxxx")
+	writeRawState(t, `{"version":2,"repos":{
+      "a":{"url":"u","track":"branch","branch":"main","head":"h",
+           "extensions":[{"dir":"ext","name":"A","id":"xxxx","key":"K"}]},
+      "b":{"url":"u","track":"branch","branch":"main","head":"h",
+           "extensions":[{"dir":"ext","name":"B","id":"xxxx","key":"K"}]},
+      "c":{"url":"u","track":"branch","branch":"main","head":"h",
+           "extensions":[{"dir":"ext","name":"C","id":"xxxx","key":"K"}]}}}`)
+
+	out, err := run(t, "", "uninstall", "b")
+	if err != nil {
+		t.Fatalf("uninstall: %v\n%s", err, out)
+	}
+	if strings.Contains(out, "Load unpacked") {
+		t.Errorf("two claimants remain, so no directory can be named yet:\n%s", out)
+	}
+	if !strings.Contains(out, "still claimed by more than one repository") {
+		t.Errorf("the user should be told the collision is unresolved:\n%s", out)
+	}
+	if strings.Contains(out, "rm -rf") {
+		t.Errorf("the clone must not be declared safe to delete yet:\n%s", out)
+	}
+}
+
+// A survivor the user chose not to use must not be handed back to Chrome.
+func TestUninstallRepairRespectsDisabledSurvivor(t *testing.T) {
+	interactive(t)
+	startFakeHost(t, "xxxx")
+	writeRawState(t, `{"version":2,"repos":{
+      "keepme":{"url":"u","track":"branch","branch":"main","head":"h",
+                "extensions":[{"dir":"ext","name":"Ext","id":"xxxx","key":"K","disabled":true}]},
+      "dropme":{"url":"u","track":"branch","branch":"main","head":"h",
+                "extensions":[{"dir":"ext","name":"Ext","id":"xxxx","key":"K"}]}}}`)
+
+	out, err := run(t, "", "uninstall", "dropme")
+	if err != nil {
+		t.Fatalf("uninstall: %v\n%s", err, out)
+	}
+	if strings.Contains(out, "Load unpacked") {
+		t.Errorf("the survivor is disabled; loading it would undo that choice:\n%s", out)
+	}
+	if !strings.Contains(out, "cepm enable") {
+		t.Errorf("the way back should be mentioned:\n%s", out)
+	}
+}
+
+// Legacy state can hold a directory name no current version would register.
+// Every path cepm prints for it goes through quoting, which must not pass
+// control characters through.
+func TestControlCharactersInLegacyStateAreNeverPrintedRaw(t *testing.T) {
+	// Nothing loaded in Chrome, so doctor prints the "Load unpacked <path>"
+	// hint — a path built with the directory name and shell-quoted, which is
+	// the route that bypassed escaping.
+	startFakeHost(t)
+	writeRawState(t, `{"version":2,"repos":{
+      "tools":{"url":"u","track":"branch","branch":"main","head":"h",
+               "extensions":[{"dir":"ext\nFORGED[2K","name":"Ext","id":"aaaa"}]}}}`)
+
+	docOut, _ := run(t, "", "doctor")
+	_, enableErr := run(t, "", "enable", "tools")
+	texts := map[string]string{"doctor output": docOut}
+	if enableErr != nil {
+		texts["enable error"] = enableErr.Error()
+	}
+	for label, s := range texts {
+		if strings.Contains(s, "\x1b") {
+			t.Errorf("%s contains a raw escape sequence:\n%q", label, s)
+		}
+		if strings.Contains(s, "ext\nFORGED") {
+			t.Errorf("%s contains a raw newline from the directory name:\n%q", label, s)
+		}
+	}
+	// And the command that would act on Chrome refuses outright.
+	if _, err := run(t, "", "reload"); err == nil {
+		t.Error("reload should refuse a state with such a directory name")
+	}
+}
+
 // Three repositories sharing one id: each removal leaves the id colliding,
 // so progress has to be measured in claims, not in colliding ids.
 func TestUninstallRepairsThreeWayCollision(t *testing.T) {

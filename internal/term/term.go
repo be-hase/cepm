@@ -13,8 +13,14 @@ import (
 
 // Quote renders s as a single POSIX shell word, so a value with spaces,
 // semicolons or $(...) stays one argument when pasted into a shell.
+//
+// Control characters are escaped rather than quoted through: shell quoting
+// stops a value from becoming a second command, but does nothing about a
+// value that repaints the terminal. cepm rejects such names where it can, so
+// a quoted value that had to be escaped here is already one no command should
+// be run against — better to show it visibly broken than to emit it raw.
 func Quote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+	return "'" + strings.ReplaceAll(Safe(s), "'", `'\''`) + "'"
 }
 
 // Safe makes s printable: control characters (newlines, carriage returns,

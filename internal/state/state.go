@@ -338,13 +338,25 @@ func (s *State) SaveRepair(before *State) error {
 }
 
 // Validate reports a state that cepm must not act on. It exists because
-// earlier versions could write duplicate ids: the file on disk may already be
+// earlier versions could write duplicate ids, and directory names that no
+// current version would accept: the file on disk may already be
 // inconsistent, and finding that out only at save time would be too late —
 // by then a command may have removed something from Chrome.
 func (s *State) Validate() error {
 	if id, a, b := s.DuplicateLiveID(); id != "" {
 		return fmt.Errorf("%s and %s both claim extension id %s "+
 			"(they pin the same manifest \"key\"); uninstall one of them", a, b, id)
+	}
+	for _, name := range s.RepoNames() {
+		for _, e := range s.Repos[name].Extensions {
+			if term.HasControl(e.Dir) {
+				// Such a directory reaches the terminal through every
+				// suggestion cepm prints; newer versions refuse to register
+				// one, but a file written earlier can still hold it.
+				return fmt.Errorf("%s has control characters in its directory name; "+
+					"uninstall %s and re-install it", ExtRef{Repo: name, Dir: e.Dir}, term.Quote(name))
+			}
+		}
 	}
 	return nil
 }

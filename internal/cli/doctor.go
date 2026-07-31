@@ -245,14 +245,14 @@ func checkRepos(ctx context.Context, hostReachable bool) []diagnostic {
 	if err != nil {
 		return []diagnostic{{Name: "state", Status: "fail", Detail: err.Error()}}
 	}
-	if id, a, b := st.DuplicateLiveID(); id != "" {
-		// State written by an older cepm, which allowed this. Say exactly who
-		// collides: commands that touch Chrome refuse until it is resolved.
+	if err := st.Validate(); err != nil {
+		// Covers both a duplicated id and a directory name no current version
+		// would register; either one blocks the commands that touch Chrome.
 		diags = append(diags, diagnostic{
-			Name:   "duplicate extension id",
+			Name:   "state",
 			Status: "fail",
-			Detail: fmt.Sprintf("%s and %s both claim %s (they pin the same manifest \"key\")", a, b, id),
-			Hint:   fmt.Sprintf("uninstall one of them, e.g. cepm uninstall %s", term.Quote(b.Repo)),
+			Detail: oneLine(err.Error()),
+			Hint:   "commands that change Chrome refuse to run until this is resolved",
 		})
 	}
 	if len(st.Orphans) > 0 {
