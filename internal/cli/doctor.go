@@ -198,14 +198,14 @@ func checkLauncher() []diagnostic {
 
 func checkNMManifests() []diagnostic {
 	var diags []diagnostic
-	found := false
+	var foundIn []string
 	launcherPath, _ := paths.LauncherPath()
 	for _, variant := range paths.ChromeVariants {
 		m, path, err := nmmanifest.Read(variant)
 		if err != nil {
 			continue // variant not configured (or not installed); fine
 		}
-		found = true
+		foundIn = append(foundIn, variant)
 		name := "NM manifest (" + variant + ")"
 		// allowed_origins is the authorization boundary for an extension that
 		// can disable any other one, so require it to name exactly the cepm
@@ -225,9 +225,15 @@ func checkNMManifests() []diagnostic {
 			diags = append(diags, diagnostic{Name: name, Status: "ok", Detail: path})
 		}
 	}
-	if !found {
+	if len(foundIn) == 0 {
 		diags = append(diags, diagnostic{Name: "NM manifest", Status: "fail",
 			Detail: "no native messaging host manifest installed", Hint: "run: cepm setup"})
+	}
+	if len(foundIn) > 1 {
+		// Two Chromes could connect, and only one would receive reloads.
+		diags = append(diags, diagnostic{Name: "NM manifest", Status: "warn",
+			Detail: fmt.Sprintf("registered for %d Chromes (%s); cepm drives exactly one", len(foundIn), strings.Join(foundIn, ", ")),
+			Hint:   "run: cepm setup --chrome-variant <the one you use> (it removes the others)"})
 	}
 	return diags
 }

@@ -13,6 +13,7 @@ import (
 	"github.com/be-hase/cepm/internal/assist"
 	"github.com/be-hase/cepm/internal/ipc"
 	"github.com/be-hase/cepm/internal/nmhost"
+	"github.com/be-hase/cepm/internal/nmmanifest"
 	"github.com/be-hase/cepm/internal/paths"
 	"github.com/be-hase/cepm/internal/state"
 )
@@ -303,6 +304,44 @@ func TestListDoesNotLeakCredentials(t *testing.T) {
 	}
 	if len(payload.Repos) != 1 || !strings.Contains(payload.Repos[0].URL, "***") {
 		t.Errorf("url should be redacted, got %+v", payload.Repos)
+	}
+}
+
+// Switching Chromes must move the registration, not copy it: a manifest left
+// behind would let two Chromes connect, of which only one receives reloads.
+func TestSetupRegistersExactlyOneChrome(t *testing.T) {
+	if len(paths.ChromeVariants) < 2 {
+		t.Skip("needs at least two Chrome variants")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CEPM_HOME", filepath.Join(home, "cepm"))
+	v0, v1 := paths.ChromeVariants[0], paths.ChromeVariants[1]
+
+	manifestPath := func(variant string) string {
+		dir, err := paths.NativeMessagingHostsDir(variant)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return filepath.Join(dir, nmmanifest.FileName())
+	}
+
+	if out, err := run(t, "", "setup", "--chrome-variant", v0); err != nil {
+		t.Fatalf("setup: %v\n%s", err, out)
+	}
+	if _, err := os.Stat(manifestPath(v0)); err != nil {
+		t.Fatalf("manifest missing for %s: %v", v0, err)
+	}
+
+	if out, err := run(t, "", "setup", "--chrome-variant", v1); err != nil {
+		t.Fatalf("setup switch: %v\n%s", err, out)
+	}
+	if _, err := os.Stat(manifestPath(v1)); err != nil {
+		t.Fatalf("manifest missing for %s: %v", v1, err)
+	}
+	if _, err := os.Stat(manifestPath(v0)); !os.IsNotExist(err) {
+		t.Errorf("manifest for %s should be removed after switching", v0)
 	}
 }
 

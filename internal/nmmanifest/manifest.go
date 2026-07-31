@@ -59,6 +59,32 @@ func Install(variant, binPath string) (string, error) {
 	return path, nil
 }
 
+// RemoveOthers deletes cepm's manifest from every Chrome variant except
+// keep, returning the removed paths. Manifests decide which Chromes can
+// launch the host, and only one Chrome is supported at a time — leaving a
+// manifest behind after switching variants would quietly allow two Chromes
+// to connect, of which only one receives reloads.
+func RemoveOthers(keep string) ([]string, error) {
+	var removed []string
+	for _, v := range paths.ChromeVariants {
+		if v == keep {
+			continue
+		}
+		dir, err := paths.NativeMessagingHostsDir(v)
+		if err != nil {
+			continue
+		}
+		p := filepath.Join(dir, FileName())
+		switch err := os.Remove(p); {
+		case err == nil:
+			removed = append(removed, p)
+		case !os.IsNotExist(err):
+			return removed, err
+		}
+	}
+	return removed, nil
+}
+
 // Read loads an installed manifest for doctor-style verification.
 func Read(variant string) (*HostManifest, string, error) {
 	dir, err := paths.NativeMessagingHostsDir(variant)

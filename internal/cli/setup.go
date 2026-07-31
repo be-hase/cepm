@@ -17,8 +17,8 @@ import (
 
 func newSetupCmd() *cobra.Command {
 	var (
-		variants []string
-		force    bool
+		variant string
+		force   bool
 	)
 	cmd := &cobra.Command{
 		Use:     "setup",
@@ -30,18 +30,20 @@ func newSetupCmd() *cobra.Command {
   1. generates the cepm helper extension into ~/.cepm/helper
   2. registers this binary as a native messaging host
 
-It is idempotent; re-run it after upgrading cepm or moving the binary.`,
+It is idempotent; re-run it after upgrading cepm, moving the binary, or
+switching to a different Chrome (the previous Chrome's registration is
+removed — cepm drives exactly one Chrome).`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runSetup(cmd, variants, force)
+			return runSetup(cmd, variant, force)
 		},
 	}
-	cmd.Flags().StringSliceVar(&variants, "chrome-variant", []string{"stable"},
-		fmt.Sprintf("Chrome variants to configure %v", paths.ChromeVariants))
+	cmd.Flags().StringVar(&variant, "chrome-variant", "stable",
+		fmt.Sprintf("the Chrome you use, one of %v", paths.ChromeVariants))
 	cmd.Flags().BoolVar(&force, "force", false, "regenerate the helper extension even if up to date")
 	return cmd
 }
 
-func runSetup(cmd *cobra.Command, variants []string, force bool) error {
+func runSetup(cmd *cobra.Command, variant string, force bool) error {
 	out := cmd.OutOrStdout()
 	if err := paths.EnsureLayout(); err != nil {
 		return err
@@ -74,12 +76,19 @@ func runSetup(cmd *cobra.Command, variants []string, force bool) error {
 		return err
 	}
 	fmt.Fprintf(out, "✔ Host launcher written to %s (binary: %s)\n", launcherPath, binPath)
-	for _, v := range variants {
-		path, err := nmmanifest.Install(v, launcherPath)
-		if err != nil {
-			return fmt.Errorf("install native messaging manifest (%s): %w", v, err)
-		}
-		fmt.Fprintf(out, "✔ Native messaging manifest written to %s\n", path)
+	path, err := nmmanifest.Install(variant, launcherPath)
+	if err != nil {
+		return fmt.Errorf("install native messaging manifest (%s): %w", variant, err)
+	}
+	fmt.Fprintf(out, "✔ Native messaging manifest written to %s\n", path)
+	// One Chrome at a time: a manifest left in another variant would let a
+	// second Chrome connect, and only one of them would receive reloads.
+	removed, err := nmmanifest.RemoveOthers(variant)
+	if err != nil {
+		return fmt.Errorf("remove old native messaging manifests: %w", err)
+	}
+	for _, p := range removed {
+		fmt.Fprintf(out, "✔ Removed registration for a previously used Chrome: %s\n", p)
 	}
 
 	// A running helper keeps its current code until Chrome restarts: the only

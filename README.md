@@ -168,10 +168,13 @@ restores them around the pull.
   running helper keeps its current version until the next Chrome start
   (self-reloading would drop its connection to cepm).
 - **Load the helper into one Chrome profile only.** Automatic reloads reach
-  the profile whose helper connected first; a second profile (or a Canary
-  running alongside) would get its files updated but keep running old code
-  until it restarts. `--chrome-variant` exists to pick *which* Chrome you
-  use — Stable, Beta, Canary, or Chromium — not to drive several at once.
+  the profile whose helper connected first; a second profile would get its
+  files updated but keep running old code until it restarts. Across Chrome
+  *variants* (Stable, Beta, Canary, Chromium) this is enforced for you:
+  `cepm setup --chrome-variant <x>` registers exactly that Chrome and removes
+  the registration from any other, so switching Chromes is one command.
+  Within a single Chrome, profiles share that registration, so keeping the
+  helper out of second profiles stays your job.
 - The helper extension needs the `management` permission (to toggle other
   extensions), `nativeMessaging`, and `alarms`. It never touches page data.
 - Everything lives under `~/.cepm/` (clones, state, logs at
