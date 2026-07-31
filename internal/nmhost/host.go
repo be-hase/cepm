@@ -375,11 +375,12 @@ func (h *Host) maybeRefreshHelper(ctx context.Context) {
 		"from", installed, "to", helperext.Version)
 }
 
-// managedIDs restricts what the control socket may act on to extensions cepm
-// registered (plus stale records it is meant to clean up). The socket is only
-// reachable by this user, but the helper holds the management permission for
-// *every* installed extension, so the host must not relay arbitrary IDs.
-func managedIDs(ids []string) ([]string, error) {
+// ManagedIDs restricts what the control socket may act on to extensions cepm
+// registered (plus stale and orphan records it is meant to clean up). The
+// socket is only reachable by this user, but the helper holds the management
+// permission for *every* installed extension, so the host must not relay
+// arbitrary IDs. Exported so tests can hold their fake host to the same rule.
+func ManagedIDs(ids []string) ([]string, error) {
 	if len(ids) == 0 {
 		return nil, fmt.Errorf("no extension ids given")
 	}
@@ -513,7 +514,7 @@ func (h *Host) handleIPC(ctx context.Context, req ipc.Request) ipc.Response {
 		}
 		return ipc.Response{OK: true, Host: info}
 	case ipc.CmdReload:
-		ids, err := managedIDs(req.IDs)
+		ids, err := ManagedIDs(req.IDs)
 		if err != nil {
 			return ipc.Response{Error: err.Error()}
 		}
@@ -529,7 +530,7 @@ func (h *Host) handleIPC(ctx context.Context, req ipc.Request) ipc.Response {
 		}
 		return ipc.Response{OK: true, Extensions: exts}
 	case ipc.CmdUninstall:
-		if _, err := managedIDs([]string{req.ID}); err != nil {
+		if _, err := ManagedIDs([]string{req.ID}); err != nil {
 			return ipc.Response{Error: err.Error()}
 		}
 		status, err := h.Uninstall(ctx, req.ID)

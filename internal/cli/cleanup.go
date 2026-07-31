@@ -82,7 +82,20 @@ those entries via Chrome's own confirmation dialog.`,
 			}
 
 			removed := map[string]bool{}
+			seen := map[string]bool{}
 			for _, p := range pending {
+				if seen[p.s.ID] {
+					continue // the same id can be recorded by more than one repo
+				}
+				seen[p.s.ID] = true
+				// Re-read: an automatic update may have brought this
+				// extension back while we were waiting on earlier dialogs,
+				// and removing a live extension is the one thing cleanup
+				// must never do.
+				if fresh, err := state.Load(); err == nil && fresh.IsLive(p.s.ID) {
+					fmt.Fprintf(out, "%s: %q is registered again; leaving it alone\n", p.repo, p.s.Name)
+					continue
+				}
 				fmt.Fprintf(out, "%s: %q (%s)\n", p.repo, p.s.Name, p.s.Reason)
 				uninstallViaChrome(cmd.Context(), cmd, p.s.ID, p.s.Name)
 				stillCtx, cancel := context.WithTimeout(cmd.Context(), 5*time.Second)
@@ -100,6 +113,9 @@ those entries via Chrome's own confirmation dialog.`,
 				}
 				clear := append(append([]string(nil), goneIDs...), keys(removed)...)
 				for _, id := range clear {
+					if st.IsLive(id) {
+						continue // came back while we worked; keep managing it
+					}
 					for _, r := range st.Repos {
 						r.RemoveStale(id)
 					}

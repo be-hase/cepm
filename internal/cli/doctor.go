@@ -238,9 +238,17 @@ func checkRepos(ctx context.Context, hostReachable bool) []diagnostic {
 	if err != nil {
 		return []diagnostic{{Name: "state", Status: "fail", Detail: err.Error()}}
 	}
+	if len(st.Orphans) > 0 {
+		diags = append(diags, diagnostic{
+			Name:   "leftover entries",
+			Status: "warn",
+			Detail: fmt.Sprintf("%d extension(s) from uninstalled repositories may still be in Chrome", len(st.Orphans)),
+			Hint:   "run: cepm cleanup",
+		})
+	}
 	if len(st.Repos) == 0 {
-		return []diagnostic{{Name: "repositories", Status: "ok",
-			Detail: "none registered", Hint: "add one with: cepm install <git-url>"}}
+		return append(diags, diagnostic{Name: "repositories", Status: "ok",
+			Detail: "none registered", Hint: "add one with: cepm install <git-url>"})
 	}
 	chromeStatus := map[string]ipc.ChromeExt{}
 	if hostReachable {

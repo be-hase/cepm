@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/be-hase/cepm/internal/extid"
 	"github.com/be-hase/cepm/internal/gitx"
 	"github.com/be-hase/cepm/internal/state"
 )
@@ -75,6 +76,16 @@ func setupRepo(t *testing.T, name string) (authorDir string) {
 	}
 	head := git(t, cloneDir, "rev-parse", "HEAD")
 
+	// Use the ids cepm would really compute: a fixture with made-up ids would
+	// look like every extension had just changed identity.
+	alphaID, err := extid.FromPath(filepath.Join(cloneDir, "ext", "alpha"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	betaID, err := extid.FromPath(filepath.Join(cloneDir, "ext", "beta"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	st := state.New()
 	st.Repos[name] = &state.Repo{
 		URL:    bare,
@@ -82,8 +93,8 @@ func setupRepo(t *testing.T, name string) (authorDir string) {
 		Branch: "main",
 		Head:   head,
 		Extensions: []state.Extension{
-			{Dir: filepath.Join("ext", "alpha"), Name: "Alpha", ID: "id-alpha"},
-			{Dir: filepath.Join("ext", "beta"), Name: "Beta", ID: "id-beta"},
+			{Dir: filepath.Join("ext", "alpha"), Name: "Alpha", ID: alphaID},
+			{Dir: filepath.Join("ext", "beta"), Name: "Beta", ID: betaID},
 		},
 	}
 	if err := st.Save(); err != nil {
@@ -185,6 +196,131 @@ func TestUpdateSkipsDisabledExtensionChanges(t *testing.T) {
 	st2, _ := state.Load()
 	if st2.Repos["mytools"].FindExtension(filepath.Join("ext", "beta")).Enabled() {
 		t.Error("disabled intent was lost across an update")
+	}
+}
+
+// A malformed "key" in a pulled commit must not cost the user their
+// registration: dropping just that extension would lose its enable choice and
+// mark it for removal from Chrome.
+func TestUpdateKeepsExtensionsWhenAKeyIsInvalid(t *testing.T) {
+	author := setupRepo(t, "mytools")
+	writeFile(t, filepath.Join(author, "ext", "alpha", "manifest.json"),
+		`{"manifest_version":3,"name":"Alpha","version":"1.0","key":"not-valid-base64!!"}`)
+	git(t, author, "add", "-A")
+	git(t, author, "commit", "-m", "bad key")
+	git(t, author, "push", "origin", "main")
+
+	results, err := Update(context.Background(), nil, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if results[0].Err == nil {
+		t.Error("an invalid key should be reported as an error")
+	}
+	st, _ := state.Load()
+	repo := st.Repos["mytools"]
+	if repo.FindExtension(filepath.Join("ext", "alpha")) == nil {
+		t.Error("the extension must stay registered")
+	}
+	if len(repo.Stale) != 0 {
+		t.Errorf("nothing should be marked for cleanup: %+v", repo.Stale)
+	}
+}
+
+// Adding a key changes the id Chrome uses, so the old entry is dead and the
+// new one needs loading once.
+func TestUpdateReportsIdentityChangeWhenKeyAppears(t *testing.T) {
+	author := setupRepo(t, "mytools")
+	st, _ := state.Load()
+	oldID := st.Repos["mytools"].FindExtension(filepath.Join("ext", "alpha")).ID
+
+	const key = "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA0lLejiTvG5ElQmwA+FNOPTFTArbjNA65OVcj5zk3efV/myX/PK/TWO7oGT1BE/9zZfbozbaAMwrk6l8FoRVMGqmPaPCfdDdbtJ+ogS+6Evw9EJ3Tx+2oLUS+ddyzLbsMkoeXe0wvDIX4vOnwi1tULgTpxBlsSQ2zF5e8oZG+wMZRb3s8iPDwskfxrqFSgAaDuNH1vmZiRzOqnz+uLNwdjGHpMrP4KTeGbrAW71EBhYFT0eT47ScdgYodPS1LnfnIobpC5ALPIsIcJnDPKNfL//rlfi4/pGXRq08jOSb1z9nz4sMNTfiHl7shswdTSM1aUu9rsIF1fWmJPXVdQ2IbZQIDAQAB"
+	writeFile(t, filepath.Join(author, "ext", "alpha", "manifest.json"),
+		`{"manifest_version":3,"name":"Alpha","version":"1.0","key":"`+key+`"}`)
+	git(t, author, "add", "-A")
+	git(t, author, "commit", "-m", "pin id")
+	git(t, author, "push", "origin", "main")
+
+	results, err := Update(context.Background(), nil, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results[0].Reidentified) != 1 {
+		t.Fatalf("expected an identity change, got %+v", results[0].Reidentified)
+	}
+	if got := results[0].Reidentified[0].OldID; got != oldID {
+		t.Errorf("old id = %q, want %q", got, oldID)
+	}
+	st2, _ := state.Load()
+	repo := st2.Repos["mytools"]
+	if repo.FindExtension(filepath.Join("ext", "alpha")).ID == oldID {
+		t.Error("the stored id should be the key-derived one now")
+	}
+	// The dead Chrome entry has to be cleanable.
+	found := false
+	for _, s := range repo.Stale {
+		if s.ID == oldID {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("the old id should be recorded for cleanup: %+v", repo.Stale)
+	}
+}
+
+// A release can be re-tagged onto a new commit; following the tag name alone
+// would leave the working tree on the old one forever.
+func TestUpdateFollowsForceMovedTag(t *testing.T) {
+	author := setupRepo(t, "mytools")
+	tagAt(t, author, "v1.0.0", "2026-01-01T00:00:00")
+	git(t, author, "push", "origin", "v1.0.0")
+
+	dir, _ := RepoDir("mytools")
+	st, _ := state.Load()
+	r := st.Repos["mytools"]
+	r.Track, r.TagPattern, r.Branch = state.TrackTag, "v*", ""
+	git(t, dir, "fetch", "--tags", "origin")
+	git(t, dir, "checkout", "--detach", "v1.0.0")
+	r.Tag, r.Head = "v1.0.0", git(t, dir, "rev-parse", "HEAD")
+	if err := st.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	writeFile(t, filepath.Join(author, "ext", "alpha", "fix.js"), "x")
+	git(t, author, "add", "-A")
+	git(t, author, "commit", "-m", "hotfix")
+	git(t, author, "tag", "-f", "-a", "v1.0.0", "-m", "v1.0.0")
+	git(t, author, "push", "--force", "origin", "main", "--tags")
+	want := git(t, author, "rev-parse", "v1.0.0^{commit}")
+
+	results, err := Update(context.Background(), nil, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if results[0].Err != nil {
+		t.Fatal(results[0].Err)
+	}
+	if got := git(t, dir, "rev-parse", "HEAD"); got != want {
+		t.Errorf("working tree is at %s, want the tag's new commit %s", got, want)
+	}
+}
+
+// The clone belongs to cepm, but users do poke at it; merging origin/main
+// into whatever they checked out would rewrite their branch.
+func TestUpdateRefusesWhenOnAnotherBranch(t *testing.T) {
+	setupRepo(t, "mytools")
+	dir, _ := RepoDir("mytools")
+	git(t, dir, "checkout", "-q", "-b", "my-experiment")
+
+	results, err := Update(context.Background(), nil, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if results[0].Err == nil {
+		t.Fatal("update should refuse to run on a different branch")
+	}
+	if branch := git(t, dir, "rev-parse", "--abbrev-ref", "HEAD"); branch != "my-experiment" {
+		t.Errorf("the user's branch was changed to %q", branch)
 	}
 }
 

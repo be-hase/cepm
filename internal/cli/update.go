@@ -85,6 +85,14 @@ func printUpdateResults(out io.Writer, results []updater.RepoResult) (failed boo
 				fmt.Fprintf(out, "      2. Remove the old broken entry — run: cepm cleanup\n")
 			}
 		}
+		for _, ic := range r.Reidentified {
+			fmt.Fprintf(out, "  ~ %q changed its extension id (manifest \"key\"): %s → %s\n", ic.Name, ic.OldID, ic.NewID)
+			if ic.Enabled {
+				fmt.Fprintf(out, "    Chrome sees a different extension now — one-time steps:\n")
+				fmt.Fprintf(out, "      1. Load unpacked %s\n", ic.AbsDir)
+				fmt.Fprintf(out, "      2. Remove the old entry — run: cepm cleanup\n")
+			}
+		}
 		for _, rm := range r.Removed {
 			fmt.Fprintf(out, "  - %q was removed from the repo; its loaded copy is now broken — run: cepm cleanup\n", rm.Name)
 		}

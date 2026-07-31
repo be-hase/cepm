@@ -139,6 +139,11 @@ func (r Repo) TagsByCreation(ctx context.Context, pattern string) ([]string, err
 	return strings.Split(out, "\n"), nil
 }
 
+// CommitOf resolves a ref (tag, branch, HEAD) to its commit id.
+func (r Repo) CommitOf(ctx context.Context, ref string) (string, error) {
+	return run(ctx, r.Dir, "rev-parse", ref+"^{commit}")
+}
+
 // CheckoutDetached checks out ref as a detached HEAD.
 func (r Repo) CheckoutDetached(ctx context.Context, ref string) error {
 	_, err := run(ctx, r.Dir, "checkout", "--detach", "--quiet", ref)

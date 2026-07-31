@@ -85,9 +85,12 @@ func trackRef(r *state.Repo) string {
 }
 
 func printListTable(cmd *cobra.Command, st *state.State, chromeStatus map[string]ipc.ChromeExt) error {
-	if len(st.Repos) == 0 {
+	if len(st.Repos) == 0 && len(st.Orphans) == 0 {
 		fmt.Fprintln(cmd.OutOrStdout(), "No repositories registered. Run: cepm install <git-url>")
 		return nil
+	}
+	if len(st.Repos) == 0 {
+		fmt.Fprintln(cmd.OutOrStdout(), "No repositories registered.")
 	}
 	w := tabwriter.NewWriter(cmd.OutOrStdout(), 2, 4, 2, ' ', 0)
 	fmt.Fprintln(w, "REPO\tTRACK\tEXTENSION\tID\tDIR\tSTATUS")
@@ -100,6 +103,9 @@ func printListTable(cmd *cobra.Command, st *state.State, chromeStatus map[string
 		for _, s := range r.Stale {
 			fmt.Fprintf(w, "%s\t\t%s\t%s\t(%s)\tstale — run: cepm cleanup\n", name, s.Name, s.ID, s.Reason)
 		}
+	}
+	for _, o := range st.Orphans {
+		fmt.Fprintf(w, "(uninstalled)\t\t%s\t%s\t(%s)\tstale — run: cepm cleanup\n", o.Name, o.ID, o.Reason)
 	}
 	if err := w.Flush(); err != nil {
 		return err
@@ -167,7 +173,11 @@ func printListJSON(cmd *cobra.Command, st *state.State, chromeStatus map[string]
 		}
 		repos = append(repos, ro)
 	}
+	orphans := []staleOut{}
+	for _, o := range st.Orphans {
+		orphans = append(orphans, staleOut{ID: o.ID, Name: o.Name, Reason: o.Reason, NewDir: o.NewDir})
+	}
 	enc := json.NewEncoder(cmd.OutOrStdout())
 	enc.SetIndent("", "  ")
-	return enc.Encode(map[string]any{"repos": repos})
+	return enc.Encode(map[string]any{"repos": repos, "orphans": orphans})
 }

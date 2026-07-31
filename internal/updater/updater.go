@@ -54,20 +54,32 @@ type RenameChange struct {
 	Enabled bool
 }
 
+// IdentityChange records an extension whose Chrome id changed while staying
+// in the same directory (its manifest "key" was added, removed or edited).
+type IdentityChange struct {
+	Name    string
+	Dir     string
+	AbsDir  string
+	OldID   string
+	NewID   string
+	Enabled bool
+}
+
 // RepoResult reports the outcome of updating one repository.
 type RepoResult struct {
-	Name       string
-	OldRef     string // commit or tag before the update
-	NewRef     string // commit or tag after the update
-	Updated    bool   // the working tree moved to a new revision
-	Skipped    bool
-	SkipReason string
-	Warnings   []string
-	Err        error
-	Changed    []ExtChange       // enabled extensions whose files changed
-	Added      []ExtChange       // newly detected extensions (registered as available)
-	Renamed    []RenameChange    // extensions whose directory moved
-	Removed    []state.Extension // extensions that disappeared from the repo
+	Name         string
+	OldRef       string // commit or tag before the update
+	NewRef       string // commit or tag after the update
+	Updated      bool   // the working tree moved to a new revision
+	Skipped      bool
+	SkipReason   string
+	Warnings     []string
+	Err          error
+	Changed      []ExtChange       // enabled extensions whose files changed
+	Added        []ExtChange       // newly detected extensions (registered as available)
+	Renamed      []RenameChange    // extensions whose directory moved
+	Reidentified []IdentityChange  // extensions whose Chrome id changed in place
+	Removed      []state.Extension // extensions that disappeared from the repo
 }
 
 // Options controls update behavior.
@@ -158,6 +170,12 @@ func updateRepo(ctx context.Context, name string, r *state.Repo, opts Options) R
 		return res
 	}
 
+	// Before pulling: teach state about keys it may predate. Afterwards a
+	// difference between the stored id and the computed one unambiguously
+	// means the manifest changed in this update, not that cepm used to ignore
+	// the "key" field.
+	backfillKeys(r, dir)
+
 	oldHead := r.Head
 	if h, err := repo.Head(ctx); err == nil {
 		oldHead = h
@@ -238,7 +256,20 @@ func moveToLatest(ctx context.Context, repo gitx.Repo, r *state.Repo, res *RepoR
 			res.Warnings = append(res.Warnings, warn)
 		}
 		if latest == r.Tag {
-			return nil
+			// The same name can point somewhere new: releases get re-tagged,
+			// and the fetch above accepts that. Compare commits, not names.
+			want, err := repo.CommitOf(ctx, latest)
+			if err != nil {
+				return err
+			}
+			head, err := repo.Head(ctx)
+			if err != nil {
+				return err
+			}
+			if want == head {
+				return nil
+			}
+			res.Warnings = append(res.Warnings, fmt.Sprintf("tag %s now points at a different commit", latest))
 		}
 		if err := repo.CheckoutDetached(ctx, latest); err != nil {
 			return fmt.Errorf("checkout tag %s: %w", latest, err)
@@ -249,6 +280,20 @@ func moveToLatest(ctx context.Context, repo gitx.Repo, r *state.Repo, res *RepoR
 	branch := r.Branch
 	if branch == "" {
 		return fmt.Errorf("no branch recorded for repo (state.json is inconsistent; reinstall the repo)")
+	}
+	// Merging into whatever the user happens to have checked out could
+	// fast-forward their own branch onto the tracked one; refuse instead.
+	current, err := repo.CurrentBranch(ctx)
+	if err != nil {
+		return err
+	}
+	if current != branch {
+		where := "a detached HEAD"
+		if current != "" {
+			where = "branch " + current
+		}
+		return fmt.Errorf("the clone is on %s but cepm tracks %s; switch back with: git -C %s checkout %s",
+			where, branch, repo.Dir, branch)
 	}
 	if err := repo.MergeFFOnly(ctx, "origin/"+branch); err != nil {
 		return fmt.Errorf("cannot fast-forward %s (history rewritten?): %w", branch, err)
@@ -322,12 +367,19 @@ func refreshExtensions(name string, r *state.Repo, dir string, res *RepoResult, 
 		abs := filepath.Join(dir, e.Dir)
 		id, err := extid.ForExtension(abs, e.Key)
 		if err != nil {
-			res.Warnings = append(res.Warnings, fmt.Sprintf("compute ID for %s: %v", abs, err))
-			continue
+			// All or nothing: dropping just this one would unregister a
+			// working extension (losing its enable choice and marking it for
+			// cleanup) because a pulled commit has a malformed "key".
+			res.Err = fmt.Errorf("%s: %w", e.Dir, err)
+			return
 		}
 		se := state.Extension{Dir: e.Dir, Name: e.Name, Key: e.Key, ID: id}
 		if prev, existed := old[e.Dir]; existed {
 			se.Disabled = prev.Disabled
+			if prev.ID != id {
+				noteIdentityChange(name, dir, prev, se, res)
+				r.AddStale(state.StaleExtension{ID: prev.ID, Name: prev.Name, Reason: "id changed"})
+			}
 		} else {
 			// New extensions arrive as "available"; the user opts in with
 			// cepm enable (renames inherit the old intent below).
@@ -402,6 +454,40 @@ func refreshExtensions(name string, r *state.Repo, dir string, res *RepoResult, 
 			})
 		}
 	}
+}
+
+// backfillKeys records manifest keys for extensions registered by a cepm that
+// did not read them, correcting the id at the same time: those entries stored
+// a path-derived id that Chrome never used. It reads the working tree as it
+// is *before* an update, so it can only ever describe the state cepm already
+// had.
+func backfillKeys(r *state.Repo, dir string) {
+	for i := range r.Extensions {
+		e := &r.Extensions[i]
+		if e.Key != "" {
+			continue
+		}
+		m, err := scan.ReadManifest(filepath.Join(dir, e.Dir))
+		if err != nil || m.Key == "" {
+			continue
+		}
+		id, err := extid.ForExtension(filepath.Join(dir, e.Dir), m.Key)
+		if err != nil {
+			continue
+		}
+		e.Key, e.ID = m.Key, id
+	}
+}
+
+// noteIdentityChange records that an extension kept its directory but got a
+// new Chrome id — which happens when a manifest gains, loses or changes its
+// "key". Chrome treats that as a different extension, so the old entry is now
+// dead and the new one needs loading once.
+func noteIdentityChange(repoName, repoDir string, prev, now state.Extension, res *RepoResult) {
+	res.Reidentified = append(res.Reidentified, IdentityChange{
+		Name: now.Name, Dir: now.Dir, AbsDir: filepath.Join(repoDir, now.Dir),
+		OldID: prev.ID, NewID: now.ID, Enabled: now.Enabled(),
+	})
 }
 
 // matchRenamed decides whether the appeared extension is a removed one that

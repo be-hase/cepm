@@ -12,6 +12,7 @@ import (
 
 	"github.com/be-hase/cepm/internal/assist"
 	"github.com/be-hase/cepm/internal/ipc"
+	"github.com/be-hase/cepm/internal/nmhost"
 	"github.com/be-hase/cepm/internal/paths"
 	"github.com/be-hase/cepm/internal/state"
 )
@@ -24,6 +25,9 @@ type fakeHost struct {
 	loaded      map[string]bool // extensions Chrome currently has
 	uninstalled []string        // ids the CLI asked to remove
 	reloaded    []string
+	// reposAtUninstall records how many repositories were still registered
+	// when a removal request arrived, which is what pins the ordering.
+	reposAtUninstall []int
 }
 
 func startFakeHost(t *testing.T, loaded ...string) *fakeHost {
@@ -68,6 +72,15 @@ func (h *fakeHost) handle(_ context.Context, req ipc.Request) ipc.Response {
 		}
 		return ipc.Response{OK: true, Extensions: exts}
 	case ipc.CmdUninstall:
+		// Enforce the real authorization rule, not a stub: without this the
+		// test would pass even if a command asked to remove an extension it
+		// had already unregistered — the exact bug these tests exist for.
+		if _, err := nmhost.ManagedIDs([]string{req.ID}); err != nil {
+			return ipc.Response{Error: err.Error()}
+		}
+		if st, err := state.Load(); err == nil {
+			h.reposAtUninstall = append(h.reposAtUninstall, len(st.Repos))
+		}
 		if !h.loaded[req.ID] {
 			return ipc.Response{OK: true, Status: ipc.StatusNotInstalled}
 		}
@@ -75,6 +88,9 @@ func (h *fakeHost) handle(_ context.Context, req ipc.Request) ipc.Response {
 		h.uninstalled = append(h.uninstalled, req.ID)
 		return ipc.Response{OK: true, Status: ipc.StatusUninstalled}
 	case ipc.CmdReload:
+		if _, err := nmhost.ManagedIDs(req.IDs); err != nil {
+			return ipc.Response{Error: err.Error()}
+		}
 		h.reloaded = append(h.reloaded, req.IDs...)
 		results := make([]ipc.ReloadResult, len(req.IDs))
 		for i, id := range req.IDs {
@@ -160,6 +176,12 @@ func TestUninstallRemovesFromChromeBeforeUnregistering(t *testing.T) {
 	if strings.Contains(out, "not managed by cepm") {
 		t.Errorf("removal was refused:\n%s", out)
 	}
+	// The ordering itself, not just the outcome: asking Chrome after the repo
+	// is gone happens to work through the orphan record, so assert that the
+	// request arrived while the repository was still registered.
+	if len(host.reposAtUninstall) != 1 || host.reposAtUninstall[0] != 1 {
+		t.Errorf("removal must be requested before unregistering, saw repo counts %v", host.reposAtUninstall)
+	}
 
 	st, err := state.Load()
 	if err != nil {
@@ -197,6 +219,35 @@ func TestUninstallKeepsOrphanWhenUserDeclines(t *testing.T) {
 	st, _ = state.Load()
 	if len(st.Orphans) != 0 {
 		t.Errorf("cleanup should clear the orphan, got %+v", st.Orphans)
+	}
+}
+
+// Extension ids are derived deterministically, so reinstalling a repo brings
+// back an id that an earlier uninstall recorded as an orphan. Cleanup must
+// not then remove the extension that is working again.
+func TestCleanupSpareseLiveExtensionThatWasOrphaned(t *testing.T) {
+	interactive(t)
+	host := startFakeHost(t, "aaaa")
+	seedRepo(t, "tools", state.Extension{Dir: "ext", Name: "Ext", ID: "aaaa"})
+
+	if out, err := run(t, "n\n", "uninstall", "tools"); err != nil {
+		t.Fatalf("uninstall: %v\n%s", err, out)
+	}
+	// Reinstalling the same repo at the same path yields the same id.
+	seedRepo(t, "tools", state.Extension{Dir: "ext", Name: "Ext", ID: "aaaa"})
+
+	out, err := run(t, "y\n", "cleanup")
+	if err != nil {
+		t.Fatalf("cleanup: %v\n%s", err, out)
+	}
+	host.mu.Lock()
+	defer host.mu.Unlock()
+	if len(host.uninstalled) != 0 {
+		t.Errorf("cleanup removed a live extension: %v\n%s", host.uninstalled, out)
+	}
+	st, _ := state.Load()
+	if len(st.Orphans) != 0 {
+		t.Errorf("the orphan record should be gone once the id is live again: %+v", st.Orphans)
 	}
 }
 

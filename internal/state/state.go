@@ -196,8 +196,11 @@ func Load() (*State, error) {
 	return &s, nil
 }
 
-// Version is the state schema version this build writes and understands.
-const Version = 1
+// Version is the state schema version this build writes. It was raised to 2
+// when Extension.Key and State.Orphans were added: an older binary that read
+// a version 2 file would drop both on its next write, silently reverting ids
+// to path-derived ones and losing entries only cleanup can remove.
+const Version = 2
 
 var repoNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 
@@ -207,8 +210,57 @@ func ValidRepoName(name string) bool {
 	return name != "." && name != ".." && repoNameRe.MatchString(name)
 }
 
+// IsLive reports whether id belongs to a currently registered extension.
+func (s *State) IsLive(id string) bool {
+	for _, r := range s.Repos {
+		for _, e := range r.Extensions {
+			if e.ID == id {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// normalize enforces the one rule that ties the three id sets together: an id
+// that is a registered extension right now must not also sit in a stale or
+// orphan record. Extension ids are derived deterministically, so an id can
+// legitimately come back — reinstalling the same repository, reverting a
+// deletion — and a leftover record would make "cepm cleanup" uninstall a
+// working extension. Save calls this so no writer can forget it.
+func (s *State) normalize() {
+	for _, r := range s.Repos {
+		kept := r.Stale[:0]
+		for _, st := range r.Stale {
+			if !s.IsLive(st.ID) {
+				kept = append(kept, st)
+			}
+		}
+		r.Stale = kept
+		if len(r.Stale) == 0 {
+			r.Stale = nil
+		}
+	}
+	kept := s.Orphans[:0]
+	for _, o := range s.Orphans {
+		if !s.IsLive(o.ID) {
+			kept = append(kept, o)
+		}
+	}
+	s.Orphans = kept
+	if len(s.Orphans) == 0 {
+		s.Orphans = nil
+	}
+}
+
 // Save writes state.json atomically.
 func (s *State) Save() error {
+	s.normalize()
+	s.Version = Version
+	return s.save()
+}
+
+func (s *State) save() error {
 	path, err := paths.StateFile()
 	if err != nil {
 		return err

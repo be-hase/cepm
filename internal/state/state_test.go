@@ -13,7 +13,7 @@ func TestLoadMissingReturnsEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s.Version != 1 || len(s.Repos) != 0 {
+	if s.Version != Version || len(s.Repos) != 0 {
 		t.Errorf("unexpected empty state: %+v", s)
 	}
 }
@@ -68,6 +68,63 @@ func TestLoadRejectsMalformedState(t *testing.T) {
 				t.Fatalf("Load should reject this state; got %+v", s)
 			}
 		})
+	}
+}
+
+// A version 1 file (no Extension.Key, no Orphans) must load and be rewritten
+// as version 2, so an older binary refuses it instead of silently dropping
+// the new fields on its next write.
+func TestLoadMigratesVersionOne(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("CEPM_HOME", home)
+	v1 := `{"version":1,"repos":{"tools":{"url":"u","track":"branch","branch":"main",
+	  "head":"abc","extensions":[{"dir":"ext","name":"Ext","id":"aaaa"}]}}}`
+	if err := os.WriteFile(filepath.Join(home, "state.json"), []byte(v1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Load()
+	if err != nil {
+		t.Fatalf("a version 1 file must still load: %v", err)
+	}
+	if len(s.Repos["tools"].Extensions) != 1 {
+		t.Fatalf("migration lost data: %+v", s.Repos["tools"])
+	}
+	if err := s.Save(); err != nil {
+		t.Fatal(err)
+	}
+	again, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.Version != Version {
+		t.Errorf("saved version = %d, want %d", again.Version, Version)
+	}
+}
+
+// The three id sets must stay disjoint: an id that is registered again (a
+// reinstall, a reverted deletion) is no longer stale or orphaned, and leaving
+// it recorded would let cleanup uninstall a working extension.
+func TestSaveDropsRecordsForLiveIDs(t *testing.T) {
+	t.Setenv("CEPM_HOME", t.TempDir())
+	s := New()
+	s.Repos["tools"] = &Repo{
+		URL: "u", Track: TrackBranch, Branch: "main",
+		Extensions: []Extension{{Dir: "ext", Name: "Ext", ID: "aaaa"}},
+	}
+	s.Repos["tools"].AddStale(StaleExtension{ID: "aaaa", Name: "Ext", Reason: "removed"})
+	s.AddOrphans([]StaleExtension{{ID: "aaaa", Name: "Ext", Reason: "uninstalled"}})
+	if err := s.Save(); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Repos["tools"].Stale) != 0 {
+		t.Errorf("stale record for a live id survived: %+v", got.Repos["tools"].Stale)
+	}
+	if len(got.Orphans) != 0 {
+		t.Errorf("orphan record for a live id survived: %+v", got.Orphans)
 	}
 }
 
