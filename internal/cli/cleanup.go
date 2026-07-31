@@ -67,6 +67,15 @@ those entries via Chrome's own confirmation dialog.`,
 					}
 				}
 			}
+			// Entries whose repository was uninstalled before they were
+			// removed from Chrome.
+			for _, o := range st.Orphans {
+				if loadedSet[o.ID] {
+					pending = append(pending, staleRef{"(uninstalled repo)", o})
+				} else {
+					goneIDs = append(goneIDs, o.ID)
+				}
+			}
 			if len(pending) == 0 && len(goneIDs) == 0 {
 				fmt.Fprintln(out, "Nothing to clean up.")
 				return nil
@@ -89,13 +98,12 @@ those entries via Chrome's own confirmation dialog.`,
 				if err != nil {
 					return err
 				}
-				for _, r := range st.Repos {
-					for _, id := range goneIDs {
+				clear := append(append([]string(nil), goneIDs...), keys(removed)...)
+				for _, id := range clear {
+					for _, r := range st.Repos {
 						r.RemoveStale(id)
 					}
-					for id := range removed {
-						r.RemoveStale(id)
-					}
+					st.RemoveOrphan(id)
 				}
 				return st.Save()
 			})
@@ -123,6 +131,14 @@ func containsID(exts []ipc.ChromeExt, id string) bool {
 		}
 	}
 	return false
+}
+
+func keys(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
 }
 
 func pluralY(n int) string {

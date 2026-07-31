@@ -25,6 +25,9 @@ const MaxAutoDetect = 20
 type Extension struct {
 	Dir  string // repo-relative, "." for repo root
 	Name string // from manifest.json
+	// Key is the manifest's "key" (base64 SPKI), empty when absent. When set,
+	// Chrome derives the extension ID from it instead of from the path.
+	Key string
 }
 
 // RepoConfig is the optional cepm.toml a repository author can commit at the
@@ -102,11 +105,11 @@ func fromConfig(repoDir string, dirs []string) ([]Extension, error) {
 		if err := ensureInside(repoDir, abs); err != nil {
 			return nil, fmt.Errorf("cepm.toml: extension dir %q: %w", dir, err)
 		}
-		name, err := manifestName(abs)
+		m, err := readManifest(abs)
 		if err != nil {
 			return nil, fmt.Errorf("cepm.toml: extension dir %q: %w", dir, err)
 		}
-		exts = append(exts, Extension{Dir: rel, Name: name})
+		exts = append(exts, Extension{Dir: rel, Name: m.Name, Key: m.Key})
 	}
 	return exts, nil
 }
@@ -141,7 +144,7 @@ func walk(repoDir string) ([]Extension, error) {
 		if path != repoDir && (base == "node_modules" || strings.HasPrefix(base, ".")) {
 			return filepath.SkipDir
 		}
-		name, err := manifestName(path)
+		m, err := readManifest(path)
 		if err != nil {
 			if errors.Is(err, errBadManifest) {
 				// A manifest.json that exists but does not parse means the
@@ -157,7 +160,7 @@ func walk(repoDir string) ([]Extension, error) {
 		if relErr != nil {
 			return relErr
 		}
-		exts = append(exts, Extension{Dir: rel, Name: name})
+		exts = append(exts, Extension{Dir: rel, Name: m.Name, Key: m.Key})
 		// An extension does not contain another extension; don't descend.
 		if path != repoDir {
 			return filepath.SkipDir
@@ -193,35 +196,46 @@ func ManifestVersion(dir string) (string, error) {
 // opposed to a directory that simply has none.
 var errBadManifest = errors.New("manifest.json is present but unusable")
 
-// manifestName parses <dir>/manifest.json and returns the extension name.
-// A missing file yields a plain error; a present-but-broken one wraps
-// errBadManifest so callers can tell the two apart.
-func manifestName(dir string) (string, error) {
+// Manifest is what cepm needs out of a manifest.json.
+type Manifest struct {
+	Name string
+	Key  string
+}
+
+// readManifest parses <dir>/manifest.json. A missing file yields a plain
+// error; a present-but-broken one wraps errBadManifest so callers can tell
+// the two apart.
+func readManifest(dir string) (Manifest, error) {
 	data, err := os.ReadFile(filepath.Join(dir, "manifest.json"))
 	if err != nil {
-		return "", fmt.Errorf("manifest.json: %w", err)
+		return Manifest{}, fmt.Errorf("manifest.json: %w", err)
 	}
 	var m struct {
 		ManifestVersion int    `json:"manifest_version"`
 		Name            string `json:"name"`
+		Key             string `json:"key"`
 	}
 	if err := json.Unmarshal(data, &m); err != nil {
-		return "", fmt.Errorf("%w: %v", errBadManifest, err)
+		return Manifest{}, fmt.Errorf("%w: %v", errBadManifest, err)
 	}
 	if m.ManifestVersion != 2 && m.ManifestVersion != 3 {
 		// Not an extension manifest (some other tool's manifest.json).
-		return "", fmt.Errorf("manifest.json: unsupported manifest_version %d", m.ManifestVersion)
+		return Manifest{}, fmt.Errorf("manifest.json: unsupported manifest_version %d", m.ManifestVersion)
 	}
 	if m.Name == "" {
-		return "", fmt.Errorf("%w: missing name", errBadManifest)
+		return Manifest{}, fmt.Errorf("%w: missing name", errBadManifest)
 	}
+	name := sanitizeName(m.Name)
 	// i18n placeholder names are resolved from _locales at runtime; fall back
 	// to the directory name for display purposes.
 	if strings.HasPrefix(m.Name, "__MSG_") {
-		return filepath.Base(dir), nil
+		name = filepath.Base(dir)
 	}
-	return sanitizeName(m.Name), nil
+	return Manifest{Name: name, Key: strings.TrimSpace(m.Key)}, nil
 }
+
+// ReadManifest exposes readManifest for callers outside the package (cepm id).
+func ReadManifest(dir string) (Manifest, error) { return readManifest(dir) }
 
 // sanitizeName strips what a repository must not be able to put on a user's
 // terminal. Names are printed in tables and in the numbered menus people

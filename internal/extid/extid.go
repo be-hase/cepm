@@ -9,6 +9,7 @@ package extid
 
 import (
 	"crypto/sha256"
+	"encoding/base64"
 	"fmt"
 	"path/filepath"
 )
@@ -27,6 +28,23 @@ func FromPath(absPath string) (string, error) {
 // DER-encoded SPKI public key ("key" field, base64-decoded).
 func FromPublicKey(spkiDER []byte) string {
 	return fromBytes(spkiDER)
+}
+
+// ForExtension returns the ID Chrome will assign to the unpacked extension at
+// absDir. Every caller must go through this: an extension that pins its ID by
+// embedding a "key" in its manifest (common when the ID has to be allowlisted
+// elsewhere) gets its ID from that key, not from its path, and computing the
+// wrong one makes every later lookup — reload, list, doctor, cleanup —
+// silently miss.
+func ForExtension(absDir, manifestKey string) (string, error) {
+	if manifestKey == "" {
+		return FromPath(absDir)
+	}
+	der, err := base64.StdEncoding.DecodeString(manifestKey)
+	if err != nil {
+		return "", fmt.Errorf("manifest.json of %s has an invalid \"key\": %w", absDir, err)
+	}
+	return FromPublicKey(der), nil
 }
 
 func fromBytes(b []byte) string {

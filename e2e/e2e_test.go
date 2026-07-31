@@ -164,6 +164,25 @@ func TestE2E(t *testing.T) {
 		t.Fatalf("host unreachable after the helper refresh: %v", err)
 	}
 
+	t.Log("scenario 8: an extension that pins its id with a manifest \"key\" is tracked by that id")
+	pinnedDir := filepath.Join(author, "pinned")
+	writePinnedExtension(t, pinnedDir)
+	git(t, author, "add", "-A")
+	git(t, author, "commit", "-m", "add pinned extension")
+	git(t, author, "push", "origin", "main")
+	runCepm(t, bin, "update")
+	// The id must come from the key, not from the path — that is what Chrome
+	// uses, and everything (reload, list, doctor, cleanup) matches on it.
+	if out := runCepm(t, bin, "list", "--json"); !strings.Contains(out, pinnedExtensionID) {
+		t.Errorf("cepm should record the key-derived id %s:\n%s", pinnedExtensionID, out)
+	}
+	installedPinned := filepath.Join(cepmHome, "repos", "testrepo", "pinned")
+	if id, err := cdp.loadUnpacked(installedPinned); err != nil {
+		t.Fatalf("loadUnpacked pinned: %v", err)
+	} else if id != pinnedExtensionID {
+		t.Errorf("Chrome assigned %s but cepm computed %s", id, pinnedExtensionID)
+	}
+
 	t.Log("scenario 7: the periodic auto-update applies a push with no CLI interaction")
 	writeSWExtension(t, filepath.Join(author, "widget"), "1.2.0", "BUILD-5")
 	git(t, author, "commit", "-am", "auto update code")
@@ -230,6 +249,26 @@ func writeSWExtension(t *testing.T, dir, version, build string) {
 		"chrome.alarms.create('keep', {periodInMinutes: 0.5});\n"+
 		"chrome.alarms.onAlarm.addListener(() => {});\n", build)
 	if err := os.WriteFile(filepath.Join(dir, "background.js"), []byte(sw), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// pinnedExtensionKey is a throwaway public key (its private half was never
+// kept) used to check that cepm derives ids the way Chrome does when a
+// manifest pins its id. pinnedExtensionID is the id Chrome must assign.
+const (
+	pinnedExtensionKey = "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA3yuXjwS4vVRxKrFpRZLNmT/GKSGFfTIgfVJwh5yHdhdr+LjANs26YiMlnC7uMI1oZPo5FSvkDlK12py2rkpZ11ADIk0Qav5ZS7TW5ruw83IU6F/rmQtRq5vwASc7AGwBSLiYMJ+XVtFDRCEAr5l7LOkL1jzdJbkb3XbH69ah9CALwKey1xfoQhiKvFL1dEa8/TGd3iXaH7s5v9abON1rCfX3AvvQvekc0HEXnxNWcEduUYRKrCWAuVmyRViES81gmZmY90rmwCrtVBHQmDwBdYqBH7eSF6eE1iazl5cMzDJgk9YxsjQO9VntcO2YJMApdnsxXMMXsyBFZYRCBk+S6wIDAQAB"
+	pinnedExtensionID  = "efchjjaogobppnakahbhfpimoophkbog"
+)
+
+func writePinnedExtension(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	manifest := fmt.Sprintf(`{"manifest_version": 3, "name": "E2E Pinned", "version": "1.0.0", "key": %q}`,
+		pinnedExtensionKey)
+	if err := os.WriteFile(filepath.Join(dir, "manifest.json"), []byte(manifest), 0o644); err != nil {
 		t.Fatal(err)
 	}
 }

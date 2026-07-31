@@ -83,10 +83,10 @@ an extension directory, cepm reports it, carries your enabled choice over to
 the new path, and `cepm cleanup` clears the now-broken entry from Chrome via
 Chrome's own confirmation dialog.
 
-### Tracking releases instead of a branch
+### Tracking version tags instead of a branch
 
-If a repo's default branch carries unstable work-in-progress, follow releases
-instead — cepm then only ever checks out the newest released version:
+If a repo's default branch carries unstable work-in-progress, follow version
+tags instead — cepm then only ever checks out the highest released version:
 
 ```console
 $ cepm install <git-url> --track tag                  # newest stable version
@@ -94,18 +94,22 @@ $ cepm install <git-url> --track tag --prerelease     # ...including v2.0.0-rc1
 $ cepm install <git-url> --track tag --tag-pattern "release-*"
 ```
 
-This works off tags, which is deliberately the same thing as following
-**GitHub Releases**, without every machine needing a GitHub API token:
+Versions are compared as semver, so `v1.10.0` correctly beats `v1.9.0`.
+Prereleases (`v2.0.0-rc1`) are skipped unless you pass `--prerelease`, tags
+that are not version numbers (a stray `nightly`) are ignored, and if *no*
+version tag matches cepm reports it rather than following whatever was tagged
+last.
 
-- publishing a release pushes its tag, so released versions are exactly the
-  tags cepm sees;
-- a *draft* release does not create a tag at all, so drafts are invisible;
-- a *prerelease* is spelled out by semver (`v2.0.0-rc1`), so cepm skips it
-  unless you pass `--prerelease`.
+**How this relates to GitHub Releases.** cepm follows tags, not the Releases
+API, so no machine needs a GitHub token and updates keep working without
+access to `api.github.com`. In practice that lines up closely — publishing a
+release pushes its tag, and a *draft* release creates no tag at all, so drafts
+are invisible — with two differences worth knowing:
 
-Versions are compared as semver, so `v1.10.0` correctly beats `v1.9.0`, and
-tags that are not version numbers (a stray `nightly`) are ignored rather than
-mistaken for a release.
+- a tag pushed **without** creating a release is followed like any other, so
+  tag only what you intend to ship;
+- the *prerelease* checkbox is invisible to cepm; what it goes by is the tag
+  name, so mark prereleases as `v2.0.0-rc1` rather than `v2.0.0`.
 
 ### Repository-side configuration (`cepm.toml`, optional)
 
@@ -125,7 +129,8 @@ tag_pattern = "v*"
 Note for repo authors: renaming an extension directory is a breaking change
 for every consumer — Chrome derives extension IDs from paths, so each user
 must re-load the new directory once (cepm guides them through it). Prefer
-stable directory names.
+stable directory names, or pin the ID by putting a `key` in manifest.json,
+which cepm honors and which makes the ID survive a move.
 
 ### User configuration (`~/.cepm/config.toml`, optional)
 

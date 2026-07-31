@@ -9,8 +9,9 @@ import (
 )
 
 // IsTTY reports whether the CLI is talking to an interactive terminal (both
-// directions), which gates prompts and the load-confirmation ceremony.
-func IsTTY() bool {
+// directions), which gates prompts and the load-confirmation ceremony. It is
+// a variable so tests can exercise the interactive paths.
+var IsTTY = func() bool {
 	return isCharDevice(os.Stdin) && isCharDevice(os.Stdout)
 }
 

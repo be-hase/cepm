@@ -476,9 +476,10 @@ func TestLatestTag(t *testing.T) {
 	if got, warn := LatestTag([]string{"release-b", "v1.0.0"}, false); got != "v1.0.0" || warn == "" {
 		t.Errorf("mixed tags should prefer the version number with a warning, got (%q, %q)", got, warn)
 	}
-	// With no version-like tag at all, fall back to creation order.
-	if got, warn := LatestTag([]string{"beta", "alpha"}, false); got != "beta" || warn == "" {
-		t.Errorf("non-semver-only tags should use creatordate order with a warning, got (%q, %q)", got, warn)
+	// With no version-like tag at all, refuse rather than ship whatever was
+	// tagged last: following that would not be "tracking releases".
+	if got, warn := LatestTag([]string{"beta", "alpha"}, false); got != "" || warn == "" {
+		t.Errorf("non-semver-only tags should be refused with an explanation, got (%q, %q)", got, warn)
 	}
 }
 

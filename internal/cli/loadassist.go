@@ -37,6 +37,13 @@ func promptReader(cmd *cobra.Command) *bufio.Reader {
 	return stdinShared
 }
 
+// resetPromptReader lets tests run several commands in one process, each with
+// its own stdin.
+func resetPromptReader() {
+	stdinOnce = sync.Once{}
+	stdinShared = nil
+}
+
 // selectByNumbers shows a numbered list and returns the chosen indices.
 // Empty input selects everything.
 func selectByNumbers(cmd *cobra.Command, prompt string, items []string) ([]int, error) {

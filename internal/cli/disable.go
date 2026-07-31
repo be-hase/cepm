@@ -81,14 +81,22 @@ remove it from Chrome too (Chrome shows its own confirmation dialog).`,
 
 // offerChromeRemoval checks which of the given extensions are still loaded
 // and, on a TTY, offers to remove them from Chrome via the helper (Chrome
-// asks for confirmation itself).
-func offerChromeRemoval(cmd *cobra.Command, exts []state.Extension) {
+// asks for confirmation itself). It returns the set of IDs that are no longer
+// in Chrome afterwards, so callers know what is left behind.
+func offerChromeRemoval(cmd *cobra.Command, exts []state.Extension) map[string]bool {
 	out := cmd.OutOrStdout()
+	gone := map[string]bool{}
 	ctx, cancel := context.WithTimeout(cmd.Context(), 5*time.Second)
 	loaded, err := ipc.ListChrome(ctx)
 	cancel()
 	if err != nil {
-		return // Chrome closed; nothing to offer
+		// Chrome unreachable: say so rather than leaving broken entries
+		// behind silently.
+		if len(exts) > 0 {
+			fmt.Fprintf(out, "  Chrome is not reachable; %d entr%s may still be loaded there.\n",
+				len(exts), pluralY(len(exts)))
+		}
+		return gone
 	}
 	loadedSet := map[string]bool{}
 	for _, e := range loaded {
@@ -96,6 +104,7 @@ func offerChromeRemoval(cmd *cobra.Command, exts []state.Extension) {
 	}
 	for _, e := range exts {
 		if !loadedSet[e.ID] {
+			gone[e.ID] = true
 			continue
 		}
 		if !assist.IsTTY() {
@@ -105,13 +114,16 @@ func offerChromeRemoval(cmd *cobra.Command, exts []state.Extension) {
 		if !confirm(cmd, fmt.Sprintf("%q is still loaded in Chrome — remove it there too?", e.Name)) {
 			continue
 		}
-		uninstallViaChrome(cmd.Context(), cmd, e.ID, e.Name)
+		if uninstallViaChrome(cmd.Context(), cmd, e.ID, e.Name) {
+			gone[e.ID] = true
+		}
 	}
+	return gone
 }
 
 // uninstallViaChrome triggers Chrome's uninstall confirmation dialog for the
-// extension and reports the outcome.
-func uninstallViaChrome(ctx context.Context, cmd *cobra.Command, id, name string) {
+// extension and reports the outcome, returning whether it is gone from Chrome.
+func uninstallViaChrome(ctx context.Context, cmd *cobra.Command, id, name string) bool {
 	out := cmd.OutOrStdout()
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
 	defer cancel()
@@ -124,11 +136,14 @@ func uninstallViaChrome(ctx context.Context, cmd *cobra.Command, id, name string
 		fmt.Fprintf(out, "failed: %v\n", err)
 	case status == ipc.StatusUninstalled:
 		fmt.Fprintln(out, "✔ removed")
+		return true
 	case status == ipc.StatusCancelled:
 		fmt.Fprintln(out, "cancelled")
 	case status == ipc.StatusNotInstalled:
 		fmt.Fprintln(out, "already gone")
+		return true
 	default:
 		fmt.Fprintln(out, status)
 	}
+	return false
 }

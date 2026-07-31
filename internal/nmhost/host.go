@@ -397,6 +397,9 @@ func managedIDs(ids []string) ([]string, error) {
 			known[s.ID] = true
 		}
 	}
+	for _, o := range st.Orphans {
+		known[o.ID] = true
+	}
 	for _, id := range ids {
 		if !known[id] {
 			return nil, fmt.Errorf("extension %s is not managed by cepm", id)

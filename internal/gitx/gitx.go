@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os/exec"
 	"regexp"
 	"strings"
@@ -18,13 +19,25 @@ type Repo struct {
 	Dir string
 }
 
-// credentialsRe matches the "user:password@" part of a URL.
-var credentialsRe = regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.-]*://)[^/\s@]*:[^/\s@]*@`)
+// urlRe finds anything URL-shaped in a longer message so it can be redacted
+// even when embedded in git's output.
+var urlRe = regexp.MustCompile(`[a-zA-Z][a-zA-Z0-9+.-]*://[^\s'"]+`)
 
-// RedactURL removes embedded credentials from any URL in s, so tokens do not
-// reach the terminal, the logs, or a pasted bug report.
+// RedactURL removes embedded credentials from every URL in s, so tokens do
+// not reach the terminal, the logs, or a pasted bug report. Parsing with
+// net/url strips the whole userinfo section, including a bare token with no
+// password separator, which a "user:pass@" pattern would miss.
 func RedactURL(s string) string {
-	return credentialsRe.ReplaceAllString(s, "${1}***@")
+	return urlRe.ReplaceAllStringFunc(s, func(raw string) string {
+		u, err := url.Parse(raw)
+		if err != nil || u.User == nil {
+			return raw
+		}
+		// Rebuild without userinfo and re-insert a literal marker: passing
+		// "***" through url.User would percent-encode it.
+		u.User = nil
+		return strings.Replace(u.String(), "://", "://***@", 1)
+	})
 }
 
 func run(ctx context.Context, dir string, args ...string) (string, error) {

@@ -27,9 +27,14 @@ const (
 // means "enabled": state files written before the field existed, and the
 // common case, both stay implicit.
 type Extension struct {
-	Dir      string `json:"dir"` // repo-relative, "." for repo root
-	Name     string `json:"name"`
-	ID       string `json:"id"` // Chrome unpacked-extension ID (derived from abs path)
+	Dir  string `json:"dir"` // repo-relative, "." for repo root
+	Name string `json:"name"`
+	// ID is the extension ID Chrome assigns: derived from the manifest "key"
+	// when it has one, otherwise from the absolute path.
+	ID string `json:"id"`
+	// Key is the manifest "key", kept so that an extension with a pinned ID
+	// can be recognised across directory renames.
+	Key      string `json:"key,omitempty"`
 	Disabled bool   `json:"disabled,omitempty"`
 }
 
@@ -103,6 +108,40 @@ func (r *Repo) RemoveStale(id string) {
 type State struct {
 	Version int              `json:"version"`
 	Repos   map[string]*Repo `json:"repos"`
+	// Orphans are stale Chrome entries whose repository is gone (uninstalled
+	// before the user removed them from Chrome). Keeping them here is what
+	// lets "cepm cleanup" still finish the job later.
+	Orphans []StaleExtension `json:"orphans,omitempty"`
+}
+
+// AddOrphans records stale entries that outlived their repository.
+func (s *State) AddOrphans(list []StaleExtension) {
+	for _, o := range list {
+		found := false
+		for _, existing := range s.Orphans {
+			if existing.ID == o.ID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			s.Orphans = append(s.Orphans, o)
+		}
+	}
+}
+
+// RemoveOrphan drops the orphan record with the given ID.
+func (s *State) RemoveOrphan(id string) {
+	out := s.Orphans[:0]
+	for _, o := range s.Orphans {
+		if o.ID != id {
+			out = append(out, o)
+		}
+	}
+	s.Orphans = out
+	if len(s.Orphans) == 0 {
+		s.Orphans = nil
+	}
 }
 
 func New() *State {

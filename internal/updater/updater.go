@@ -31,6 +31,7 @@ type ExtChange struct {
 	AbsDir   string
 	ID       string
 	Name     string
+	Key      string // manifest "key", when the extension pins its ID
 	// ManifestChanged marks updates that touched manifest.json. Reloading an
 	// unpacked extension through chrome.management.setEnabled re-reads its
 	// code from disk but keeps the manifest Chrome cached at install time, so
@@ -255,15 +256,15 @@ func moveToLatest(ctx context.Context, repo gitx.Repo, r *state.Repo, res *RepoR
 	return nil
 }
 
-// LatestTag picks the newest tag from a creatordate-descending list. When all
-// tags parse as semver they are compared as versions; otherwise the most
-// recently created tag wins and a warning explains the fallback.
+// LatestTag picks the highest semver tag, ignoring tags that are not version
+// numbers (with a warning) and prereleases (v2.0.0-rc1, v1.5.0-beta.2) unless
+// includePrerelease is set. It returns "" plus an explanation when there is
+// nothing safe to follow.
 //
-// Semver prereleases (v2.0.0-rc1, v1.5.0-beta.2, …) are skipped unless
-// includePrerelease is set. Together with the fact that GitHub only creates a
-// tag once a release is *published* (drafts create none), this gives the same
-// "follow published stable releases" behavior as the Releases API — without
-// every user's machine needing an API token and network access to it.
+// This tracks version tags, which is close to but not the same as tracking
+// GitHub Releases: publishing a release pushes its tag and a draft pushes
+// none, but a tag pushed without a release is followed too, and a release's
+// prerelease flag is only visible here through the tag name.
 func LatestTag(tags []string, includePrerelease bool) (latest string, warning string) {
 	type cand struct{ name, canon string }
 	var cands []cand
@@ -292,9 +293,11 @@ func LatestTag(tags []string, includePrerelease bool) (latest string, warning st
 	if skippedPrerelease > 0 {
 		return "", fmt.Sprintf("only prerelease tags match (%d); use --prerelease to follow them", skippedPrerelease)
 	}
-	// No version-like tag at all: follow the most recently created one, since
-	// the pattern presumably selects releases in some other naming scheme.
-	return tags[0], fmt.Sprintf("no version-number tags match; following most recently created tag %q", tags[0])
+	// Refuse rather than guess: following "whichever tag was created last"
+	// would ship whatever someone tagged, which is the opposite of tracking
+	// releases.
+	return "", fmt.Sprintf("no version-number tags match (found %d tag(s) that are not semver, e.g. %q); "+
+		"tag releases as v1.2.3, or track a branch instead", nonSemver, tags[0])
 }
 
 // refreshExtensions re-scans the repo, updates r.Extensions (preserving the
@@ -317,29 +320,31 @@ func refreshExtensions(name string, r *state.Repo, dir string, res *RepoResult, 
 	var added []ExtChange
 	for _, e := range exts {
 		abs := filepath.Join(dir, e.Dir)
-		id, err := extid.FromPath(abs)
+		id, err := extid.ForExtension(abs, e.Key)
 		if err != nil {
 			res.Warnings = append(res.Warnings, fmt.Sprintf("compute ID for %s: %v", abs, err))
 			continue
 		}
-		se := state.Extension{Dir: e.Dir, Name: e.Name, ID: id}
+		se := state.Extension{Dir: e.Dir, Name: e.Name, Key: e.Key, ID: id}
 		if prev, existed := old[e.Dir]; existed {
 			se.Disabled = prev.Disabled
 		} else {
 			// New extensions arrive as "available"; the user opts in with
 			// cepm enable (renames inherit the old intent below).
 			se.Disabled = true
-			added = append(added, ExtChange{RepoName: name, Dir: e.Dir, AbsDir: abs, ID: id, Name: e.Name})
+			added = append(added, ExtChange{RepoName: name, Dir: e.Dir, AbsDir: abs, ID: id, Name: e.Name, Key: e.Key})
 		}
 		newList = append(newList, se)
 		delete(old, e.Dir)
 	}
 
-	// Rename inference: a vanished dir and an appeared dir with the same
-	// manifest name (unique on both sides) is the same extension moving.
+	// Rename inference: a vanished dir and an appeared dir that identify the
+	// same extension is a move. A manifest "key" is definitive; otherwise the
+	// manifest name has to be unique on *both* sides, or we cannot tell which
+	// new directory a removed one became.
 	removed := old
 	for i := range added {
-		match, ok := uniqueNameMatch(added[i].Name, removed)
+		match, ok := matchRenamed(added[i], removed, added)
 		if !ok {
 			continue
 		}
@@ -399,18 +404,47 @@ func refreshExtensions(name string, r *state.Repo, dir string, res *RepoResult, 
 	}
 }
 
-// uniqueNameMatch finds the single removed extension with the given manifest
-// name; ambiguous names (duplicates) are not treated as renames.
-func uniqueNameMatch(name string, removed map[string]state.Extension) (state.Extension, bool) {
+// matchRenamed decides whether the appeared extension is a removed one that
+// moved. Names are display strings (sanitised and truncated, so distinct
+// names can collide), which is why a key match wins and an ambiguous name
+// match is refused rather than guessed.
+func matchRenamed(appeared ExtChange, removed map[string]state.Extension, allAdded []ExtChange) (state.Extension, bool) {
+	if appeared.Key != "" {
+		var found state.Extension
+		count := 0
+		for _, e := range removed {
+			if e.Key == appeared.Key {
+				found, count = e, count+1
+			}
+		}
+		if count == 1 {
+			return found, true
+		}
+		return state.Extension{}, false
+	}
+
 	var found state.Extension
-	count := 0
+	removedCount := 0
 	for _, e := range removed {
-		if e.Name == name {
-			found = e
-			count++
+		if e.Key == "" && e.Name == appeared.Name {
+			found, removedCount = e, removedCount+1
 		}
 	}
-	return found, count == 1
+	if removedCount != 1 {
+		return state.Extension{}, false
+	}
+	// The name must also be unique among the new directories: otherwise which
+	// of them inherited the old one's enable/disable choice is a coin flip.
+	addedCount := 0
+	for _, a := range allAdded {
+		if a.Name == appeared.Name {
+			addedCount++
+		}
+	}
+	if addedCount != 1 {
+		return state.Extension{}, false
+	}
+	return found, true
 }
 
 func renameTarget(renames []RenameChange, dir string) bool {

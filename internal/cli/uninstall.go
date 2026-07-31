@@ -19,18 +19,48 @@ func newUninstallCmd() *cobra.Command {
 		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name := args[0]
-			var removed *state.Repo
-			err := updater.WithLock(cmd.Context(), func() error {
+			out := cmd.OutOrStdout()
+
+			st, err := state.Load()
+			if err != nil {
+				return err
+			}
+			repo, ok := st.Repos[name]
+			if !ok {
+				return fmt.Errorf("repository %q is not registered (see cepm list)", name)
+			}
+
+			// Offer the Chrome-side removal *before* unregistering: the host
+			// only acts on extensions cepm currently manages, so doing it
+			// afterwards would always be refused. This also runs outside the
+			// update lock, since it waits for the user.
+			candidates := append([]state.Extension(nil), repo.Extensions...)
+			for _, s := range repo.Stale {
+				candidates = append(candidates, state.Extension{Name: s.Name, ID: s.ID})
+			}
+			gone := offerChromeRemoval(cmd, candidates)
+
+			// Whatever is still in Chrome outlives its repository; keep a
+			// record so cleanup can finish later.
+			var orphans []state.StaleExtension
+			for _, e := range candidates {
+				if !gone[e.ID] {
+					orphans = append(orphans, state.StaleExtension{
+						ID: e.ID, Name: e.Name, Reason: "uninstalled",
+					})
+				}
+			}
+
+			err = updater.WithLock(cmd.Context(), func() error {
 				st, err := state.Load()
 				if err != nil {
 					return err
 				}
-				r, ok := st.Repos[name]
-				if !ok {
-					return fmt.Errorf("repository %q is not registered (see cepm list)", name)
+				if _, ok := st.Repos[name]; !ok {
+					return fmt.Errorf("repository %q is no longer registered", name)
 				}
-				removed = r
 				delete(st.Repos, name)
+				st.AddOrphans(orphans)
 				return st.Save()
 			})
 			if err != nil {
@@ -45,11 +75,11 @@ func newUninstallCmd() *cobra.Command {
 					return fmt.Errorf("unregistered, but failed to delete %s: %w", dir, err)
 				}
 			}
-			out := cmd.OutOrStdout()
-			fmt.Fprintf(out, "Uninstalled %q (%d extension(s)).\n", name, len(removed.Extensions))
-			// The files are gone, so any copy still loaded in Chrome is now
-			// broken; offer to remove it the same way "cepm disable" does.
-			offerChromeRemoval(cmd, removed.Extensions)
+			fmt.Fprintf(out, "Uninstalled %q (%d extension(s)).\n", name, len(repo.Extensions))
+			if len(orphans) > 0 {
+				fmt.Fprintf(out, "%d entr%s still in Chrome; remove them there, or run: cepm cleanup\n",
+					len(orphans), pluralY(len(orphans)))
+			}
 			return nil
 		},
 	}

@@ -20,13 +20,14 @@ import (
 )
 
 type installFlags struct {
-	name       string
-	branch     string
-	track      string
-	tagPattern string
-	prerelease bool
-	only       []string
-	all        bool
+	name          string
+	branch        string
+	track         string
+	tagPattern    string
+	prerelease    bool
+	prereleaseSet bool // --prerelease was given explicitly (true or false)
+	only          []string
+	all           bool
 }
 
 func newInstallCmd() *cobra.Command {
@@ -37,6 +38,10 @@ func newInstallCmd() *cobra.Command {
 		GroupID: "ext",
 		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// Distinguish "not given" from an explicit --prerelease=false, so
+			// the documented precedence (flag over cepm.toml) holds in both
+			// directions.
+			flags.prereleaseSet = cmd.Flags().Changed("prerelease")
 			return runInstall(cmd, args[0], flags)
 		},
 	}
@@ -44,7 +49,8 @@ func newInstallCmd() *cobra.Command {
 	cmd.Flags().StringVar(&flags.branch, "branch", "", "branch to track (branch mode)")
 	cmd.Flags().StringVar(&flags.track, "track", "", `tracking mode: "branch" or "tag" (default: repo's cepm.toml, then branch)`)
 	cmd.Flags().StringVar(&flags.tagPattern, "tag-pattern", "", `glob for release tags in tag mode (default "v*")`)
-	cmd.Flags().BoolVar(&flags.prerelease, "prerelease", false, "in tag mode, also follow prerelease versions (v2.0.0-rc1)")
+	cmd.Flags().BoolVar(&flags.prerelease, "prerelease", false,
+		"in tag mode, also follow prerelease versions (v2.0.0-rc1); --prerelease=false overrides the repo's cepm.toml")
 	cmd.Flags().StringSliceVar(&flags.only, "only", nil, "enable only these extension dirs (repo-relative); others stay available")
 	cmd.Flags().BoolVar(&flags.all, "all", false, "enable every detected extension without asking")
 	return cmd
@@ -84,20 +90,21 @@ func runInstall(cmd *cobra.Command, url string, flags installFlags) error {
 		return fmt.Errorf("repository %q is already registered", name)
 	}
 
-	fmt.Fprintf(out, "Cloning %s ...\n", url)
+	fmt.Fprintf(out, "Cloning %s ...\n", gitx.RedactURL(url))
 	if err := gitx.Clone(ctx, url, dir, branch); err != nil {
 		return err
 	}
 	rollback := func() { _ = os.RemoveAll(dir) }
 
-	repo, err := buildRepo(ctx, url, dir, branch, track, tagPattern, flags.prerelease)
+	repo, err := buildRepo(ctx, url, dir, branch, track, tagPattern, flags.prerelease, flags.prereleaseSet)
 	if err != nil {
 		rollback()
 		return err
 	}
 	if len(repo.Extensions) == 0 {
 		rollback()
-		return fmt.Errorf("no Chrome extensions found in %s (no manifest.json; repo authors can declare directories in cepm.toml)", url)
+		return fmt.Errorf("no Chrome extensions found in %s (no manifest.json; repo authors can declare directories in cepm.toml)",
+			gitx.RedactURL(url))
 	}
 	if err := applySelection(cmd, name, repo, flags); err != nil {
 		rollback()
@@ -205,7 +212,7 @@ func extensionDirs(repo *state.Repo) []string {
 // buildRepo inspects a fresh clone and produces its state entry, resolving the
 // tracking mode (CLI flags > repo cepm.toml > branch) and, in tag mode,
 // checking out the latest matching tag.
-func buildRepo(ctx context.Context, url, dir, branch, track, tagPattern string, prerelease bool) (*state.Repo, error) {
+func buildRepo(ctx context.Context, url, dir, branch, track, tagPattern string, prerelease, prereleaseSet bool) (*state.Repo, error) {
 	repoCfg, err := scan.LoadRepoConfig(dir)
 	if err != nil {
 		return nil, err
@@ -219,7 +226,7 @@ func buildRepo(ctx context.Context, url, dir, branch, track, tagPattern string, 
 	if tagPattern == "" && repoCfg != nil && repoCfg.TagPattern != "" {
 		tagPattern = repoCfg.TagPattern
 	}
-	if !prerelease && repoCfg != nil {
+	if !prereleaseSet && repoCfg != nil {
 		prerelease = repoCfg.Prerelease
 	}
 
@@ -273,11 +280,11 @@ func buildRepo(ctx context.Context, url, dir, branch, track, tagPattern string, 
 		fmt.Fprintf(os.Stderr, "Warning: %d extensions auto-detected; consider declaring them in cepm.toml\n", len(exts))
 	}
 	for _, e := range exts {
-		id, err := extid.FromPath(filepath.Join(dir, e.Dir))
+		id, err := extid.ForExtension(filepath.Join(dir, e.Dir), e.Key)
 		if err != nil {
 			return nil, err
 		}
-		r.Extensions = append(r.Extensions, state.Extension{Dir: e.Dir, Name: e.Name, ID: id})
+		r.Extensions = append(r.Extensions, state.Extension{Dir: e.Dir, Name: e.Name, Key: e.Key, ID: id})
 	}
 	return r, nil
 }

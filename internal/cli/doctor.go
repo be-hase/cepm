@@ -259,7 +259,8 @@ func checkRepos(ctx context.Context, hostReachable bool) []diagnostic {
 			Detail: fmt.Sprintf("%s (%s)", dir, trackRef(r))}
 		if dirty, err := (gitx.Repo{Dir: dir}).IsDirty(ctx); err != nil {
 			repoDiag = diagnostic{Name: "repo " + name, Status: "fail", Detail: err.Error(),
-				Hint: "clone may be broken; try: cepm uninstall " + name + " && cepm install " + r.URL}
+				Hint: fmt.Sprintf("clone may be broken; try: cepm uninstall %s && cepm install %s",
+					shellQuote(name), shellQuote(gitx.RedactURL(r.URL)))}
 		} else if dirty {
 			repoDiag = diagnostic{Name: "repo " + name, Status: "warn",
 				Detail: "working tree has local changes — auto update will skip this repo",
@@ -328,6 +329,12 @@ func checkRepos(ctx context.Context, hostReachable bool) []diagnostic {
 // is what LastError usually holds) cannot break column alignment.
 func oneLine(s string) string {
 	return strings.Join(strings.Fields(strings.ReplaceAll(s, "\n", " ")), " ")
+}
+
+// shellQuote makes a value safe to paste into a shell, since doctor's hints
+// are commands people copy and run.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 func executablePath() string {
