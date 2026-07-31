@@ -527,40 +527,102 @@ func TestUninstallRepairsControlCharacterOnlyState(t *testing.T) {
 	}
 }
 
-// The Chrome-side removal waits for an answer without the lock, so an update
-// can change the repository meanwhile. Acting on what was decided then would
-// record the wrong extensions; the change has to be noticed instead.
-func TestUninstallAbortsWhenTheRepoChangesWhileAsking(t *testing.T) {
+// An explicit --keep-files is a promise, and the repair path used not to see
+// the flag at all.
+func TestRepairUninstallHonoursKeepFiles(t *testing.T) {
+	interactive(t)
+	startFakeHost(t)
+	writeRawState(t, `{"version":3,"repos":{
+      "tools":{"url":"u","track":"branch","branch":"main","head":"h",
+               "extensions":[{"dir":"ext\nFORGED","name":"Ext","id":"aaaa"}]}}}`)
+	dir, err := updaterRepoDir("tools")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if out, err := run(t, "", "uninstall", "--keep-files", "tools"); err != nil {
+		t.Fatalf("uninstall: %v\n%s", err, out)
+	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Errorf("--keep-files was ignored: %v", err)
+	}
+}
+
+// A repository can hold stale records for ids it already lost track of.
+// Dropping them with the repository would put those Chrome entries beyond
+// cleanup's reach.
+func TestRepairUninstallCarriesStaleEntriesOver(t *testing.T) {
+	interactive(t)
+	startFakeHost(t, "xxxx", "sssss")
+	writeRawState(t, `{"version":3,"repos":{
+      "a":{"url":"u","track":"branch","branch":"main","head":"h",
+           "extensions":[{"dir":"ext","name":"A","id":"xxxx","key":"K"}]},
+      "b":{"url":"u","track":"branch","branch":"main","head":"h",
+           "extensions":[{"dir":"ext","name":"B","id":"xxxx","key":"K"}],
+           "stale":[{"id":"sssss","name":"Gone","reason":"removed"}]}}}`)
+
+	if out, err := run(t, "", "uninstall", "b"); err != nil {
+		t.Fatalf("uninstall: %v\n%s", err, out)
+	}
+	st, err := state.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, o := range st.Orphans {
+		if o.ID == "sssss" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("the repository's stale entry should survive as an orphan: %+v", st.Orphans)
+	}
+}
+
+// Aborting because the repository changed is only safe if nothing was done to
+// Chrome first — otherwise "nothing was changed" is a lie.
+func TestUninstallDoesNotTouchChromeWhenAborting(t *testing.T) {
 	interactive(t)
 	host := startFakeHost(t, "aaaa")
 	seedRepo(t, "tools", state.Extension{Dir: "ext", Name: "Ext", ID: "aaaa"})
 
-	// Stand in for an update landing during the confirmation dialog.
-	host.onUninstall = func() {
-		if err := updater.WithLock(context.Background(), func() error {
-			st, err := state.Load()
-			if err != nil {
-				return err
+	// An update lands while the user is being asked. It *adds* an extension
+	// rather than replacing one, so the extension under discussion stays
+	// registered: otherwise the host's own authorization would refuse the
+	// removal and hide whether the ordering is right.
+	askedOnce := false
+	assist.IsTTY = func() bool {
+		if !askedOnce {
+			askedOnce = true
+			if err := updater.WithLock(context.Background(), func() error {
+				st, err := state.Load()
+				if err != nil {
+					return err
+				}
+				st.Repos["tools"].Extensions = append(st.Repos["tools"].Extensions,
+					state.Extension{Dir: "added", Name: "Added", ID: "zzzz"})
+				return st.Save()
+			}); err != nil {
+				t.Errorf("simulating a concurrent update: %v", err)
 			}
-			st.Repos["tools"].Extensions = []state.Extension{
-				{Dir: "renamed", Name: "Ext", ID: "zzzz"},
-			}
-			return st.Save()
-		}); err != nil {
-			t.Errorf("simulating a concurrent update: %v", err)
 		}
+		return true
 	}
 
 	out, err := run(t, "y\n", "uninstall", "tools")
 	if err == nil {
-		t.Fatalf("uninstall should abort when the repository changed:\n%s", out)
+		t.Fatalf("uninstall should abort:\n%s", out)
 	}
-	st, _ := state.Load()
-	if _, still := st.Repos["tools"]; !still {
-		t.Error("nothing should have been unregistered after aborting")
+	host.mu.Lock()
+	defer host.mu.Unlock()
+	if len(host.uninstalled) != 0 {
+		t.Errorf("nothing may be removed from Chrome before the abort, got %v", host.uninstalled)
 	}
-	if len(st.Orphans) != 0 {
-		t.Errorf("no orphan should be recorded from a stale decision: %+v", st.Orphans)
+	if !host.loaded["aaaa"] {
+		t.Error("the extension should still be loaded in Chrome")
 	}
 }
 

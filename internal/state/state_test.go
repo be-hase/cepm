@@ -162,6 +162,41 @@ func TestSaveRefusesDuplicateLiveIDs(t *testing.T) {
 	}
 }
 
+// Every persisted field raises the schema version, because an older binary
+// reads what it knows and drops the rest on its next write. KeptClones is
+// what version 3 protects: losing it would leave repair leftovers untracked.
+func TestKeptClonesSurviveAndRaiseTheVersion(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("CEPM_HOME", home)
+	// A version 2 file, i.e. one written before KeptClones existed.
+	if err := os.WriteFile(filepath.Join(home, "state.json"),
+		[]byte(`{"version":2,"repos":{}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.KeepClone("/tmp/cepm-kept")
+	if err := s.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	again, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.Version < 3 {
+		t.Errorf("saving KeptClones must raise the schema version, got %d", again.Version)
+	}
+	if len(again.KeptClones) != 1 || again.KeptClones[0] != "/tmp/cepm-kept" {
+		t.Errorf("KeptClones did not survive a round trip: %+v", again.KeptClones)
+	}
+	if got := again.TakeKeptClones(); len(got) != 1 || again.KeptClones != nil {
+		t.Errorf("TakeKeptClones should hand them over once: %+v / %+v", got, again.KeptClones)
+	}
+}
+
 func TestStaleBookkeeping(t *testing.T) {
 	r := &Repo{}
 	r.AddStale(StaleExtension{ID: "aaa", Name: "A", Reason: "removed"})

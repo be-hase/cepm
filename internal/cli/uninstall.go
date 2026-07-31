@@ -124,34 +124,30 @@ func newUninstallCmd() *cobra.Command {
 				return fmt.Errorf("repository %q is not registered (see cepm list)", name)
 			}
 
+			dir, err := updater.RepoDir(name)
+			if err != nil {
+				return err
+			}
+
 			if st.Validate() != nil {
 				// Repair: nothing is asked of Chrome, so there is no prompt to
 				// wait on and every decision can be made from the state read
 				// under the lock.
-				return repairUninstall(cmd, name)
+				return repairUninstall(cmd, name, dir, keepFiles)
 			}
 
-			// Offer the Chrome-side removal *before* unregistering: the host
-			// only acts on extensions cepm currently manages, so doing it
-			// afterwards would always be refused. This waits for the user, so
-			// it runs outside the update lock — and what it decided is checked
-			// against the state again below.
+			// Ask first, act later. The question waits for a human, which the
+			// update lock must not, so only the answer is collected here —
+			// nothing in Chrome has changed yet if the state turns out to have
+			// moved on.
 			candidates := append([]state.Extension(nil), repo.Extensions...)
 			for _, s := range repo.Stale {
 				candidates = append(candidates, state.Extension{Name: s.Name, ID: s.ID})
 			}
 			before := snapshot(repo)
-			gone := offerChromeRemoval(cmd, candidates)
+			approved, gone := askChromeRemoval(cmd, candidates)
 
 			var orphans []state.StaleExtension
-			for _, e := range candidates {
-				if !gone[e.ID] {
-					orphans = append(orphans, state.StaleExtension{
-						ID: e.ID, Name: e.Name, Reason: "uninstalled",
-					})
-				}
-			}
-
 			err = updater.WithLock(cmd.Context(), func() error {
 				st, err := state.Load()
 				if err != nil {
@@ -163,10 +159,21 @@ func newUninstallCmd() *cobra.Command {
 				}
 				if snapshot(fresh) != before {
 					// An update ran while we were asking: the extensions we
-					// decided about are not the ones registered now, so the
-					// orphan records would be wrong.
-					return fmt.Errorf("%q changed while waiting for your answer; nothing was unregistered — run cepm uninstall %s again",
+					// asked about are not the ones registered now. Nothing has
+					// been touched yet, so stopping here really does undo it.
+					return fmt.Errorf("%q changed while waiting for your answer; nothing was changed — run cepm uninstall %s again",
 						name, term.Quote(name))
+				}
+				// Removing from Chrome happens here, where the state cannot
+				// change under it — the same trade cleanup makes.
+				performChromeRemoval(cmd, candidates, approved, gone)
+				orphans = nil
+				for _, e := range candidates {
+					if !gone[e.ID] {
+						orphans = append(orphans, state.StaleExtension{
+							ID: e.ID, Name: e.Name, Reason: "uninstalled",
+						})
+					}
 				}
 				delete(st.Repos, name)
 				st.AddOrphans(orphans)
@@ -175,9 +182,12 @@ func newUninstallCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// Only once the state is safely on disk: a failed save with the
+			// files already gone would leave a repository registered with
+			// nothing behind it.
 			if !keepFiles {
-				if err := os.RemoveAll(dirOf(name)); err != nil {
-					return fmt.Errorf("unregistered, but failed to delete %s: %w", dirOf(name), err)
+				if err := os.RemoveAll(dir); err != nil {
+					return fmt.Errorf("unregistered, but failed to delete %s: %w", dir, err)
 				}
 			}
 			fmt.Fprintf(out, "Uninstalled %q (%d extension(s)).\n", name, len(repo.Extensions))
@@ -196,7 +206,7 @@ func newUninstallCmd() *cobra.Command {
 // — duplicate ids, or a directory name it cannot print. Chrome is left alone
 // throughout: an id claimed twice does not identify one extension, so
 // removing it could take the other registration's extension with it.
-func repairUninstall(cmd *cobra.Command, name string) error {
+func repairUninstall(cmd *cobra.Command, name, dir string, keepFiles bool) error {
 	out := cmd.OutOrStdout()
 	var (
 		rebind     []rebindTarget
@@ -209,6 +219,14 @@ func repairUninstall(cmd *cobra.Command, name string) error {
 		if err != nil {
 			return err
 		}
+		if invalid := before.Validate(); invalid != nil {
+			fmt.Fprintf(out, "⚠ Not touching Chrome: %v\n", invalid)
+		} else {
+			// Someone repaired it between our read and this lock. The normal
+			// path asks about Chrome, which this one deliberately skips, so
+			// do not quietly unregister a repository under repair rules.
+			return fmt.Errorf("the state was repaired by another cepm; run cepm uninstall %s again", term.Quote(name))
+		}
 		st, err := state.Load()
 		if err != nil {
 			return err
@@ -218,7 +236,6 @@ func repairUninstall(cmd *cobra.Command, name string) error {
 			return fmt.Errorf("repository %q is no longer registered", name)
 		}
 		extensions = len(repo.Extensions)
-		fmt.Fprintf(out, "⚠ Not touching Chrome: %v\n", before.Validate())
 
 		rebind = rebindTargets(st, name, repo)
 		// Ids another registration also claims stay live, so a record for
@@ -228,28 +245,35 @@ func repairUninstall(cmd *cobra.Command, name string) error {
 		for _, rb := range rebind {
 			ambiguous[rb.ID] = true
 		}
-		for _, e := range repo.Extensions {
-			if !ambiguous[e.ID] {
-				st.AddOrphans([]state.StaleExtension{{ID: e.ID, Name: e.Name, Reason: "uninstalled"}})
+		seen := map[string]bool{}
+		add := func(id, extName string) {
+			if ambiguous[id] || seen[id] {
+				return
 			}
+			seen[id] = true
+			st.AddOrphans([]state.StaleExtension{{ID: id, Name: extName, Reason: "uninstalled"}})
+		}
+		for _, e := range repo.Extensions {
+			add(e.ID, e.Name)
+		}
+		// Entries this repository had already lost track of are still in
+		// Chrome; losing their records with the repository would put them
+		// beyond cleanup's reach for good.
+		for _, s := range repo.Stale {
+			add(s.ID, s.Name)
 		}
 		delete(st.Repos, name)
 
 		// Keep the clone only while Chrome might be loading it, which is
 		// exactly when another registration shares one of its ids.
 		if len(rebind) > 0 {
-			st.KeepClone(dirOf(name))
+			st.KeepClone(dir)
 			kept = true
 		}
 		if st.Validate() == nil {
 			// Fixed: the clones kept along the way can go once the user has
 			// re-pointed Chrome, so hand them back to be reported.
 			resolved = st.TakeKeptClones()
-			if !kept {
-				if err := os.RemoveAll(dirOf(name)); err != nil {
-					return err
-				}
-			}
 			return st.Save()
 		}
 		return st.SaveRepair(before)
@@ -257,10 +281,17 @@ func repairUninstall(cmd *cobra.Command, name string) error {
 	if err != nil {
 		return err
 	}
+	// After the state is on disk, and never against a path we could not
+	// resolve properly.
+	if !kept && !keepFiles {
+		if err := os.RemoveAll(dir); err != nil {
+			return fmt.Errorf("unregistered, but failed to delete %s: %w", dir, err)
+		}
+	}
 
 	fmt.Fprintf(out, "Uninstalled %q (%d extension(s)).\n", name, extensions)
 	if kept {
-		fmt.Fprintf(out, "\n⚠ Chrome may still be running the copy from %s\n", term.Quote(dirOf(name)))
+		fmt.Fprintf(out, "\n⚠ Chrome may still be running the copy from %s\n", term.Quote(dir))
 		fmt.Fprintf(out, "  (its id was claimed more than once, so cepm cannot tell which one you loaded).\n")
 		fmt.Fprintf(out, "  Its files were kept for now.\n")
 	}

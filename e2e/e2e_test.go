@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -32,22 +33,19 @@ func TestE2E(t *testing.T) {
 	chromeBin := ensureChrome(t) // before HOME is overridden
 
 	// A killed run (a timeout, a Ctrl-C) never reaches its cleanup, and each
-	// leftover holds a Chrome profile worth ~15MB. Sweep old ones first so
-	// they cannot pile up on a developer's machine.
+	// leftover holds a Chrome profile worth ~15MB. Sweep the ones this suite
+	// can prove it abandoned before adding another.
 	sweepStaleWorkDirs(t)
 
-	// Isolated world: fake HOME so neither the user's Chrome nor their
-	// ~/.cepm is touched. /tmp keeps the Unix socket path short; resolve
-	// symlinks (/tmp → /private/tmp) because extension IDs are path hashes
-	// and Chrome sees the canonical path.
-	home, err := os.MkdirTemp("/tmp", "cepm-e2e")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if home, err = filepath.EvalSymlinks(home); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { os.RemoveAll(home) })
+	// Read before HOME is replaced, so the build below reuses the real
+	// caches. Left to default they would land in the fake HOME, and the
+	// module cache is written read-only: the cleanup could not remove it.
+	goEnv := realGoEnv(t)
+
+	// Isolated world: a fake HOME so neither the user's Chrome nor their
+	// ~/.cepm is touched, under /tmp to keep the Unix socket path short.
+	home := newWorkDir(t)
+	t.Cleanup(func() { removeWorkDir(t, home) })
 	cepmHome := filepath.Join(home, "cepm")
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
@@ -66,7 +64,7 @@ func TestE2E(t *testing.T) {
 		}
 	})
 
-	bin := buildCepm(t, home)
+	bin := buildCepm(t, home, goEnv)
 
 	// A git "origin" with one extension, plus an author clone to push from.
 	origin := filepath.Join(home, "origin.git")
@@ -199,37 +197,131 @@ func TestE2E(t *testing.T) {
 
 // ---- helpers ----
 
-// sweepStaleWorkDirs removes work directories from earlier runs that ended
-// before their cleanup could run. Only directories older than an hour go, so
-// a concurrent run is left alone.
+// workRoot is the one directory this suite creates anything under, so a
+// sweep never has to guess whether something in /tmp belongs to it.
+const workRoot = "/tmp/cepm-e2e-work"
+
+// markerName holds the pid of the run that created a work directory. A
+// directory is only removed when this file is present and readable and that
+// process is gone: a name prefix and an age are not proof of ownership, and
+// deleting on that basis would eventually delete something a person made.
+const markerName = ".cepm-e2e-owner"
+
+// newWorkDir creates a work directory owned by this process.
+func newWorkDir(t *testing.T) string {
+	t.Helper()
+	if err := os.MkdirAll(workRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dir, err := os.MkdirTemp(workRoot, "run-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, markerName),
+		[]byte(strconv.Itoa(os.Getpid())), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Extension ids are path hashes and Chrome sees the canonical path
+	// (/tmp → /private/tmp on macOS).
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resolved
+}
+
+// sweepStaleWorkDirs removes work directories whose creating process is gone
+// — a run killed before its cleanup could run. Anything it cannot prove it
+// owns is reported, not deleted.
 func sweepStaleWorkDirs(t *testing.T) {
 	t.Helper()
-	entries, err := os.ReadDir("/tmp")
+	entries, err := os.ReadDir(workRoot)
 	if err != nil {
-		return
+		return // nothing here yet
 	}
 	for _, e := range entries {
-		if !e.IsDir() || !strings.HasPrefix(e.Name(), "cepm-e2e") {
+		dir := filepath.Join(workRoot, e.Name())
+		info, err := os.Lstat(dir)
+		if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			continue // never follow a link out of the work root
+		}
+		data, err := os.ReadFile(filepath.Join(dir, markerName))
+		if err != nil {
+			t.Logf("leaving %s alone: no ownership marker", dir)
 			continue
 		}
-		info, err := e.Info()
-		if err != nil || time.Since(info.ModTime()) < time.Hour {
+		pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+		if err != nil {
+			t.Logf("leaving %s alone: unreadable ownership marker", dir)
 			continue
 		}
-		_ = os.RemoveAll(filepath.Join("/tmp", e.Name()))
+		if pid == os.Getpid() || processAlive(pid) {
+			continue // ours, or another run still going
+		}
+		_ = os.RemoveAll(dir)
 	}
 }
 
-func buildCepm(t *testing.T, home string) string {
+// processAlive reports whether a pid still exists.
+func processAlive(pid int) bool {
+	p, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	return p.Signal(syscall.Signal(0)) == nil
+}
+
+// realGoEnv reports the caller's build caches. Call it before HOME is
+// replaced.
+func realGoEnv(t *testing.T) []string {
+	t.Helper()
+	out, err := exec.Command("go", "env", "GOMODCACHE", "GOCACHE").Output()
+	if err != nil {
+		t.Fatalf("go env: %v", err)
+	}
+	lines := strings.Fields(string(out))
+	if len(lines) != 2 {
+		t.Fatalf("go env returned %q", out)
+	}
+	return []string{"GOMODCACHE=" + lines[0], "GOCACHE=" + lines[1]}
+}
+
+func buildCepm(t *testing.T, home string, goEnv []string) string {
 	t.Helper()
 	bin := filepath.Join(home, "bin", "cepm")
 	cmd := exec.Command("go", "build", "-o", bin, "./cmd/cepm")
 	cmd.Dir = ".." // repo root
-	cmd.Env = os.Environ()
+	cmd.Env = append(os.Environ(), goEnv...)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("build cepm: %v\n%s", err, out)
 	}
 	return bin
+}
+
+// removeWorkDir deletes a work directory, including any read-only directory
+// a tool may have left behind (removing an entry needs write permission on
+// its parent, not on the entry). A failure is reported rather than swallowed:
+// each leftover holds a Chrome profile worth ~15MB.
+func removeWorkDir(t *testing.T, dir string) {
+	t.Helper()
+	err := os.RemoveAll(dir)
+	if err == nil {
+		return
+	}
+	_ = filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
+		if err == nil && d.IsDir() {
+			_ = os.Chmod(p, 0o700)
+		}
+		return nil
+	})
+	if err := os.RemoveAll(dir); err != nil {
+		// A partial removal takes the ownership marker with it, and without
+		// it no later run may touch what is left. Put it back so the sweep
+		// can finish the job once this process is gone.
+		_ = os.WriteFile(filepath.Join(dir, markerName),
+			[]byte(strconv.Itoa(os.Getpid())), 0o644)
+		t.Errorf("could not remove the work directory %s: %v", dir, err)
+	}
 }
 
 func runCepm(t *testing.T, bin string, args ...string) string {

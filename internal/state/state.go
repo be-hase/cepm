@@ -239,11 +239,14 @@ func (s *State) sanitizeNames() {
 	}
 }
 
-// Version is the state schema version this build writes. It was raised to 2
-// when Extension.Key and State.Orphans were added: an older binary that read
-// a version 2 file would drop both on its next write, silently reverting ids
-// to path-derived ones and losing entries only cleanup can remove.
-const Version = 2
+// Version is the state schema version this build writes. Every field added
+// here raises it, because an older binary reads what it understands and drops
+// the rest on its next write: version 2 added Extension.Key and
+// State.Orphans (ids would revert to path-derived, and entries only cleanup
+// can remove would vanish), version 3 added State.KeptClones (directories
+// held back during a repair would stop being tracked and never be cleaned
+// up).
+const Version = 3
 
 var repoNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 
