@@ -12,7 +12,6 @@ import (
 	"regexp"
 	"sort"
 	"strings"
-	"unicode"
 
 	toml "github.com/pelletier/go-toml/v2"
 
@@ -254,16 +253,10 @@ func ReadManifest(dir string) (Manifest, error) { return readManifest(dir) }
 // answer, so an embedded newline or escape sequence could forge a row and
 // make someone enable a different extension than the one they read.
 func sanitizeName(name string) string {
-	cleaned := strings.Map(func(r rune) rune {
-		if r == '\t' {
-			return ' '
-		}
-		if unicode.IsControl(r) || r == '‎' || r == '‏' || r == '‮' {
-			return -1
-		}
-		return r
-	}, name)
-	cleaned = strings.TrimSpace(cleaned)
+	// term owns the definition of what is dangerous; duplicating the list
+	// here is how the bidirectional overrides U+202A-U+202D and U+2066-U+2069
+	// were missed once already.
+	cleaned := term.Strip(name)
 	// Chrome itself caps the manifest name at 45 characters.
 	if len([]rune(cleaned)) > 45 {
 		cleaned = string([]rune(cleaned)[:45])

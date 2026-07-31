@@ -52,6 +52,25 @@ func isBidi(r rune) bool {
 	return (r >= 0x200E && r <= 0x200F) || (r >= 0x202A && r <= 0x202E) || (r >= 0x2066 && r <= 0x2069)
 }
 
+// Strip removes every character Safe would have to escape, for values cepm
+// may rewrite — a manifest name is a label, so dropping the dangerous parts
+// is friendlier than showing escapes. Paths cannot use this: they have to
+// keep matching the filesystem.
+func Strip(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r == '\t':
+			b.WriteByte(' ')
+		case unicode.IsControl(r) || isBidi(r):
+			// dropped
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return strings.TrimSpace(b.String())
+}
+
 // HasControl reports whether s contains characters that have no place in a
 // value cepm will print or pass around.
 func HasControl(s string) bool {

@@ -113,6 +113,28 @@ type State struct {
 	// before the user removed them from Chrome). Keeping them here is what
 	// lets "cepm cleanup" still finish the job later.
 	Orphans []StaleExtension `json:"orphans,omitempty"`
+	// KeptClones are directories of unregistered repositories that were left
+	// on disk because Chrome might still be loading them. A repair takes
+	// several uninstalls, and without this the earlier ones would be
+	// forgotten and their files left behind forever.
+	KeptClones []string `json:"keptClones,omitempty"`
+}
+
+// KeepClone records a clone directory left on disk, ignoring duplicates.
+func (s *State) KeepClone(dir string) {
+	for _, d := range s.KeptClones {
+		if d == dir {
+			return
+		}
+	}
+	s.KeptClones = append(s.KeptClones, dir)
+}
+
+// TakeKeptClones returns the recorded directories and forgets them.
+func (s *State) TakeKeptClones() []string {
+	out := s.KeptClones
+	s.KeptClones = nil
+	return out
 }
 
 // AddOrphans records stale entries that outlived their repository.
@@ -194,7 +216,27 @@ func Load() (*State, error) {
 			return nil, fmt.Errorf("%s: invalid repository name %q", path, name)
 		}
 	}
+	s.sanitizeNames()
 	return &s, nil
+}
+
+// sanitizeNames strips what a display name must never carry. Names are
+// labels, not identities, so cleaning them once here is what keeps every
+// caller — tables, menus, ceremonies — from having to remember. Directories
+// cannot get this treatment: they must keep matching the filesystem, so
+// Validate rejects them instead.
+func (s *State) sanitizeNames() {
+	for _, r := range s.Repos {
+		for i := range r.Extensions {
+			r.Extensions[i].Name = term.Strip(r.Extensions[i].Name)
+		}
+		for i := range r.Stale {
+			r.Stale[i].Name = term.Strip(r.Stale[i].Name)
+		}
+	}
+	for i := range s.Orphans {
+		s.Orphans[i].Name = term.Strip(s.Orphans[i].Name)
+	}
 }
 
 // Version is the state schema version this build writes. It was raised to 2
@@ -299,25 +341,33 @@ func (s *State) IDClaims() map[string]int {
 	return claims
 }
 
-// excessClaims is how far a state is from having one owner per id. Counting
-// claims rather than colliding ids is what lets a three-way collision be
-// repaired one repository at a time: dropping one of three claimants leaves
-// the same id colliding, but brings the state measurably closer.
-func excessClaims(claims map[string]int) int {
+// defects counts everything that makes a state one cepm refuses to act on:
+// each extra claimant of an id, and each registration whose directory name
+// cannot be printed. Counting them — rather than, say, colliding ids — is
+// what lets repair proceed a repository at a time, whether the file has one
+// id shared three ways or nothing wrong but an unprintable name.
+func (s *State) defects() int {
 	total := 0
-	for _, n := range claims {
+	for _, n := range s.IDClaims() {
 		if n > 1 {
 			total += n - 1
+		}
+	}
+	for _, name := range s.RepoNames() {
+		for _, e := range s.Repos[name].Extensions {
+			if term.HasControl(e.Dir) {
+				total++
+			}
 		}
 	}
 	return total
 }
 
 // SaveRepair writes a state that may still be invalid, provided it is
-// strictly closer to valid than before: no id gains claimants, none appears
-// that was not already contested, and the overall excess shrinks. Repairing a
-// file with several collisions — or one shared by three repositories — has to
-// be possible a repository at a time, which a plain Save cannot express.
+// strictly closer to valid than before: no id gains claimants, none becomes
+// contested that was not already, and the total number of defects shrinks.
+// A plain Save is all or nothing, which would reject every intermediate step
+// of a repair that necessarily takes several.
 func (s *State) SaveRepair(before *State) error {
 	was, now := before.IDClaims(), s.IDClaims()
 	for id, n := range now {
@@ -328,9 +378,9 @@ func (s *State) SaveRepair(before *State) error {
 			return fmt.Errorf("refusing to save: extension id %s would gain a claimant (%d → %d)", id, was[id], n)
 		}
 	}
-	if excessClaims(now) >= excessClaims(was) {
-		return fmt.Errorf("refusing to save: %d duplicate claim(s) before and %d after, no progress",
-			excessClaims(was), excessClaims(now))
+	if s.defects() >= before.defects() {
+		return fmt.Errorf("refusing to save: %d problem(s) before and %d after, no progress",
+			before.defects(), s.defects())
 	}
 	s.normalize()
 	s.Version = Version

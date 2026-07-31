@@ -28,10 +28,10 @@ type rebindTarget struct {
 	DisabledOwner bool
 }
 
-// rebindTargets works out, per id shared with other repositories, what the
-// user has to do once this one is gone. Grouping by id matters: with three
-// claimants, removing one leaves two, and guidance that names both would ask
-// the user to load two directories under the same id.
+// rebindTargets works out, per shared id, what the user has to do once this
+// repository is gone. Grouping by id matters: with three claimants, removing
+// one leaves two, and guidance naming both would ask the user to load two
+// directories under a single id.
 func rebindTargets(st *state.State, removing string, repo *state.Repo) []rebindTarget {
 	mine := map[string]bool{}
 	for _, e := range repo.Extensions {
@@ -51,11 +51,13 @@ func rebindTargets(st *state.State, removing string, repo *state.Repo) []rebindT
 		}
 	}
 	var out []rebindTarget
+	seen := map[string]bool{}
 	for _, e := range repo.Extensions {
 		rest, shared := survivors[e.ID]
-		if !shared {
-			continue
+		if !shared || seen[e.ID] {
+			continue // not contested, or two of our own dirs claim it
 		}
+		seen[e.ID] = true
 		switch {
 		case len(rest) > 1:
 			out = append(out, rebindTarget{ID: e.ID, Name: e.Name, Unresolved: true})
@@ -69,8 +71,7 @@ func rebindTargets(st *state.State, removing string, repo *state.Repo) []rebindT
 	return out
 }
 
-// allResolved reports whether every ambiguous id now has a single owner, so
-// the kept clone is safe to delete.
+// allResolved reports whether every ambiguous id now has a single owner.
 func allResolved(targets []rebindTarget) bool {
 	for _, t := range targets {
 		if t.Unresolved {
@@ -87,6 +88,20 @@ func dirOf(name string) string {
 		return name
 	}
 	return dir
+}
+
+// snapshot captures what a decision about a repository was based on, so a
+// change made between reading it and acting can be noticed.
+func snapshot(r *state.Repo) string {
+	s := ""
+	for _, e := range r.Extensions {
+		s += e.Dir + "\x00" + e.ID + "\x00"
+	}
+	s += "|"
+	for _, st := range r.Stale {
+		s += st.ID + "\x00"
+	}
+	return s
 }
 
 func newUninstallCmd() *cobra.Command {
@@ -109,45 +124,28 @@ func newUninstallCmd() *cobra.Command {
 				return fmt.Errorf("repository %q is not registered (see cepm list)", name)
 			}
 
+			if st.Validate() != nil {
+				// Repair: nothing is asked of Chrome, so there is no prompt to
+				// wait on and every decision can be made from the state read
+				// under the lock.
+				return repairUninstall(cmd, name)
+			}
+
 			// Offer the Chrome-side removal *before* unregistering: the host
 			// only acts on extensions cepm currently manages, so doing it
-			// afterwards would always be refused. This also runs outside the
-			// update lock, since it waits for the user.
+			// afterwards would always be refused. This waits for the user, so
+			// it runs outside the update lock — and what it decided is checked
+			// against the state again below.
 			candidates := append([]state.Extension(nil), repo.Extensions...)
 			for _, s := range repo.Stale {
 				candidates = append(candidates, state.Extension{Name: s.Name, ID: s.ID})
 			}
-			// With duplicate ids on record, an id does not identify one
-			// extension, so removing it from Chrome could take another
-			// registration's extension with it. Unregister anyway — that is
-			// how the duplicate is resolved — but touch nothing in Chrome.
-			gone := map[string]bool{}
-			var rebind []rebindTarget
-			if invalid := st.Validate(); invalid != nil {
-				fmt.Fprintf(out, "⚠ Not touching Chrome: %v\n", invalid)
-				rebind = rebindTargets(st, name, repo)
-				// Chrome may well be loading *this* clone: its id is claimed
-				// by another registration too, and nothing can tell which
-				// directory was loaded. Deleting it would leave Chrome
-				// pointing at a path that no longer exists.
-				keepFiles = true
-			} else {
-				gone = offerChromeRemoval(cmd, candidates)
-			}
+			before := snapshot(repo)
+			gone := offerChromeRemoval(cmd, candidates)
 
-			// Whatever is still in Chrome outlives its repository; keep a
-			// record so cleanup can finish later. Ids another registration
-			// also claims are excluded: they stay live, so normalization
-			// would drop the record and cleanup would have nothing to do —
-			// promising otherwise would be a lie. Those are covered by the
-			// re-load guidance instead.
-			ambiguous := map[string]bool{}
-			for _, rb := range rebind {
-				ambiguous[rb.ID] = true
-			}
 			var orphans []state.StaleExtension
 			for _, e := range candidates {
-				if !gone[e.ID] && !ambiguous[e.ID] {
+				if !gone[e.ID] {
 					orphans = append(orphans, state.StaleExtension{
 						ID: e.ID, Name: e.Name, Reason: "uninstalled",
 					})
@@ -155,65 +153,34 @@ func newUninstallCmd() *cobra.Command {
 			}
 
 			err = updater.WithLock(cmd.Context(), func() error {
-				before, err := state.Load()
-				if err != nil {
-					return err
-				}
 				st, err := state.Load()
 				if err != nil {
 					return err
 				}
-				if _, ok := st.Repos[name]; !ok {
+				fresh, ok := st.Repos[name]
+				if !ok {
 					return fmt.Errorf("repository %q is no longer registered", name)
+				}
+				if snapshot(fresh) != before {
+					// An update ran while we were asking: the extensions we
+					// decided about are not the ones registered now, so the
+					// orphan records would be wrong.
+					return fmt.Errorf("%q changed while waiting for your answer; nothing was unregistered — run cepm uninstall %s again",
+						name, term.Quote(name))
 				}
 				delete(st.Repos, name)
 				st.AddOrphans(orphans)
-				if before.Validate() != nil {
-					// Repairing a file with several independent collisions has
-					// to work one repository at a time, so accept a state that
-					// is still invalid as long as it is strictly better.
-					return st.SaveRepair(before)
-				}
 				return st.Save()
 			})
 			if err != nil {
 				return err
 			}
 			if !keepFiles {
-				dir, err := updater.RepoDir(name)
-				if err != nil {
-					return err
-				}
-				if err := os.RemoveAll(dir); err != nil {
-					return fmt.Errorf("unregistered, but failed to delete %s: %w", dir, err)
+				if err := os.RemoveAll(dirOf(name)); err != nil {
+					return fmt.Errorf("unregistered, but failed to delete %s: %w", dirOf(name), err)
 				}
 			}
 			fmt.Fprintf(out, "Uninstalled %q (%d extension(s)).\n", name, len(repo.Extensions))
-			if len(rebind) > 0 {
-				// Chrome may be running the copy from the directory just
-				// unregistered: the id was claimed more than once, so nothing
-				// can say which one was loaded. Its files are kept until the
-				// user has re-pointed Chrome.
-				fmt.Fprintf(out, "\n⚠ Chrome may still be running the copy from %s\n", term.Quote(dirOf(name)))
-				fmt.Fprintf(out, "  (its id was claimed more than once, so cepm cannot tell which one you loaded).\n")
-				fmt.Fprintf(out, "  Its files were kept for now.\n")
-				for _, rb := range rebind {
-					switch {
-					case rb.Unresolved:
-						fmt.Fprintf(out, "  • id %s is still claimed by more than one repository;\n", rb.ID)
-						fmt.Fprintf(out, "    uninstall the others first, then re-run to get the steps.\n")
-					case rb.DisabledOwner:
-						fmt.Fprintf(out, "  • id %s: the remaining registration (%q) is one you chose not to use.\n", rb.ID, rb.Name)
-						fmt.Fprintf(out, "    Remove it in chrome://extensions; enable it with cepm enable if you want it back.\n")
-					default:
-						fmt.Fprintf(out, "  • id %s: remove %q in chrome://extensions, then Load unpacked %s\n",
-							rb.ID, rb.Name, term.Quote(rb.AbsDir))
-					}
-				}
-				if allResolved(rebind) {
-					fmt.Fprintf(out, "  Then delete the old clone: rm -rf %s\n", term.Quote(dirOf(name)))
-				}
-			}
 			if len(orphans) > 0 {
 				fmt.Fprintf(out, "%d entr%s still in Chrome; remove them there, or run: cepm cleanup\n",
 					len(orphans), pluralY(len(orphans)))
@@ -223,4 +190,99 @@ func newUninstallCmd() *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&keepFiles, "keep-files", false, "keep the cloned directory on disk")
 	return cmd
+}
+
+// repairUninstall unregisters a repository from a state cepm will not act on
+// — duplicate ids, or a directory name it cannot print. Chrome is left alone
+// throughout: an id claimed twice does not identify one extension, so
+// removing it could take the other registration's extension with it.
+func repairUninstall(cmd *cobra.Command, name string) error {
+	out := cmd.OutOrStdout()
+	var (
+		rebind     []rebindTarget
+		kept       bool
+		resolved   []string
+		extensions int
+	)
+	err := updater.WithLock(cmd.Context(), func() error {
+		before, err := state.Load()
+		if err != nil {
+			return err
+		}
+		st, err := state.Load()
+		if err != nil {
+			return err
+		}
+		repo, ok := st.Repos[name]
+		if !ok {
+			return fmt.Errorf("repository %q is no longer registered", name)
+		}
+		extensions = len(repo.Extensions)
+		fmt.Fprintf(out, "⚠ Not touching Chrome: %v\n", before.Validate())
+
+		rebind = rebindTargets(st, name, repo)
+		// Ids another registration also claims stay live, so a record for
+		// them would be dropped by normalization and cleanup would have
+		// nothing to do. Those are covered by the re-load guidance instead.
+		ambiguous := map[string]bool{}
+		for _, rb := range rebind {
+			ambiguous[rb.ID] = true
+		}
+		for _, e := range repo.Extensions {
+			if !ambiguous[e.ID] {
+				st.AddOrphans([]state.StaleExtension{{ID: e.ID, Name: e.Name, Reason: "uninstalled"}})
+			}
+		}
+		delete(st.Repos, name)
+
+		// Keep the clone only while Chrome might be loading it, which is
+		// exactly when another registration shares one of its ids.
+		if len(rebind) > 0 {
+			st.KeepClone(dirOf(name))
+			kept = true
+		}
+		if st.Validate() == nil {
+			// Fixed: the clones kept along the way can go once the user has
+			// re-pointed Chrome, so hand them back to be reported.
+			resolved = st.TakeKeptClones()
+			if !kept {
+				if err := os.RemoveAll(dirOf(name)); err != nil {
+					return err
+				}
+			}
+			return st.Save()
+		}
+		return st.SaveRepair(before)
+	})
+	if err != nil {
+		return err
+	}
+
+	fmt.Fprintf(out, "Uninstalled %q (%d extension(s)).\n", name, extensions)
+	if kept {
+		fmt.Fprintf(out, "\n⚠ Chrome may still be running the copy from %s\n", term.Quote(dirOf(name)))
+		fmt.Fprintf(out, "  (its id was claimed more than once, so cepm cannot tell which one you loaded).\n")
+		fmt.Fprintf(out, "  Its files were kept for now.\n")
+	}
+	for _, rb := range rebind {
+		switch {
+		case rb.Unresolved:
+			fmt.Fprintf(out, "  • id %s is still claimed by more than one repository;\n", rb.ID)
+			fmt.Fprintf(out, "    uninstall the others first, then re-run to get the steps.\n")
+		case rb.DisabledOwner:
+			fmt.Fprintf(out, "  • id %s: the remaining registration (%q) is one you chose not to use.\n", rb.ID, rb.Name)
+			fmt.Fprintf(out, "    Remove it in chrome://extensions; enable it with cepm enable if you want it back.\n")
+		default:
+			fmt.Fprintf(out, "  • id %s: remove %q in chrome://extensions, then Load unpacked %s\n",
+				rb.ID, rb.Name, term.Quote(rb.AbsDir))
+		}
+	}
+	if len(resolved) > 0 && allResolved(rebind) {
+		fmt.Fprintf(out, "\n✔ No id is contested any more. Once Chrome is pointed at the right\n")
+		fmt.Fprintf(out, "  directories, these leftover clones can go:\n")
+		for _, d := range resolved {
+			fmt.Fprintf(out, "    rm -rf %s\n", term.Quote(d))
+		}
+	}
+	return nil
 }
