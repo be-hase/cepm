@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -430,6 +431,141 @@ func TestResetMovesStateAndClonesToABackup(t *testing.T) {
 	if _, err := run(t, "", "list"); err != nil {
 		t.Errorf("cepm should be usable again after reset: %v", err)
 	}
+}
+
+// Reset is a state writer like any other, so it has to hold the update lock:
+// racing an in-flight update would move the clones out from under it and let
+// its final save recreate a state pointing into the backup.
+func TestResetWaitsForTheUpdateLock(t *testing.T) {
+	startFakeHost(t)
+
+	locked := make(chan struct{})
+	release := make(chan struct{})
+	lockDone := make(chan error, 1)
+	go func() {
+		lockDone <- updater.WithLock(context.Background(), func() error {
+			close(locked)
+			<-release
+			return nil
+		})
+	}()
+	<-locked
+
+	resetDone := make(chan struct{})
+	go func() {
+		_, _ = run(t, "", "reset")
+		close(resetDone)
+	}()
+	select {
+	case <-resetDone:
+		t.Fatal("reset must wait for the update lock, but it finished while the lock was held")
+	case <-time.After(300 * time.Millisecond):
+	}
+	close(release)
+	if err := <-lockDone; err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-resetDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("reset did not finish after the lock was released")
+	}
+}
+
+// If the second move fails, the first must be undone: metadata in the backup
+// with the clones still active is exactly the split state reset exists to
+// resolve.
+func TestResetRollsBackWhenACloneCannotMove(t *testing.T) {
+	startFakeHost(t)
+	writeRawState(t, `{"version":4,"repos":{
+      "a":{"url":"u","track":"branch","branch":"main","head":"h",
+           "extensions":[{"dir":"ext","name":"A","id":"aaaa"}]}}}`)
+	dirA, err := updaterRepoDir("a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dirA, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := renameForBackup
+	renameForBackup = func(src, dst string) error {
+		if filepath.Base(src) == "repos" {
+			return fmt.Errorf("injected rename failure")
+		}
+		return os.Rename(src, dst)
+	}
+	t.Cleanup(func() { renameForBackup = orig })
+
+	out, err := run(t, "", "reset")
+	if err == nil {
+		t.Fatalf("reset should report the failed move:\n%s", out)
+	}
+	home := os.Getenv("CEPM_HOME")
+	if _, err := os.Stat(filepath.Join(home, "state.json")); err != nil {
+		t.Errorf("state.json must be rolled back to its place: %v", err)
+	}
+	if _, err := os.Stat(dirA); err != nil {
+		t.Errorf("the clone must still be active: %v", err)
+	}
+	if backups, _ := filepath.Glob(filepath.Join(home, "backup-*")); len(backups) != 0 {
+		t.Errorf("a failed reset should not leave a backup behind: %v", backups)
+	}
+}
+
+// The recovery guidance must match what the backup actually holds: a missing
+// or unparseable state.json cannot be the place to look up the repo URLs —
+// but every moved clone still knows its own origin.
+func TestResetGuidesRecoveryWithoutAReadableState(t *testing.T) {
+	t.Run("no state file", func(t *testing.T) {
+		startFakeHost(t)
+		dirA, err := updaterRepoDir("a")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(dirA, 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		out, err := run(t, "", "reset")
+		if err != nil {
+			t.Fatalf("reset: %v\n%s", err, out)
+		}
+		if !strings.Contains(out, "remote get-url origin") {
+			t.Errorf("without a state file the clones are the URL source:\n%s", out)
+		}
+		if strings.Contains(out, "repository URLs are in") {
+			t.Errorf("must not point at a state.json that does not exist in the backup:\n%s", out)
+		}
+	})
+
+	t.Run("corrupt state file", func(t *testing.T) {
+		startFakeHost(t)
+		writeRawState(t, `{definitely not json`)
+		dirA, err := updaterRepoDir("a")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(dirA, 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		out, err := run(t, "", "reset")
+		if err != nil {
+			t.Fatalf("reset must work exactly when the state is broken: %v\n%s", err, out)
+		}
+		if !strings.Contains(out, "remote get-url origin") {
+			t.Errorf("an unparseable state cannot be the URL source:\n%s", out)
+		}
+		home := os.Getenv("CEPM_HOME")
+		backups, _ := filepath.Glob(filepath.Join(home, "backup-*"))
+		if len(backups) != 1 {
+			t.Fatalf("expected one backup, got %v", backups)
+		}
+		if _, err := os.Stat(filepath.Join(backups[0], "state.json")); err != nil {
+			t.Errorf("even a broken state file belongs in the backup: %v", err)
+		}
+	})
 }
 
 // The control socket's authorization is the native host's preflight: Chrome
