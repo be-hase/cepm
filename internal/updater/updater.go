@@ -189,8 +189,20 @@ func updateRepo(ctx context.Context, name string, r *state.Repo, opts Options, t
 		return res
 	}
 
+	// r.Head is the last commit that was *fully processed* — moved to,
+	// scanned, and saved. The clone itself can be ahead of it: a previous
+	// run may have checked out a new commit and then failed at the scan or
+	// the save. Taking the clone's HEAD as the baseline would call that
+	// "no change" and silently drop those commits' reloads forever, so the
+	// baseline is the saved head, and anything between it and the clone is
+	// reprocessed here.
 	oldHead := r.Head
-	if h, err := repo.Head(ctx); err == nil {
+	if oldHead == "" {
+		h, err := repo.Head(ctx)
+		if err != nil {
+			res.Err = err
+			return res
+		}
 		oldHead = h
 	}
 	res.OldRef = displayRef(r, oldHead)
@@ -230,7 +242,7 @@ func updateRepo(ctx context.Context, name string, r *state.Repo, opts Options, t
 	}
 	res.NewRef = displayRef(r, newHead)
 	slog.Debug("repo moved", "repo", name, "from", res.OldRef, "to", res.NewRef, "track", r.Track)
-	if newHead == oldHead || oldHead == "" {
+	if newHead == oldHead {
 		r.Head = newHead
 		refreshExtensions(name, r, dir, &res, nil, takenIDs)
 		return res
@@ -242,8 +254,14 @@ func updateRepo(ctx context.Context, name string, r *state.Repo, opts Options, t
 		res.Err = err
 		return res
 	}
-	r.Head = newHead
 	refreshExtensions(name, r, dir, &res, changedFiles, takenIDs)
+	if res.Err != nil {
+		// The head only advances past commits that were fully processed:
+		// leaving it behind makes the next update redo this diff instead of
+		// losing it.
+		return res
+	}
+	r.Head = newHead
 	return res
 }
 
@@ -367,7 +385,9 @@ func LatestTag(tags []string, includePrerelease bool) (latest string, warning st
 func refreshExtensions(name string, r *state.Repo, dir string, res *RepoResult, changedFiles []string, takenIDs map[string]string) {
 	exts, err := scan.Detect(dir)
 	if err != nil {
-		res.Warnings = append(res.Warnings, fmt.Sprintf("extension scan failed: %v", err))
+		// Not a warning: reporting success here would let the caller advance
+		// the head past a commit whose extensions were never re-scanned.
+		res.Err = fmt.Errorf("extension scan failed: %w", err)
 		return
 	}
 	old := make(map[string]state.Extension, len(r.Extensions))

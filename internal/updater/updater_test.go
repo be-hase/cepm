@@ -819,3 +819,88 @@ func TestLockSerializes(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// A save that fails after the checkout must not lose the update: the clone
+// is now ahead of the state, and the next run has to notice exactly that gap
+// and deliver the same Changed list — the persisted head means "fully
+// processed", not "where the clone happens to be".
+func TestUpdateRedeliversChangesAfterAFailedSave(t *testing.T) {
+	author := setupRepo(t, "mytools")
+	writeFile(t, filepath.Join(author, "ext", "alpha", "content.js"), "v2")
+	git(t, author, "add", "-A")
+	git(t, author, "commit", "-m", "update alpha")
+	git(t, author, "push", "origin", "main")
+
+	restore := state.FailSaves()
+	_, err := Update(context.Background(), nil, Options{})
+	restore()
+	if err == nil {
+		t.Fatal("Update should report the failed save")
+	}
+
+	// The checkout advanced but the state did not; the next update must
+	// still deliver alpha's change.
+	results, err := Update(context.Background(), nil, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := results[0]
+	if r.Err != nil {
+		t.Fatal(r.Err)
+	}
+	if !r.Updated || len(r.Changed) != 1 || r.Changed[0].Name != "Alpha" {
+		t.Errorf("the changes lost to the failed save must be redelivered, got %+v", r)
+	}
+}
+
+// A failed scan must not advance the head either: the commit's extensions
+// were never re-read, and the next successful run has to reprocess it.
+func TestUpdateDoesNotAdvancePastAFailedScan(t *testing.T) {
+	author := setupRepo(t, "mytools")
+	st, err := state.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	headBefore := st.Repos["mytools"].Head
+
+	// This commit breaks the scan (an unparseable cepm.toml) *and* changes
+	// an extension.
+	writeFile(t, filepath.Join(author, "cepm.toml"), "{{{ not toml")
+	writeFile(t, filepath.Join(author, "ext", "alpha", "content.js"), "v2")
+	git(t, author, "add", "-A")
+	git(t, author, "commit", "-m", "break the scan")
+	git(t, author, "push", "origin", "main")
+
+	results, err := Update(context.Background(), nil, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if results[0].Err == nil {
+		t.Fatal("a failed scan must be an error, not a warning")
+	}
+	st, err = state.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Repos["mytools"].Head != headBefore {
+		t.Errorf("the head advanced past a commit that was never scanned: %s → %s",
+			headBefore, st.Repos["mytools"].Head)
+	}
+
+	// Once the scan works again, both commits' changes arrive.
+	git(t, author, "rm", "cepm.toml")
+	git(t, author, "commit", "-m", "fix the scan")
+	git(t, author, "push", "origin", "main")
+
+	results, err = Update(context.Background(), nil, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := results[0]
+	if r.Err != nil {
+		t.Fatal(r.Err)
+	}
+	if !r.Updated || len(r.Changed) != 1 || r.Changed[0].Name != "Alpha" {
+		t.Errorf("the change from the unscanned commit must be delivered now, got %+v", r)
+	}
+}
