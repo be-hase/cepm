@@ -182,7 +182,7 @@ func Load() (*State, error) {
 	if s.Version < Version {
 		// No released cepm ever wrote an older version, so nothing is
 		// migrated: only a development build can have left this behind.
-		return nil, fmt.Errorf("%s has state version %d, this cepm expects %d; delete the file and re-run cepm install", path, s.Version, Version)
+		return nil, fmt.Errorf("%s has state version %d, this cepm expects %d; run cepm reset and re-install", path, s.Version, Version)
 	}
 	if s.Repos == nil {
 		s.Repos = map[string]*Repo{}

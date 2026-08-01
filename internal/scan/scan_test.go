@@ -270,3 +270,16 @@ func TestLoadRepoConfig(t *testing.T) {
 		t.Error("expected error for invalid track value")
 	}
 }
+
+// A typo like "extentions" would silently fall back to auto-detecting the
+// whole repository — the opposite of what the author declared.
+func TestLoadRepoConfigRejectsUnknownKeys(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "cepm.toml"),
+		[]byte("extentions = [\"ext/a\"]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadRepoConfig(dir); err == nil {
+		t.Error("an unknown cepm.toml key should be a parse error")
+	}
+}

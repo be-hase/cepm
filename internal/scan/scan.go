@@ -3,6 +3,7 @@
 package scan
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -51,7 +52,11 @@ func LoadRepoConfig(repoDir string) (*RepoConfig, error) {
 		return nil, err
 	}
 	var cfg RepoConfig
-	if err := toml.Unmarshal(data, &cfg); err != nil {
+	// Unknown keys are refused: a typo like "extentions" would silently fall
+	// back to auto-detecting the whole repository.
+	dec := toml.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&cfg); err != nil {
 		return nil, fmt.Errorf("parse cepm.toml: %w", err)
 	}
 	if cfg.Track != "" && cfg.Track != "branch" && cfg.Track != "tag" {

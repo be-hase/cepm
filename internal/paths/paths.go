@@ -45,16 +45,20 @@ func HostLogFile() (string, error)    { return sub("logs", "host.log") }
 // EnsureLayout creates the ~/.cepm directory tree. run/ is 0700 because the
 // Unix socket lives there and its directory permissions are the access control.
 func EnsureLayout() error {
+	// Everything is owner-only: the clones are internal extension source and
+	// the logs describe them, and Chrome and the native host run as this same
+	// user, so nothing needs to let anyone else in. A lax home directory
+	// permission must not expose ~/.cepm.
 	dirs := []struct {
 		f    func() (string, error)
 		perm os.FileMode
 	}{
-		{CepmDir, 0o755},
-		{ReposDir, 0o755},
-		{HelperDir, 0o755},
-		{BinDir, 0o755},
+		{CepmDir, 0o700},
+		{ReposDir, 0o700},
+		{HelperDir, 0o700},
+		{BinDir, 0o700},
 		{RunDir, 0o700},
-		{LogsDir, 0o755},
+		{LogsDir, 0o700},
 	}
 	for _, d := range dirs {
 		p, err := d.f()

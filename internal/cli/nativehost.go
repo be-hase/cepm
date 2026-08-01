@@ -1,7 +1,7 @@
 package cli
 
 import (
-	"strings"
+	"fmt"
 
 	"github.com/spf13/cobra"
 
@@ -15,12 +15,15 @@ func newNativeHostCmd() *cobra.Command {
 		Hidden: true,
 		Args:   cobra.ArbitraryArgs, // Chrome passes the extension origin
 		RunE: func(cmd *cobra.Command, args []string) error {
-			for _, a := range args {
-				if strings.HasPrefix(a, "chrome-extension://") {
-					if err := nmhost.CheckOrigin(a); err != nil {
-						return err
-					}
-				}
+			// Chrome always passes the caller's origin as the first
+			// argument. Anything else — no argument, or a string that is
+			// not the helper's exact origin — is not Chrome starting the
+			// host, and the host must not come up for it.
+			if len(args) == 0 {
+				return fmt.Errorf("native-host is started by Chrome and expects the caller origin as its first argument")
+			}
+			if err := nmhost.CheckOrigin(args[0]); err != nil {
+				return err
 			}
 			return nmhost.Run(cmd.Context(), Version)
 		},

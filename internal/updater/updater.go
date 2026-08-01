@@ -189,12 +189,6 @@ func updateRepo(ctx context.Context, name string, r *state.Repo, opts Options, t
 		return res
 	}
 
-	// Before pulling: teach state about keys it may predate. Afterwards a
-	// difference between the stored id and the computed one unambiguously
-	// means the manifest changed in this update, not that cepm used to ignore
-	// the "key" field.
-	backfillKeys(r, dir)
-
 	oldHead := r.Head
 	if h, err := repo.Head(ctx); err == nil {
 		oldHead = h
@@ -483,29 +477,6 @@ func refreshExtensions(name string, r *state.Repo, dir string, res *RepoResult, 
 				ManifestChanged: manifestChanged[e.Dir],
 			})
 		}
-	}
-}
-
-// backfillKeys records manifest keys for extensions registered by a cepm that
-// did not read them, correcting the id at the same time: those entries stored
-// a path-derived id that Chrome never used. It reads the working tree as it
-// is *before* an update, so it can only ever describe the state cepm already
-// had.
-func backfillKeys(r *state.Repo, dir string) {
-	for i := range r.Extensions {
-		e := &r.Extensions[i]
-		if e.Key != "" {
-			continue
-		}
-		m, err := scan.ReadManifest(filepath.Join(dir, e.Dir))
-		if err != nil || m.Key == "" {
-			continue
-		}
-		id, err := extid.ForExtension(filepath.Join(dir, e.Dir), m.Key)
-		if err != nil {
-			continue
-		}
-		e.Key, e.ID = m.Key, id
 	}
 }
 

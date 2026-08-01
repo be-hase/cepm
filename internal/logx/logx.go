@@ -17,7 +17,9 @@ func FileLogger(path string, verbose bool) (*slog.Logger, func() error, error) {
 	if st, err := os.Stat(path); err == nil && st.Size() > maxLogSize {
 		_ = os.Rename(path, path+".old")
 	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	// 0600: the log names repositories, extensions and errors — owner-only
+	// like everything else under ~/.cepm.
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		return nil, nil, fmt.Errorf("open log file: %w", err)
 	}

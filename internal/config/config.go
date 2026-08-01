@@ -2,6 +2,7 @@
 package config
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"time"
@@ -62,7 +63,11 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	var fc fileConfig
-	if err := toml.Unmarshal(data, &fc); err != nil {
+	// Unknown keys are refused: a typo like "atuo" silently keeping auto
+	// update on is worse than an error naming the key.
+	dec := toml.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&fc); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
 	if fc.Update.Interval != nil {
