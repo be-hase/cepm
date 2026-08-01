@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -748,13 +749,20 @@ func TestReloadReportsStateChangeDistinctlyFromChromeDisabled(t *testing.T) {
 	go helper.run()
 
 	// Hold the lock, let the request authorize and block on it, then change
-	// the state from inside the window.
+	// the state from inside the window. The hook — not a sleep — is what
+	// makes "the handler is past authorization" observable.
+	authorized := make(chan struct{})
+	h.afterReloadAuthorized = func() { close(authorized) }
 	respDone := make(chan ipc.Response, 1)
 	err = updater.WithLock(context.Background(), func() error {
 		go func() {
 			respDone <- h.handleIPC(ctx, ipc.Request{Cmd: ipc.CmdReload, IDs: []string{idA}})
 		}()
-		time.Sleep(200 * time.Millisecond) // let the handler reach the lock
+		select {
+		case <-authorized:
+		case <-time.After(10 * time.Second):
+			return fmt.Errorf("the handler never got past authorization")
+		}
 		s, err := state.Load()
 		if err != nil {
 			return err

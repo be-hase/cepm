@@ -63,6 +63,12 @@ type Host struct {
 	helperRefreshed atomic.Bool  // helper file refresh attempted (once per process)
 	caughtUp        atomic.Bool  // startup catch-up reload done (once per process)
 
+	// afterReloadAuthorized runs between authorizing a socket reload and
+	// acting on it. Test-only: it is the seam a test needs to land a state
+	// change exactly in that window, which otherwise only a sleep could
+	// approximate.
+	afterReloadAuthorized func()
+
 	// pendingReload holds ids whose reload is owed to Chrome: the update
 	// already checked out their new code, but the reload has not been
 	// confirmed. The set survives failed attempts and is retried on every
@@ -658,6 +664,9 @@ func (h *Host) handleIPC(ctx context.Context, req ipc.Request) ipc.Response {
 	case ipc.CmdReload:
 		if _, err := AuthorizeReload(req.IDs); err != nil {
 			return ipc.Response{Error: err.Error()}
+		}
+		if h.afterReloadAuthorized != nil {
+			h.afterReloadAuthorized()
 		}
 		// Authorized again inside the lock, which is what actually decides:
 		// the check above only fails fast with a clear message.

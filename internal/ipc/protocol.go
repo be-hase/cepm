@@ -57,8 +57,11 @@ type HostInfo struct {
 }
 
 type ReloadResult struct {
-	ID     string `json:"id"`
-	Status string `json:"status"` // reloaded | not_installed | error
+	ID string `json:"id"`
+	// Status is one of the Status* constants above: reloaded,
+	// not_installed, skipped_disabled, skipped_self, skipped_state_changed,
+	// or error.
+	Status string `json:"status"`
 	Error  string `json:"error,omitempty"`
 }
 
