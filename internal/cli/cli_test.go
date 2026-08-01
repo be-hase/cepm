@@ -290,7 +290,7 @@ func TestCleanupCountsUniqueIDs(t *testing.T) {
 	st, _ := state.Load()
 	seedRepo(t, "other", state.Extension{Dir: "x", Name: "X", ID: idB, Key: keyB})
 	st, _ = state.Load()
-	st.Repos["other"].AddStale(state.StaleExtension{ID: idA, Name: "Ext", Reason: "removed", SrcDir: "ext", SrcKey: keyA})
+	st.Repos["other"].AddStale(state.StaleExtension{ID: idA, Name: "Ext", Reason: "removed"})
 	if err := st.Save(); err != nil {
 		t.Fatal(err)
 	}
@@ -327,7 +327,7 @@ func writeRawState(t *testing.T, content string) {
 func TestDuplicateIDsInExistingStateStopChromeSideEffects(t *testing.T) {
 	interactive(t)
 	host := startFakeHost(t, "xxxx")
-	writeRawState(t, `{"version":5,"repos":{
+	writeRawState(t, `{"version":6,"repos":{
       "a":{"url":"u1","track":"branch","branch":"main","head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
            "extensions":[{"dir":"ext","name":"One","id":"xxxx","key":"K"}]},
       "b":{"url":"u2","track":"branch","branch":"main","head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -357,7 +357,7 @@ func TestDuplicateIDsInExistingStateStopChromeSideEffects(t *testing.T) {
 func TestUninstallFailsClosedOnInvalidState(t *testing.T) {
 	interactive(t)
 	host := startFakeHost(t, "xxxx")
-	writeRawState(t, `{"version":5,"repos":{
+	writeRawState(t, `{"version":6,"repos":{
       "a":{"url":"u","track":"branch","branch":"main","head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
            "extensions":[{"dir":"ext","name":"A","id":"xxxx","key":"K"}]},
       "b":{"url":"u","track":"branch","branch":"main","head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -400,7 +400,7 @@ func TestUninstallFailsClosedOnInvalidState(t *testing.T) {
 // state and clones aside together, and deletes nothing.
 func TestResetMovesStateAndClonesToABackup(t *testing.T) {
 	host := startFakeHost(t, "xxxx")
-	writeRawState(t, `{"version":5,"repos":{
+	writeRawState(t, `{"version":6,"repos":{
       "a":{"url":"u","track":"branch","branch":"main","head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
            "extensions":[{"dir":"ext","name":"A","id":"xxxx","key":"K"}]},
       "b":{"url":"u","track":"branch","branch":"main","head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -496,7 +496,7 @@ func TestResetWaitsForTheUpdateLock(t *testing.T) {
 // resolve.
 func TestResetRollsBackWhenACloneCannotMove(t *testing.T) {
 	startFakeHost(t)
-	writeRawState(t, `{"version":5,"repos":{
+	writeRawState(t, `{"version":6,"repos":{
       "a":{"url":"u","track":"branch","branch":"main","head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
            "extensions":[{"dir":"ext","name":"A","id":"aaaa"}]}}}`)
 	dirA, err := updaterRepoDir("a")
@@ -561,8 +561,8 @@ func TestResetGuidesRecoveryWithoutAReadableState(t *testing.T) {
 	// Parseable is not the same as useful: these two load-rejected states
 	// unmarshal fine yet hold no URL, so the clones are still the source.
 	for label, raw := range map[string]string{
-		"null repo entry": `{"version":5,"repos":{"a":null}}`,
-		"missing url":     `{"version":5,"repos":{"a":{"track":"branch","branch":"main"}}}`,
+		"null repo entry": `{"version":6,"repos":{"a":null}}`,
+		"missing url":     `{"version":6,"repos":{"a":{"track":"branch","branch":"main"}}}`,
 	} {
 		t.Run(label, func(t *testing.T) {
 			startFakeHost(t)
@@ -622,7 +622,7 @@ func TestResetGuidesRecoveryWithoutAReadableState(t *testing.T) {
 // fail closed here too or reload/uninstall would still be relayed.
 func TestAuthorizationRefusesInvalidState(t *testing.T) {
 	startFakeHost(t, "xxxx")
-	writeRawState(t, `{"version":5,"repos":{
+	writeRawState(t, `{"version":6,"repos":{
       "a":{"url":"u","track":"branch","branch":"main","head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
            "extensions":[{"dir":"ext","name":"A","id":"xxxx","key":"K"}]},
       "b":{"url":"u","track":"branch","branch":"main","head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -640,7 +640,7 @@ func TestControlCharactersInLegacyStateAreNeverPrintedRaw(t *testing.T) {
 	// hint — a path built with the directory name and shell-quoted, which is
 	// the route that bypassed escaping.
 	startFakeHost(t)
-	writeRawState(t, `{"version":5,"repos":{
+	writeRawState(t, `{"version":6,"repos":{
       "tools":{"url":"u","track":"branch","branch":"main","head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                "extensions":[{"dir":"ext\nFORGED[2K","name":"Ext","id":"aaaa"}]}}}`)
 
@@ -797,7 +797,7 @@ func TestUninstallOrphansAnExtensionLoadedDuringThePrompt(t *testing.T) {
 // the state is read rather than at each place that prints it.
 func TestLegacyNamesAreNeutralisedOnLoad(t *testing.T) {
 	startFakeHost(t)
-	writeRawState(t, `{"version":5,"repos":{
+	writeRawState(t, `{"version":6,"repos":{
       "tools":{"url":"u","track":"branch","branch":"main","head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                "extensions":[{"dir":"ext","name":"OK\nFORGED","id":"aaaa"}],
                "stale":[{"id":"bbbb","name":"Stale\u001b[2K","reason":"removed"}]}},
@@ -826,7 +826,7 @@ func TestLegacyNamesAreNeutralisedOnLoad(t *testing.T) {
 // characters, and those refs reach the terminal through validation errors.
 func TestControlCharactersInStateCannotForgeOutput(t *testing.T) {
 	startFakeHost(t)
-	writeRawState(t, `{"version":5,"repos":{
+	writeRawState(t, `{"version":6,"repos":{
       "a":{"url":"u","track":"branch","branch":"main","head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
            "extensions":[{"dir":"ext\nFORGED[2K","name":"A","id":"xxxx","key":"K"}]},
       "b":{"url":"u","track":"branch","branch":"main","head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -855,12 +855,12 @@ func TestCleanupDropsRecordsForLiveIDs(t *testing.T) {
 	host := startFakeHost(t, idA)
 	// Raw on purpose: Save normalizes these records away, so only a file
 	// written by something else can hold them.
-	writeRawState(t, fmt.Sprintf(`{"version":5,"repos":{
+	writeRawState(t, fmt.Sprintf(`{"version":6,"repos":{
       "tools":{"url":"u","track":"branch","branch":"main","head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                "extensions":[{"dir":"ext","name":"Ext","id":%q,"key":%q}],
-               "stale":[{"id":%q,"name":"Ext","reason":"removed","srcDir":"ext","srcKey":%q}]}},
-      "orphans":[{"id":%q,"name":"Ext","reason":"uninstalled","srcRepo":"tools","srcDir":"ext","srcKey":%q}]}`,
-		idA, keyA, idA, keyA, idA, keyA))
+               "stale":[{"id":%q,"name":"Ext","reason":"removed"}]}},
+      "orphans":[{"id":%q,"name":"Ext","reason":"uninstalled"}]}`,
+		idA, keyA, idA, idA))
 
 	out, err := run(t, "", "cleanup")
 	if err != nil {
@@ -896,8 +896,8 @@ func TestCleanupReleasesLockBetweenEntries(t *testing.T) {
 	)
 	st, _ := state.Load()
 	st.Repos["tools"].Extensions = nil
-	st.Repos["tools"].AddStale(state.StaleExtension{ID: idA, Name: "A", Reason: "removed", SrcDir: "a", SrcKey: keyA})
-	st.Repos["tools"].AddStale(state.StaleExtension{ID: idB, Name: "B", Reason: "removed", SrcDir: "b", SrcKey: keyB})
+	st.Repos["tools"].AddStale(state.StaleExtension{ID: idA, Name: "A", Reason: "removed"})
+	st.Repos["tools"].AddStale(state.StaleExtension{ID: idB, Name: "B", Reason: "removed"})
 	if err := st.Save(); err != nil {
 		t.Fatal(err)
 	}

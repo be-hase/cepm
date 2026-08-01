@@ -9,26 +9,18 @@ import (
 	"github.com/be-hase/cepm/internal/nmhost"
 )
 
-// Stale/orphan records are the removal set the native host is willing to
-// relay to Chrome, so they get the same self-certification live extensions
-// do: a hand-edited state cannot smuggle a well-formed but foreign id into
-// the authorized set, and even a genuine record only authorizes removal —
-// reload stays reserved for live, enabled extensions.
-func TestOrphanRecordsCannotSmuggleForeignIDs(t *testing.T) {
+// The two relay sets are not the same set, and the difference is what keeps
+// a stale id list from reaching the wrong operation: an orphan record is
+// something cleanup may remove from Chrome, never something to reload. (The
+// state file itself is trusted — see internal/state — so this bounds
+// mistakes, not a hostile local user.)
+func TestReloadAndRemovalAuthorizeDifferentSets(t *testing.T) {
 	startFakeHost(t)
-	// A well-formed id whose claimed derivation does not produce it.
-	writeRawState(t, fmt.Sprintf(`{"version":5,"repos":{},
-      "orphans":[{"id":%q,"name":"X","reason":"uninstalled","srcRepo":"tools","srcDir":"ext"}]}`, idA))
-	if _, err := nmhost.AuthorizeRemoval([]string{idA}); err == nil {
-		t.Error("an underivable orphan id must not authorize a removal")
-	}
+	writeRawState(t, fmt.Sprintf(`{"version":6,"repos":{},
+      "orphans":[{"id":%q,"name":"X","reason":"uninstalled"}]}`, idA))
 
-	// The same id with its real derivation is a genuine record: removal is
-	// authorized, reload is not.
-	writeRawState(t, fmt.Sprintf(`{"version":5,"repos":{},
-      "orphans":[{"id":%q,"name":"X","reason":"uninstalled","srcRepo":"tools","srcDir":"ext","srcKey":%q}]}`, idA, keyA))
 	if _, err := nmhost.AuthorizeRemoval([]string{idA}); err != nil {
-		t.Errorf("a self-certified orphan must be removable: %v", err)
+		t.Errorf("an orphan record must be removable: %v", err)
 	}
 	if _, err := nmhost.AuthorizeReload([]string{idA}); err == nil {
 		t.Error("an orphan is not a live extension; reload must be refused")
@@ -42,7 +34,7 @@ func TestListAndDoctorNeverPrintControlCharactersFromState(t *testing.T) {
 	startFakeHost(t)
 	// An invalid state (ESC in branch) plus a LastError with an OSC
 	// sequence — list must show both, defanged.
-	writeRawState(t, fmt.Sprintf(`{"version":5,"repos":{
+	writeRawState(t, fmt.Sprintf(`{"version":6,"repos":{
       "tools":{"url":"u","track":"branch","branch":"main\u001b[2K","head":"%s",
                "lastError":"remote: \u001b]0;pwned\u0007 fatal",
                "extensions":[{"dir":"ext","name":"Ext","id":%q,"key":%q}]}}}`,
@@ -58,7 +50,7 @@ func TestListAndDoctorNeverPrintControlCharactersFromState(t *testing.T) {
 
 	// And a *valid* state whose LastError carries the sequences: this is the
 	// everyday case (a flaky remote), and doctor renders it too.
-	writeRawState(t, fmt.Sprintf(`{"version":5,"repos":{
+	writeRawState(t, fmt.Sprintf(`{"version":6,"repos":{
       "tools":{"url":"u","track":"branch","branch":"main","head":"%s",
                "lastError":"remote: \u001b]0;pwned\u0007 fatal",
                "extensions":[{"dir":"ext","name":"Ext","id":%q,"key":%q}]}}}`,

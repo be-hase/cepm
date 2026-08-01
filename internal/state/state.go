@@ -2,6 +2,23 @@
 //
 // Writers must hold the update lock (see internal/updater) so that the CLI
 // and the native host never race; Save itself is atomic (temp file + rename).
+//
+// # Trust
+//
+// state.json is trusted. It lives in a 0700 directory owned by the user, and
+// everything cepm can do with it — reload an extension, remove one from
+// Chrome, delete a clone — that user can already do directly with Chrome and
+// the filesystem. A process running as this user is inside the trust
+// boundary, so nothing here tries to defend against one: it could equally
+// rewrite the binary the launcher points at.
+//
+// What Validate does is catch a state cepm cannot act on *coherently* —
+// corruption, a stopped-half-way write, a hand edit that got something
+// wrong, a ~/.cepm that was moved so the path-derived ids no longer match.
+// Its purpose is to fail closed on nonsense rather than act on it, and to
+// keep values that reach a terminal or a command line from being read as
+// something else (control characters, git options). Read the checks that way:
+// they are integrity checks, not an authorization boundary.
 package state
 
 import (
@@ -54,15 +71,6 @@ type StaleExtension struct {
 	Name   string `json:"name"`
 	Reason string `json:"reason"`           // "renamed" | "removed" | ...
 	NewDir string `json:"newDir,omitempty"` // for renames: where it moved
-	// SrcDir/SrcKey are what ID was derived from when the record was made.
-	// They make the record self-certifying: Validate re-derives the id, so a
-	// hand-edited file cannot smuggle an arbitrary extension id into the set
-	// the native host is willing to remove from Chrome.
-	SrcDir string `json:"srcDir"`
-	SrcKey string `json:"srcKey,omitempty"`
-	// SrcRepo names the repository the id was derived under. Only orphans
-	// carry it — a stale record still lives inside its repository.
-	SrcRepo string `json:"srcRepo,omitempty"`
 }
 
 // Repo is a managed repository.
@@ -254,7 +262,7 @@ func (s *State) sanitizeNames() {
 // would silently drop fields it does not know on its next write, so Load
 // refuses anything else instead. There are no migrations — pre-release
 // development builds are the only writers so far.
-const Version = 5
+const Version = 6
 
 var repoNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 
@@ -344,7 +352,8 @@ func (s *State) DuplicateLiveID() (id string, a, b ExtRef) {
 // Validate reports a state that cepm must not act on. No cepm writes such a
 // state (Save refuses), so on disk it means corruption or a hand edit — and
 // finding that out only at save time would be too late: by then a command
-// may have removed something from Chrome.
+// may have removed something from Chrome. This is an integrity check, not an
+// authorization boundary; see the trust note on the package.
 // extIDRe is Chrome's extension id alphabet: 32 characters, 'a' through 'p'.
 var extIDRe = regexp.MustCompile(`^[a-p]{32}$`)
 
@@ -398,10 +407,9 @@ func (s *State) Validate() error {
 				return fmt.Errorf("%s has a malformed extension id %q", ref, term.Safe(e.ID))
 			}
 			// The recorded id must be re-derivable from what is recorded
-			// next to it. This is what makes the state self-certifying: the
-			// native host authorizes reload/uninstall by these ids, and
-			// without the check a hand-edited file could put any installed
-			// extension's id under cepm's control.
+			// next to it. It catches the state drifting out of step with the
+			// disk — a moved ~/.cepm, a botched edit, a bug writing the
+			// wrong id — before cepm acts on an id Chrome does not have.
 			want, err := extid.ForExtension(filepath.Join(reposDir, name, e.Dir), e.Key)
 			if err != nil {
 				return fmt.Errorf("%s: %w", ref, err)
@@ -412,7 +420,7 @@ func (s *State) Validate() error {
 			}
 		}
 		for _, st := range r.Stale {
-			if err := validateStaleRecord(reposDir, name, st); err != nil {
+			if err := validateStaleRecord(st); err != nil {
 				return fmt.Errorf("repository %q: %w", name, err)
 			}
 			if term.HasControl(st.NewDir) {
@@ -421,36 +429,24 @@ func (s *State) Validate() error {
 		}
 	}
 	for _, o := range s.Orphans {
-		if o.SrcRepo == "" || !ValidRepoName(o.SrcRepo) {
-			return fmt.Errorf("orphan record %s does not name a valid source repository", term.Safe(o.ID))
-		}
-		if err := validateStaleRecord(reposDir, o.SrcRepo, o); err != nil {
+		if err := validateStaleRecord(o); err != nil {
 			return fmt.Errorf("orphan record: %w", err)
 		}
 	}
 	return nil
 }
 
-// validateStaleRecord re-derives a stale/orphan id from what the record says
-// it came from. These ids are exactly what the native host will offer to
-// remove from Chrome, so a record that cannot prove its id is refused — the
-// same self-certification live extensions get.
-func validateStaleRecord(reposDir, repoName string, st StaleExtension) error {
+// validateStaleRecord checks the shape of a stale/orphan record. Unlike a
+// live extension, the id cannot be re-derived: the directory it came from is
+// gone (that is what makes the record stale), and there is nothing left on
+// disk to compare against. It is taken from the file as written — see the
+// trust note on Validate.
+func validateStaleRecord(st StaleExtension) error {
 	if !extIDRe.MatchString(st.ID) {
 		return fmt.Errorf("stale record has malformed id %q", term.Safe(st.ID))
 	}
 	if term.HasControl(st.Reason) {
 		return fmt.Errorf("stale record %s has control characters in its reason", st.ID)
-	}
-	if err := validDir(st.SrcDir); err != nil {
-		return fmt.Errorf("stale record %s: %w", st.ID, err)
-	}
-	want, err := extid.ForExtension(filepath.Join(reposDir, repoName, st.SrcDir), st.SrcKey)
-	if err != nil {
-		return fmt.Errorf("stale record %s: %w", st.ID, err)
-	}
-	if st.ID != want {
-		return fmt.Errorf("stale record claims id %s but its source derives %s", st.ID, want)
 	}
 	return nil
 }

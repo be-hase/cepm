@@ -424,8 +424,7 @@ func refreshExtensions(name string, r *state.Repo, dir string, res *RepoResult, 
 			se.Disabled = prev.Disabled
 			if prev.ID != id {
 				noteIdentityChange(name, dir, prev, se, res)
-				r.AddStale(state.StaleExtension{ID: prev.ID, Name: prev.Name, Reason: "id changed",
-					SrcDir: prev.Dir, SrcKey: prev.Key})
+				r.AddStale(state.StaleExtension{ID: prev.ID, Name: prev.Name, Reason: "id changed"})
 			}
 		} else {
 			// New extensions arrive as "available"; the user opts in with
@@ -457,8 +456,7 @@ func refreshExtensions(name string, r *state.Repo, dir string, res *RepoResult, 
 			AbsDir: added[i].AbsDir, OldID: match.ID, NewID: added[i].ID,
 			Enabled: match.Enabled(),
 		})
-		r.AddStale(state.StaleExtension{ID: match.ID, Name: match.Name, Reason: "renamed",
-			NewDir: added[i].Dir, SrcDir: match.Dir, SrcKey: match.Key})
+		r.AddStale(state.StaleExtension{ID: match.ID, Name: match.Name, Reason: "renamed", NewDir: added[i].Dir})
 		delete(removed, match.Dir)
 		added[i].Name = "" // consumed by the rename
 	}
@@ -469,8 +467,7 @@ func refreshExtensions(name string, r *state.Repo, dir string, res *RepoResult, 
 	}
 	for _, e := range removed {
 		res.Removed = append(res.Removed, e)
-		r.AddStale(state.StaleExtension{ID: e.ID, Name: e.Name, Reason: "removed",
-			SrcDir: e.Dir, SrcKey: e.Key})
+		r.AddStale(state.StaleExtension{ID: e.ID, Name: e.Name, Reason: "removed"})
 	}
 	r.Extensions = newList
 	// Extension IDs are derived from paths, so reverting a deletion or a

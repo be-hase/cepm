@@ -135,28 +135,13 @@ func runDiagnostics(ctx context.Context) []diagnostic {
 	}
 
 	diags = append(diags, checkRepos(ctx, pingErr == nil)...)
-	diags = append(diags, checkStagingLeftovers()...)
+	// Deliberately no check for leftover .install-* staging directories: an
+	// install in progress owns one, and doctor cannot tell that apart from
+	// an abandoned one (install holds no lock while it clones and prompts).
+	// Calling a live install's clone "safe to delete" would be worse than
+	// leaving a few megabytes around; an incomplete install at the final
+	// path is diagnosed by install itself.
 	return diags
-}
-
-// checkStagingLeftovers reports .install-* directories an interrupted
-// install left under ~/.cepm. They hold nothing but an abandoned clone, so
-// deleting them is always safe — but cepm never deletes on its own.
-func checkStagingLeftovers() []diagnostic {
-	home, err := paths.CepmDir()
-	if err != nil {
-		return nil
-	}
-	leftovers, err := filepath.Glob(filepath.Join(home, ".install-*"))
-	if err != nil || len(leftovers) == 0 {
-		return nil
-	}
-	return []diagnostic{{
-		Name:   "staging leftovers",
-		Status: "warn",
-		Detail: fmt.Sprintf("%d staging director(y/ies) from interrupted installs: %s", len(leftovers), strings.Join(leftovers, ", ")),
-		Hint:   "safe to delete: rm -rf " + strings.Join(leftovers, " "),
-	}}
 }
 
 func checkHelperFiles() []diagnostic {

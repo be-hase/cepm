@@ -98,47 +98,21 @@ func (h *Host) flushPendingReloads(ctx context.Context) {
 	if len(ids) == 0 {
 		return
 	}
+	sort.Strings(ids)
 
 	// The debt was recorded at update time; the user may have disabled or
-	// uninstalled since. What is owed is decided by the state *now*: ids no
-	// longer live-and-enabled are dropped, and when the state cannot be
-	// read nothing is sent (but nothing is forgotten either).
-	st, err := state.LoadValid()
-	if err != nil {
-		h.log.Error("pending reload: load state", "err", err)
-		return
-	}
-	enabled := map[string]bool{}
-	for _, name := range st.RepoNames() {
-		for _, e := range st.Repos[name].Extensions {
-			if e.Enabled() {
-				enabled[e.ID] = true
-			}
-		}
-	}
-	var send, drop []string
-	for _, id := range ids {
-		if enabled[id] {
-			send = append(send, id)
-		} else {
-			drop = append(drop, id)
-		}
-	}
-	if len(drop) > 0 {
-		h.log.Info("dropping owed reloads no longer wanted", "ids", drop)
+	// uninstalled since, so what is still owed is decided under the lock,
+	// together with the send. When the state cannot be read nothing is sent
+	// — and nothing is forgotten either.
+	results, unwanted, err := h.reloadEnabled(ctx, ids)
+	if len(unwanted) > 0 {
+		h.log.Info("dropping owed reloads no longer wanted", "ids", unwanted)
 		h.pendingReloadMu.Lock()
-		for _, id := range drop {
+		for _, id := range unwanted {
 			delete(h.pendingReload, id)
 		}
 		h.pendingReloadMu.Unlock()
 	}
-	if len(send) == 0 {
-		return
-	}
-	ids = send
-	sort.Strings(ids)
-
-	results, err := h.Reload(ctx, ids)
 	if err != nil {
 		h.log.Error("reload failed; keeping it for the next tick", "err", err, "ids", ids)
 		return
@@ -474,27 +448,67 @@ func (h *Host) maybeRefreshHelper(ctx context.Context) {
 		"from", installed, "to", helperext.Version)
 }
 
-// The control socket may only act on extensions cepm can vouch for. The
-// socket is only reachable by this user, but the helper holds the management
-// permission for *every* installed extension, so the host must not relay
-// arbitrary IDs. Authorization is per command: a reload makes sense only for
-// a live, enabled extension, while a removal also covers the stale and
-// orphan records cleanup exists for — each set validated (ids re-derived)
-// by LoadValid. Exported so tests hold their fake host to the same rules.
+// The helper holds Chrome's management permission for *every* installed
+// extension, so the host relays only ids the state accounts for. This bounds
+// what a bug — a stale id list, a confused caller, a malformed request — can
+// reach: it is not a security boundary against the user themselves, who owns
+// the state file (see the trust note in internal/state). The sets differ by
+// command because their meanings do: a reload only makes sense for a live,
+// enabled extension, while a removal is also how cleanup clears the stale
+// and orphan records left behind. Exported so tests hold their fake host to
+// the same rules.
+
+// enabledIDs is the set a reload may target: live and enabled right now.
+func enabledIDs(st *state.State) map[string]bool {
+	ok := map[string]bool{}
+	for _, name := range st.RepoNames() {
+		for _, e := range st.Repos[name].Extensions {
+			if e.Enabled() {
+				ok[e.ID] = true
+			}
+		}
+	}
+	return ok
+}
 
 // AuthorizeReload permits ids that are live and enabled right now.
 func AuthorizeReload(ids []string) ([]string, error) {
-	return authorize(ids, func(st *state.State) map[string]bool {
-		ok := map[string]bool{}
-		for _, name := range st.RepoNames() {
-			for _, e := range st.Repos[name].Extensions {
-				if e.Enabled() {
-					ok[e.ID] = true
-				}
+	return authorize(ids, enabledIDs)
+}
+
+// reloadEnabled reloads the wanted ids while holding the update lock, and
+// reports which of them the state no longer wants reloaded. Deciding from
+// the state and then sending must be one step: otherwise a cepm disable can
+// complete in between, and Chrome is told to reload an extension the user
+// just turned off. Every reload path goes through here, so "disabled" and
+// "reloaded" can only happen in one order or the other, never half of each.
+//
+// The lock is the same one every state writer takes. Nothing that already
+// holds it may call this — which is why removals (cleanup sends those while
+// holding the lock) are authorized without it.
+func (h *Host) reloadEnabled(ctx context.Context, want []string) (results []ipc.ReloadResult, unwanted []string, err error) {
+	err = updater.WithLock(ctx, func() error {
+		st, lerr := state.LoadValid()
+		if lerr != nil {
+			return lerr
+		}
+		enabled := enabledIDs(st)
+		var send []string
+		for _, id := range want {
+			if enabled[id] {
+				send = append(send, id)
+			} else {
+				unwanted = append(unwanted, id)
 			}
 		}
-		return ok
+		if len(send) == 0 {
+			return nil
+		}
+		sort.Strings(send)
+		results, lerr = h.Reload(ctx, send)
+		return lerr
 	})
+	return results, unwanted, err
 }
 
 // AuthorizeRemoval permits live extensions plus validated stale/orphan
@@ -561,7 +575,8 @@ func (h *Host) catchUpReload(ctx context.Context) {
 	if len(ids) == 0 {
 		return
 	}
-	results, err := h.Reload(ctx, ids)
+	// Re-decided under the lock: this list was read without it.
+	results, _, err := h.reloadEnabled(ctx, ids)
 	if err != nil {
 		// Leave the flag unset: a later hello (the service worker restarts
 		// often) retries, rather than silently running stale code all session.
@@ -641,13 +656,17 @@ func (h *Host) handleIPC(ctx context.Context, req ipc.Request) ipc.Response {
 		}
 		return ipc.Response{OK: true, Host: info}
 	case ipc.CmdReload:
-		ids, err := AuthorizeReload(req.IDs)
+		if _, err := AuthorizeReload(req.IDs); err != nil {
+			return ipc.Response{Error: err.Error()}
+		}
+		// Authorized again inside the lock, which is what actually decides:
+		// the check above only fails fast with a clear message.
+		results, unwanted, err := h.reloadEnabled(ctx, req.IDs)
 		if err != nil {
 			return ipc.Response{Error: err.Error()}
 		}
-		results, err := h.Reload(ctx, ids)
-		if err != nil {
-			return ipc.Response{Error: err.Error()}
+		for _, id := range unwanted {
+			results = append(results, ipc.ReloadResult{ID: id, Status: ipc.StatusSkippedDisabled})
 		}
 		return ipc.Response{OK: true, Results: results}
 	case ipc.CmdListChrome:

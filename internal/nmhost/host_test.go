@@ -17,6 +17,7 @@ import (
 	"github.com/be-hase/cepm/internal/helperext"
 	"github.com/be-hase/cepm/internal/ipc"
 	"github.com/be-hase/cepm/internal/state"
+	"github.com/be-hase/cepm/internal/updater"
 )
 
 // fakeHelper emulates the helper extension's side of the native messaging
@@ -30,6 +31,11 @@ type fakeHelper struct {
 	// failReloads makes reload requests answer status "error" while set —
 	// the transient helper failure the pending-reload retry exists for.
 	failReloads atomic.Bool
+	// holdReload, when non-nil, blocks the answer to a reload request until
+	// the channel is closed: it opens the window a racing state change would
+	// have to slip through.
+	holdReload chan struct{}
+	reloadSeen chan struct{}
 }
 
 func (f *fakeHelper) send(msg any) {
@@ -66,6 +72,15 @@ func (f *fakeHelper) run() {
 		case "reload":
 			if f.reloads != nil {
 				f.reloads <- msg.ExtensionIDs
+			}
+			if f.reloadSeen != nil {
+				select {
+				case f.reloadSeen <- struct{}{}:
+				default:
+				}
+			}
+			if f.holdReload != nil {
+				<-f.holdReload
 			}
 			status := "reloaded"
 			if f.failReloads.Load() {
@@ -489,5 +504,193 @@ func TestPendingReloadDropsDisabledAndUninstalledExtensions(t *testing.T) {
 	defer h.pendingReloadMu.Unlock()
 	if len(h.pendingReload) != 0 {
 		t.Errorf("dropped debts must not linger, got %v", h.pendingReload)
+	}
+}
+
+// Deciding what to reload and sending it must be one step. Otherwise a
+// "cepm disable" can complete in the window between the two, and Chrome is
+// told to reload an extension the user just turned off. Holding the update
+// lock across both makes the two operations order themselves: this test
+// proves the disable cannot commit while a reload is in flight.
+func TestReloadHoldsTheLockSoDisableCannotSlipIn(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "cepm-host")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	t.Setenv("CEPM_HOME", dir)
+	head := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	st := state.New()
+	st.Repos["testrepo"] = &state.Repo{
+		URL: "u", Track: state.TrackBranch, Branch: "main", Head: head,
+		Extensions: []state.Extension{{Dir: "a", Name: "A", ID: idA, Key: keyA}},
+	}
+	if err := st.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	helperToHostR, helperToHostW := io.Pipe()
+	hostToHelperR, hostToHelperW := io.Pipe()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	h := &Host{
+		version:   "test",
+		log:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		in:        helperToHostR,
+		out:       make(chan []byte, 16),
+		pending:   map[string]chan json.RawMessage{},
+		startedAt: time.Now(),
+	}
+	h.caughtUp.Store(true)
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case frame := <-h.out:
+				if err := WriteMessage(hostToHelperW, frame); err != nil {
+					return
+				}
+			}
+		}
+	}()
+	go func() { _ = h.readLoop(ctx) }()
+	helper := &fakeHelper{
+		t: t, toHost: helperToHostW, from: hostToHelperR,
+		holdReload: make(chan struct{}),
+		reloadSeen: make(chan struct{}, 1),
+	}
+	go helper.run()
+
+	reloadDone := make(chan error, 1)
+	go func() {
+		_, _, err := h.reloadEnabled(ctx, []string{idA})
+		reloadDone <- err
+	}()
+
+	select {
+	case <-helper.reloadSeen:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the reload request never reached the helper")
+	}
+
+	// The reload is in flight. A disable must not be able to commit now.
+	disabled := make(chan error, 1)
+	go func() {
+		disabled <- updater.WithLock(context.Background(), func() error {
+			s, err := state.Load()
+			if err != nil {
+				return err
+			}
+			s.Repos["testrepo"].Extensions[0].Disabled = true
+			return s.Save()
+		})
+	}()
+	select {
+	case err := <-disabled:
+		t.Fatalf("disable committed while a reload was in flight (err=%v)", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	close(helper.holdReload)
+	if err := <-reloadDone; err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	select {
+	case err := <-disabled:
+		if err != nil {
+			t.Fatalf("disable after the reload: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("disable never completed after the reload finished")
+	}
+}
+
+// The same guarantee for a reload arriving on the control socket (cepm
+// reload / cepm update): the handler must take the lock too, or the window
+// reopens for every CLI-driven reload.
+func TestSocketReloadHoldsTheLockToo(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "cepm-host")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	t.Setenv("CEPM_HOME", dir)
+	st := state.New()
+	st.Repos["testrepo"] = &state.Repo{
+		URL: "u", Track: state.TrackBranch, Branch: "main",
+		Head:       "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		Extensions: []state.Extension{{Dir: "a", Name: "A", ID: idA, Key: keyA}},
+	}
+	if err := st.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	helperToHostR, helperToHostW := io.Pipe()
+	hostToHelperR, hostToHelperW := io.Pipe()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	h := &Host{
+		version:   "test",
+		log:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		in:        helperToHostR,
+		out:       make(chan []byte, 16),
+		pending:   map[string]chan json.RawMessage{},
+		startedAt: time.Now(),
+	}
+	h.caughtUp.Store(true)
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case frame := <-h.out:
+				if err := WriteMessage(hostToHelperW, frame); err != nil {
+					return
+				}
+			}
+		}
+	}()
+	go func() { _ = h.readLoop(ctx) }()
+	helper := &fakeHelper{
+		t: t, toHost: helperToHostW, from: hostToHelperR,
+		holdReload: make(chan struct{}),
+		reloadSeen: make(chan struct{}, 1),
+	}
+	go helper.run()
+
+	respDone := make(chan ipc.Response, 1)
+	go func() {
+		respDone <- h.handleIPC(ctx, ipc.Request{Cmd: ipc.CmdReload, IDs: []string{idA}})
+	}()
+	select {
+	case <-helper.reloadSeen:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the reload request never reached the helper")
+	}
+
+	disabled := make(chan error, 1)
+	go func() {
+		disabled <- updater.WithLock(context.Background(), func() error {
+			s, err := state.Load()
+			if err != nil {
+				return err
+			}
+			s.Repos["testrepo"].Extensions[0].Disabled = true
+			return s.Save()
+		})
+	}()
+	select {
+	case err := <-disabled:
+		t.Fatalf("disable committed during a socket reload (err=%v)", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	close(helper.holdReload)
+	if resp := <-respDone; !resp.OK {
+		t.Fatalf("reload response: %+v", resp)
+	}
+	if err := <-disabled; err != nil {
+		t.Fatalf("disable after the reload: %v", err)
 	}
 }
