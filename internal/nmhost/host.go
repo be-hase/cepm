@@ -666,7 +666,10 @@ func (h *Host) handleIPC(ctx context.Context, req ipc.Request) ipc.Response {
 			return ipc.Response{Error: err.Error()}
 		}
 		for _, id := range unwanted {
-			results = append(results, ipc.ReloadResult{ID: id, Status: ipc.StatusSkippedDisabled})
+			// Not StatusSkippedDisabled: that one means Chrome has the
+			// extension switched off. Here it is cepm's own state that
+			// changed under the request.
+			results = append(results, ipc.ReloadResult{ID: id, Status: ipc.StatusSkippedStateChanged})
 		}
 		return ipc.Response{OK: true, Results: results}
 	case ipc.CmdListChrome:

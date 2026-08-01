@@ -20,10 +20,15 @@ const (
 	// the helper leaves it that way instead of re-enabling it on every update.
 	StatusSkippedDisabled = "skipped_disabled"
 	StatusSkippedSelf     = "skipped_self"
-	StatusNotInstalled    = "not_installed"
-	StatusError           = "error"
-	StatusUninstalled     = "uninstalled"
-	StatusCancelled       = "cancelled"
+	// StatusSkippedStateChanged: cepm stopped wanting this reload between
+	// accepting the request and acting on it — the extension was disabled or
+	// its repository uninstalled in the meantime. It says nothing about
+	// Chrome, which may well still be running the extension.
+	StatusSkippedStateChanged = "skipped_state_changed"
+	StatusNotInstalled        = "not_installed"
+	StatusError               = "error"
+	StatusUninstalled         = "uninstalled"
+	StatusCancelled           = "cancelled"
 )
 
 type Request struct {

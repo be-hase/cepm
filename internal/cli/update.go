@@ -148,6 +148,8 @@ func reloadExtensions(ctx context.Context, out io.Writer, items []reloadItem) {
 			fmt.Fprintf(out, "  %s is not loaded in Chrome (one-time \"Load unpacked\" still needed)\n", name)
 		case r.Status == ipc.StatusSkippedDisabled:
 			fmt.Fprintf(out, "  %s is turned off in Chrome; left as is\n", name)
+		case r.Status == ipc.StatusSkippedStateChanged:
+			fmt.Fprintf(out, "  %s is no longer enabled or managed by cepm; reload skipped\n", name)
 		default:
 			fmt.Fprintf(out, "✘ reload %s failed: %s\n", name, r.Error)
 		}

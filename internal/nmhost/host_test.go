@@ -694,3 +694,96 @@ func TestSocketReloadHoldsTheLockToo(t *testing.T) {
 		t.Fatalf("disable after the reload: %v", err)
 	}
 }
+
+// When the state changes between accepting a reload request and acting on
+// it, the answer must say so — and must not borrow "skipped_disabled",
+// which means Chrome has the extension switched off. Reproduced by holding
+// the update lock so the handler blocks after authorizing, and disabling the
+// extension inside that window.
+func TestReloadReportsStateChangeDistinctlyFromChromeDisabled(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "cepm-host")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	t.Setenv("CEPM_HOME", dir)
+	st := state.New()
+	st.Repos["testrepo"] = &state.Repo{
+		URL: "u", Track: state.TrackBranch, Branch: "main",
+		Head:       "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		Extensions: []state.Extension{{Dir: "a", Name: "A", ID: idA, Key: keyA}},
+	}
+	if err := st.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	helperToHostR, helperToHostW := io.Pipe()
+	hostToHelperR, hostToHelperW := io.Pipe()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	h := &Host{
+		version:   "test",
+		log:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		in:        helperToHostR,
+		out:       make(chan []byte, 16),
+		pending:   map[string]chan json.RawMessage{},
+		startedAt: time.Now(),
+	}
+	h.caughtUp.Store(true)
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case frame := <-h.out:
+				if err := WriteMessage(hostToHelperW, frame); err != nil {
+					return
+				}
+			}
+		}
+	}()
+	go func() { _ = h.readLoop(ctx) }()
+	helper := &fakeHelper{t: t, toHost: helperToHostW, from: hostToHelperR,
+		reloads: make(chan []string, 4)}
+	go helper.run()
+
+	// Hold the lock, let the request authorize and block on it, then change
+	// the state from inside the window.
+	respDone := make(chan ipc.Response, 1)
+	err = updater.WithLock(context.Background(), func() error {
+		go func() {
+			respDone <- h.handleIPC(ctx, ipc.Request{Cmd: ipc.CmdReload, IDs: []string{idA}})
+		}()
+		time.Sleep(200 * time.Millisecond) // let the handler reach the lock
+		s, err := state.Load()
+		if err != nil {
+			return err
+		}
+		s.Repos["testrepo"].Extensions[0].Disabled = true
+		return s.Save()
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case resp := <-respDone:
+		if !resp.OK || len(resp.Results) != 1 {
+			t.Fatalf("unexpected response: %+v", resp)
+		}
+		got := resp.Results[0].Status
+		if got == ipc.StatusSkippedDisabled {
+			t.Error(`a cepm-side state change must not be reported as "turned off in Chrome"`)
+		}
+		if got != ipc.StatusSkippedStateChanged {
+			t.Errorf("status = %q, want %q", got, ipc.StatusSkippedStateChanged)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the reload request never got an answer")
+	}
+	select {
+	case ids := <-helper.reloads:
+		t.Errorf("nothing should have been sent to Chrome, got %v", ids)
+	default:
+	}
+}
