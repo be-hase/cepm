@@ -69,6 +69,12 @@ $ cepm reset                      # unusable state? move it + clones to a backup
 $ cepm id <path>                  # print the extension ID for a directory
 ```
 
+Flags worth knowing: `cepm update --no-reload` (pull only), `cepm update
+--force` (stash local edits around the pull), `cepm uninstall --keep-files`
+(unregister but keep the clone), `cepm list --json` / `cepm doctor --json`
+(for scripts), and `-v` on any command to see the git commands and host
+traffic.
+
 ### Picking extensions from a multi-extension repo
 
 When a repo contains several extensions, `cepm install` asks which ones you
@@ -151,6 +157,51 @@ By default a repo with local modifications is skipped (with a warning) so
 your experiments are never clobbered; `cepm update --force` stashes and
 restores them around the pull.
 
+## Troubleshooting
+
+**Start with `cepm doctor`.** It checks the whole chain — git, the helper
+files, the native-messaging registration, whether Chrome is currently
+connected, and whether each registered extension is actually loaded — and
+every failure it reports comes with the command that fixes it. The rest of
+this section is for when you want to know *why*.
+
+**An extension is not picking up changes.** If `cepm list` shows it as
+loaded and `cepm update` says it reloaded, but the behaviour is old, the
+change was probably in `manifest.json` — Chrome keeps the manifest it cached
+when the extension was loaded, so those need a Chrome restart. cepm says so
+when it happens, and doctor keeps flagging it until you restart.
+
+**"Chrome is not reachable".** Nothing is broken: the helper only connects
+while Chrome runs, so this is expected with Chrome closed. Pulls still work
+(`cepm update`), and the new code is picked up at the next Chrome start. If
+Chrome *is* running, check that the helper is loaded and enabled in
+chrome://extensions, then re-run `cepm doctor`.
+
+**An extension is gone from Chrome, or shows an error there.** That happens
+when a repo renames or deletes an extension directory: the ID is derived
+from the path, so the old entry is now dangling. `cepm cleanup` removes
+those entries (Chrome asks you to confirm each one), and for renames cepm
+tells you which directory to load instead.
+
+**"cepm cannot use this state file".** Something outside cepm changed
+`~/.cepm/state.json`, or a write was interrupted. cepm refuses to act on a
+state it cannot interpret rather than guess — nothing in Chrome or on disk
+is touched. `cepm reset` moves the state file *and* the clones into a
+timestamped backup under `~/.cepm/` (it deletes nothing), then re-run `cepm
+install` for the repositories you use. The old URLs are in the backup's
+`state.json`, or from each clone with `git -C <backup>/repos/<name> remote
+get-url origin`.
+
+**"exists but no repository is registered for it".** An install was killed
+between placing the clone and recording it. Remove that directory (or run
+`cepm reset`) and install again.
+
+**Everything is fine but nothing auto-updates.** Auto-update runs inside the
+native host, which only lives while Chrome runs, and only one cepm process
+does the pulling. Check `[update] auto` in `~/.cepm/config.toml`, and
+remember the interval is 30 minutes by default. `~/.cepm/logs/host.log` has
+the whole story.
+
 ## Notes & limitations
 
 - Loading an extension the first time is always manual — Chrome has no API
@@ -181,7 +232,13 @@ restores them around the pull.
 - The helper extension needs the `management` permission (to toggle other
   extensions), `nativeMessaging`, and `alarms`. It never touches page data.
 - Everything lives under `~/.cepm/` (clones, state, logs at
-  `~/.cepm/logs/host.log`).
+  `~/.cepm/logs/host.log`), owner-only: the clones are your internal
+  extensions' source, so nothing there is readable by other users on the
+  machine.
+- cepm never deletes anything you did not ask it to. `uninstall` removes the
+  clone it created (`--keep-files` to keep it), `reset` only *moves* things
+  into a backup, and removals from Chrome always go through Chrome's own
+  confirmation dialog.
 
 ## Development
 
