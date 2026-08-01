@@ -13,7 +13,7 @@ func TestLoadDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Update.Interval != 30*time.Minute || !cfg.Update.Auto || cfg.Git.StashDirty {
+	if cfg.Update.Interval != time.Hour || !cfg.Update.Auto || cfg.Git.StashDirty {
 		t.Errorf("unexpected defaults: %+v", cfg)
 	}
 }

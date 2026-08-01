@@ -14,8 +14,9 @@ $ cepm install git@github.example.com:team/internal-extensions.git
 ```
 
 After a one-time "Load unpacked" per extension, updates flow automatically:
-while Chrome is running, cepm pulls every 30 minutes and reloads the
-extensions whose files changed. `cepm update` does the same on demand.
+while Chrome is running, cepm pulls every hour and reloads the extensions
+whose files changed (plus once a minute or two after Chrome starts, so a
+fresh launch is current). `cepm update` does the same on demand.
 
 ## How it works
 
@@ -146,7 +147,7 @@ which cepm honors and which makes the ID survive a move.
 
 ```toml
 [update]
-interval = "30m"   # auto-update cadence while Chrome runs (min "1m")
+interval = "1h"    # auto-update cadence while Chrome runs (min "1m")
 auto     = true    # set false to only update via "cepm update"
 
 [git]
@@ -199,8 +200,8 @@ between placing the clone and recording it. Remove that directory (or run
 **Everything is fine but nothing auto-updates.** Auto-update runs inside the
 native host, which only lives while Chrome runs, and only one cepm process
 does the pulling. Check `[update] auto` in `~/.cepm/config.toml`, and
-remember the interval is 30 minutes by default. `~/.cepm/logs/host.log` has
-the whole story.
+remember the interval is one hour by default (with a first pass shortly
+after Chrome starts). `~/.cepm/logs/host.log` has the whole story.
 
 ## Notes & limitations
 

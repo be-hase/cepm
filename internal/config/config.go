@@ -31,7 +31,7 @@ const MinInterval = time.Minute
 
 func defaults() *Config {
 	return &Config{
-		Update: UpdateConfig{Interval: 30 * time.Minute, Auto: true},
+		Update: UpdateConfig{Interval: time.Hour, Auto: true},
 		Git:    GitConfig{StashDirty: false},
 	}
 }
