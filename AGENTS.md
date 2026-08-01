@@ -125,6 +125,5 @@ name the path or command, and never echo a URL that may carry a token
   `golang.org/x/mod/semver`. git is invoked as a subprocess, deliberately, so
   the user's SSH config and credential helpers just work.
 - `gofmt` clean, `go vet` clean; both are CI gates.
-- Commit messages: a one-line summary, then what changed and why. Japanese is
-  fine (existing history is Japanese).
+- Commit messages are English: a one-line summary, then what changed and why.
 - Commit as work progresses rather than one large drop.
