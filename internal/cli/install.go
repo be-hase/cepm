@@ -2,7 +2,9 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -91,24 +93,38 @@ func runInstall(cmd *cobra.Command, url string, flags installFlags) error {
 		return fmt.Errorf("repository %q is already registered", name)
 	}
 
-	fmt.Fprintf(out, "Cloning %s ...\n", gitx.RedactURL(url))
-	if err := gitx.Clone(ctx, url, dir, branch); err != nil {
+	// Everything up to the lock — the clone, the scan, the interactive
+	// selection — happens in a staging directory. The final path only comes
+	// into existence inside the lock, together with the state entry: a
+	// concurrent reset (which moves repos/ away wholesale) can then never
+	// separate a registered repository from its clone. Same filesystem as
+	// repos/, so the final step is one atomic rename.
+	home, err := paths.CepmDir()
+	if err != nil {
 		return err
 	}
-	rollback := func() { _ = os.RemoveAll(dir) }
-
-	repo, err := buildRepo(ctx, url, dir, branch, track, tagPattern, flags.prerelease, flags.prereleaseSet)
+	staging, err := os.MkdirTemp(home, ".install-")
 	if err != nil {
-		rollback()
+		return err
+	}
+	defer os.RemoveAll(staging)
+	stagingClone := filepath.Join(staging, name)
+
+	fmt.Fprintf(out, "Cloning %s ...\n", gitx.RedactURL(url))
+	if err := gitx.Clone(ctx, url, stagingClone, branch); err != nil {
+		return err
+	}
+
+	// ids derive from the *final* path — the one Chrome will load.
+	repo, err := buildRepo(ctx, url, stagingClone, dir, branch, track, tagPattern, flags.prerelease, flags.prereleaseSet)
+	if err != nil {
 		return err
 	}
 	if len(repo.Extensions) == 0 {
-		rollback()
 		return fmt.Errorf("no Chrome extensions found in %s (no manifest.json; repo authors can declare directories in cepm.toml)",
 			gitx.RedactURL(url))
 	}
 	if err := applySelection(cmd, name, repo, flags); err != nil {
-		rollback()
 		return err
 	}
 
@@ -120,16 +136,30 @@ func runInstall(cmd *cobra.Command, url string, flags installFlags) error {
 		if _, exists := st.Repos[name]; exists {
 			return fmt.Errorf("repository %q is already registered", name)
 		}
+		if _, err := os.Lstat(dir); err == nil {
+			return fmt.Errorf("%s already exists; pick another --name or run: cepm uninstall %s", dir, name)
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
+		if err := os.Rename(stagingClone, dir); err != nil {
+			return err
+		}
 		// One owner per extension id — including within this repository, where
 		// two directories can pin the same manifest "key".
 		st.Repos[name] = repo
 		if err := st.Validate(); err != nil {
+			_ = os.Rename(dir, stagingClone)
 			return fmt.Errorf("cannot install %q: %w", name, err)
 		}
-		return st.Save()
+		if err := st.Save(); err != nil {
+			// The state on disk did not change, so the filesystem must not
+			// either: put the clone back before reporting.
+			_ = os.Rename(dir, stagingClone)
+			return err
+		}
+		return nil
 	})
 	if err != nil {
-		rollback()
 		return err
 	}
 
@@ -218,7 +248,9 @@ func extensionDirs(repo *state.Repo) []string {
 // buildRepo inspects a fresh clone and produces its state entry, resolving the
 // tracking mode (CLI flags > repo cepm.toml > branch) and, in tag mode,
 // checking out the latest matching tag.
-func buildRepo(ctx context.Context, url, dir, branch, track, tagPattern string, prerelease, prereleaseSet bool) (*state.Repo, error) {
+// buildRepo reads the clone at dir; idBase is the path the clone will live
+// at, which is what the (path-derived) extension ids must be computed from.
+func buildRepo(ctx context.Context, url, dir, idBase, branch, track, tagPattern string, prerelease, prereleaseSet bool) (*state.Repo, error) {
 	repoCfg, err := scan.LoadRepoConfig(dir)
 	if err != nil {
 		return nil, err
@@ -286,7 +318,7 @@ func buildRepo(ctx context.Context, url, dir, branch, track, tagPattern string, 
 		fmt.Fprintf(os.Stderr, "Warning: %d extensions auto-detected; consider declaring them in cepm.toml\n", len(exts))
 	}
 	for _, e := range exts {
-		id, err := extid.ForExtension(filepath.Join(dir, e.Dir), e.Key)
+		id, err := extid.ForExtension(filepath.Join(idBase, e.Dir), e.Key)
 		if err != nil {
 			return nil, err
 		}

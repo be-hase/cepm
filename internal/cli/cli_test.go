@@ -1174,3 +1174,85 @@ func TestDoctorExitsNonZeroOnFailure(t *testing.T) {
 		t.Error("doctor should report failure when setup has not run")
 	}
 }
+
+// Install stages its clone outside repos/ and only renames it into place
+// inside the update lock, together with the state entry. A reset that runs
+// while install waits on the selection prompt must therefore never separate
+// the two: whatever the interleaving, the registered repository and its
+// clone end up on the same side.
+func TestInstallSurvivesAConcurrentReset(t *testing.T) {
+	interactive(t)
+	host := startFakeHost(t)
+	home := os.Getenv("CEPM_HOME")
+	// Pretend Chrome already loaded the extension install will register, so
+	// the post-install ceremony's wait confirms immediately instead of
+	// polling for 90 seconds. Path-derived, so computable up front.
+	dirTools, err := updaterRepoDir("tools")
+	if err != nil {
+		t.Fatal(err)
+	}
+	idOne, err := extid.FromPath(filepath.Join(dirTools, "one"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	host.mu.Lock()
+	host.loaded[idOne] = true
+	host.mu.Unlock()
+
+	// Two extensions, so install stops at the selection prompt — the window
+	// a concurrent reset can slip into.
+	origin := filepath.Join(home, "origin")
+	if err := os.MkdirAll(origin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, home, "init", "-q", "-b", "main", origin)
+	for _, e := range []string{"one", "two"} {
+		if err := os.MkdirAll(filepath.Join(origin, e), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		manifest := `{"manifest_version":3,"name":"` + e + `","version":"1.0"}`
+		if err := os.WriteFile(filepath.Join(origin, e, "manifest.json"), []byte(manifest), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gitCmd(t, origin, "add", "-A")
+	gitCmd(t, origin, "commit", "-qm", "init")
+
+	resetRan := false
+	assist.IsTTY = func() bool {
+		if !resetRan {
+			resetRan = true
+			if out, err := run(t, "", "reset"); err != nil {
+				t.Errorf("concurrent reset: %v\n%s", err, out)
+			}
+		}
+		return true
+	}
+
+	out, err := run(t, "1\n", "install", origin, "--name", "tools")
+	if err != nil {
+		t.Fatalf("install: %v\n%s", err, out)
+	}
+	if !resetRan {
+		t.Fatal("the test never reached the selection prompt")
+	}
+
+	// State and clone must be on the same side: registered and present.
+	st, err := state.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := st.Repos["tools"]; !ok {
+		t.Fatal("the repository should be registered")
+	}
+	dir, err := updaterRepoDir("tools")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "one", "manifest.json")); err != nil {
+		t.Errorf("the registered repository must have its clone: %v", err)
+	}
+	if err := st.Validate(); err != nil {
+		t.Errorf("the installed state must be valid: %v", err)
+	}
+}
