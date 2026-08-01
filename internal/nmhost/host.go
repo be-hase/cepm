@@ -384,7 +384,8 @@ func ManagedIDs(ids []string) ([]string, error) {
 	if len(ids) == 0 {
 		return nil, fmt.Errorf("no extension ids given")
 	}
-	st, err := state.Load()
+	// An invalid state cannot say who owns an id, so nothing is relayed.
+	st, err := state.LoadValid()
 	if err != nil {
 		return nil, err
 	}
@@ -418,7 +419,7 @@ func (h *Host) catchUpReload(ctx context.Context) {
 	if h.caughtUp.Load() {
 		return
 	}
-	st, err := state.Load()
+	st, err := state.LoadValid()
 	if err != nil {
 		h.log.Error("catch-up reload: load state", "err", err)
 		return

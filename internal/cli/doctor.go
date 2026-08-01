@@ -243,7 +243,8 @@ func checkRepos(ctx context.Context, hostReachable bool) []diagnostic {
 	var diags []diagnostic
 	st, err := state.Load()
 	if err != nil {
-		return []diagnostic{{Name: "state", Status: "fail", Detail: err.Error()}}
+		return []diagnostic{{Name: "state", Status: "fail", Detail: err.Error(),
+			Hint: "run cepm reset to move the state and clones to a backup, then re-install"}}
 	}
 	if err := st.Validate(); err != nil {
 		// Covers both a duplicated id and a directory name cepm would never
@@ -253,7 +254,7 @@ func checkRepos(ctx context.Context, hostReachable bool) []diagnostic {
 			Name:   "state",
 			Status: "fail",
 			Detail: oneLine(err.Error()),
-			Hint:   "delete ~/.cepm/state.json and re-run cepm install for the repositories you use",
+			Hint:   "run cepm reset to move the state and clones to a backup, then re-install",
 		})
 	}
 	if len(st.Orphans) > 0 {

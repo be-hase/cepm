@@ -203,6 +203,22 @@ func Load() (*State, error) {
 	return &s, nil
 }
 
+// LoadValid loads the state and refuses one that Validate rejects. Every
+// caller that goes on to change something — clones, Chrome, the state itself
+// — must use this, not Load: the CLI's preflight covers the commands, but
+// the native host starts from Chrome and takes the same actions, and
+// discovering the problem at save time would be after the side effects.
+func LoadValid() (*State, error) {
+	s, err := Load()
+	if err != nil {
+		return nil, err
+	}
+	if err := s.Validate(); err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
 // sanitizeNames strips what a display name must never carry. Names are
 // labels, not identities, so cleaning them once here is what keeps every
 // caller — tables, menus, ceremonies — from having to remember. Directories

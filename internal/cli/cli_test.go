@@ -354,8 +354,8 @@ func TestUninstallFailsClosedOnInvalidState(t *testing.T) {
 	if err == nil {
 		t.Fatalf("uninstall must refuse an invalid state:\n%s", out)
 	}
-	if !strings.Contains(err.Error(), "state.json") {
-		t.Errorf("the error should say how to start over (delete state.json), got: %v", err)
+	if !strings.Contains(err.Error(), "cepm reset") {
+		t.Errorf("the error should say how to start over (cepm reset), got: %v", err)
 	}
 	host.mu.Lock()
 	if len(host.uninstalled) != 0 {
@@ -371,6 +371,79 @@ func TestUninstallFailsClosedOnInvalidState(t *testing.T) {
 	}
 	if len(st.Repos) != 2 {
 		t.Errorf("the state must be left alone, got %d repos", len(st.Repos))
+	}
+}
+
+// The recovery that the fail-closed error points at has to actually work.
+// Deleting state.json alone would strand the clones: install refuses the
+// occupied directory, and uninstall no longer knows the name. reset moves
+// state and clones aside together, and deletes nothing.
+func TestResetMovesStateAndClonesToABackup(t *testing.T) {
+	host := startFakeHost(t, "xxxx")
+	writeRawState(t, `{"version":4,"repos":{
+      "a":{"url":"u","track":"branch","branch":"main","head":"h",
+           "extensions":[{"dir":"ext","name":"A","id":"xxxx","key":"K"}]},
+      "b":{"url":"u","track":"branch","branch":"main","head":"h",
+           "extensions":[{"dir":"ext","name":"B","id":"xxxx","key":"K"}]}}}`)
+	dirA, err := updaterRepoDir("a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dirA, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dirA, "keep.txt"), []byte("data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := run(t, "", "reset")
+	if err != nil {
+		t.Fatalf("reset: %v\n%s", err, out)
+	}
+
+	// The old world is out of the way…
+	home := os.Getenv("CEPM_HOME")
+	if _, err := os.Stat(filepath.Join(home, "state.json")); err == nil {
+		t.Error("state.json should have been moved away")
+	}
+	repos, _ := paths.ReposDir()
+	if _, err := os.Stat(repos); err == nil {
+		t.Error("the repos directory should have been moved away")
+	}
+	// …but nothing was deleted: both live on in the backup.
+	backups, err := filepath.Glob(filepath.Join(home, "backup-*"))
+	if err != nil || len(backups) != 1 {
+		t.Fatalf("expected one backup directory, got %v (%v)", backups, err)
+	}
+	if _, err := os.Stat(filepath.Join(backups[0], "state.json")); err != nil {
+		t.Errorf("the backup should hold the old state: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(backups[0], "repos", "a", "keep.txt")); err != nil {
+		t.Errorf("the backup should hold the clones intact: %v", err)
+	}
+	// Chrome was not touched, and cepm starts from a clean slate.
+	host.mu.Lock()
+	if len(host.uninstalled) != 0 {
+		t.Errorf("reset must not touch Chrome, got %v", host.uninstalled)
+	}
+	host.mu.Unlock()
+	if _, err := run(t, "", "list"); err != nil {
+		t.Errorf("cepm should be usable again after reset: %v", err)
+	}
+}
+
+// The control socket's authorization is the native host's preflight: Chrome
+// starts the host without going through the CLI, so an invalid state has to
+// fail closed here too or reload/uninstall would still be relayed.
+func TestManagedIDsRefusesInvalidState(t *testing.T) {
+	startFakeHost(t, "xxxx")
+	writeRawState(t, `{"version":4,"repos":{
+      "a":{"url":"u","track":"branch","branch":"main","head":"h",
+           "extensions":[{"dir":"ext","name":"A","id":"xxxx","key":"K"}]},
+      "b":{"url":"u","track":"branch","branch":"main","head":"h",
+           "extensions":[{"dir":"ext","name":"B","id":"xxxx","key":"K"}]}}}`)
+	if _, err := nmhost.ManagedIDs([]string{"xxxx"}); err == nil {
+		t.Error("an invalid state must not authorize relaying any id")
 	}
 }
 

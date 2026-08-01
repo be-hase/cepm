@@ -9,9 +9,7 @@ import (
 
 	"github.com/be-hase/cepm/internal/launcher"
 	"github.com/be-hase/cepm/internal/logx"
-	"github.com/be-hase/cepm/internal/paths"
 	"github.com/be-hase/cepm/internal/state"
-	"github.com/be-hase/cepm/internal/term"
 )
 
 var verbose bool
@@ -53,6 +51,7 @@ the affected unpacked extensions in Chrome through a small helper extension.`,
 		newListCmd(),
 		newCleanupCmd(),
 		newIDCmd(),
+		newResetCmd(),
 		newVersionCmd(),
 		newNativeHostCmd(),
 	)
@@ -75,18 +74,13 @@ func preflight(cmd *cobra.Command) error {
 	if !touchesChrome[cmd.Name()] {
 		return nil
 	}
-	st, err := state.Load()
-	if err != nil {
-		return err
-	}
-	if err := st.Validate(); err != nil {
-		sf, pathErr := paths.StateFile()
-		if pathErr != nil {
-			sf = "~/.cepm/state.json"
-		}
-		return fmt.Errorf("%w\nNothing in Chrome or on disk was touched. cepm never writes such a state,"+
-			"\nso it cannot repair it: delete %s and re-run cepm install"+
-			"\nfor the repositories you use (cepm doctor has details)", err, term.Quote(sf))
+	// Any failure gets the recovery guidance — a parse error or a schema
+	// mismatch strands the user exactly like a semantically invalid state.
+	if _, err := state.LoadValid(); err != nil {
+		return fmt.Errorf("%w\nNo managed repository, state entry, or Chrome extension was changed."+
+			"\ncepm never writes such a state, so it cannot repair it: run cepm reset"+
+			"\nto move the state and the clones to a backup, then re-run cepm install"+
+			"\nfor the repositories you use (cepm doctor has details)", err)
 	}
 	return nil
 }

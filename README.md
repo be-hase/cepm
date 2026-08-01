@@ -65,6 +65,7 @@ $ cepm reload                     # reload without pulling (local hacking)
 $ cepm cleanup                    # remove broken Chrome entries after renames/deletes
 $ cepm uninstall <name>           # unregister + delete the clone
 $ cepm doctor                     # diagnose setup / connectivity
+$ cepm reset                      # unusable state? move it + clones to a backup, start over
 $ cepm id <path>                  # print the extension ID for a directory
 ```
 

@@ -566,6 +566,52 @@ func TestUpdateFailsOnRewrittenHistory(t *testing.T) {
 	}
 }
 
+// The native host runs Update without the CLI's preflight, so Update itself
+// must refuse an invalid state — and before the first fetch: the final Save
+// would refuse it too, but by then the checkout has already moved.
+func TestUpdateRefusesInvalidStateBeforeTouchingClones(t *testing.T) {
+	author := setupRepo(t, "mytools")
+
+	// New work upstream, waiting to be pulled.
+	writeFile(t, filepath.Join(author, "ext", "alpha", "background.js"), "v2")
+	git(t, author, "add", "-A")
+	git(t, author, "commit", "-m", "v2")
+	git(t, author, "push", "origin", "main")
+
+	// Corrupt the state: a second repository claiming alpha's id.
+	st, err := state.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	alpha := st.Repos["mytools"].Extensions[0]
+	raw := `{"version":4,"repos":{
+	  "mytools":{"url":"u","track":"branch","branch":"main","head":"h",
+	    "extensions":[{"dir":"ext/alpha","name":"Alpha","id":"` + alpha.ID + `","key":"K"}]},
+	  "other":{"url":"u","track":"branch","branch":"main","head":"h",
+	    "extensions":[{"dir":"ext","name":"Copy","id":"` + alpha.ID + `","key":"K"}]}}}`
+	home := os.Getenv("CEPM_HOME")
+	if err := os.WriteFile(filepath.Join(home, "state.json"), []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cloneDir, err := RepoDir("mytools")
+	if err != nil {
+		t.Fatal(err)
+	}
+	headBefore := git(t, cloneDir, "rev-parse", "HEAD")
+	statusBefore := git(t, cloneDir, "status", "--porcelain")
+
+	if _, err := Update(context.Background(), nil, Options{}); err == nil {
+		t.Fatal("Update must refuse an invalid state")
+	}
+	if head := git(t, cloneDir, "rev-parse", "HEAD"); head != headBefore {
+		t.Errorf("the clone's HEAD moved on an invalid state: %s → %s", headBefore, head)
+	}
+	if status := git(t, cloneDir, "status", "--porcelain"); status != statusBefore {
+		t.Errorf("the working tree changed on an invalid state: %q", status)
+	}
+}
+
 func TestUpdateUnknownRepo(t *testing.T) {
 	setupRepo(t, "mytools")
 	results, err := Update(context.Background(), []string{"nope"}, Options{})

@@ -117,7 +117,10 @@ func WithLock(ctx context.Context, fn func() error) error {
 func Update(ctx context.Context, names []string, opts Options) ([]RepoResult, error) {
 	var results []RepoResult
 	err := WithLock(ctx, func() error {
-		st, err := state.Load()
+		// LoadValid, before the first fetch: a Save at the end would refuse
+		// an invalid state too, but by then the clones' checkouts would
+		// already have moved.
+		st, err := state.LoadValid()
 		if err != nil {
 			return err
 		}
