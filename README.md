@@ -3,6 +3,8 @@
 **C**hrome **E**xtension **P**ackage **M**anager — keep git-distributed, unpacked
 Chrome extensions up to date automatically.
 
+*日本語版: [docs/README.ja.md](docs/README.ja.md)*
+
 Many teams distribute internal Chrome extensions as git repositories (the
 Chrome Web Store is not an option for internal tools): everyone clones the
 repo and loads it via *chrome://extensions* → "Load unpacked". The painful
