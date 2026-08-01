@@ -551,6 +551,66 @@ func TestRepairUninstallHonoursKeepFiles(t *testing.T) {
 	}
 }
 
+// failStateSaves makes writing state.json fail while everything else (the
+// lock, loading, deleting clones) keeps working. It has to be an injected
+// fault: EnsureLayout repairs directory permissions on every lock
+// acquisition, so a read-only CEPM_HOME does not survive into the save.
+func failStateSaves(t *testing.T) {
+	t.Helper()
+	t.Cleanup(state.FailSaves())
+}
+
+// A failed save must not take the clone with it: the repository would stay
+// registered with nothing behind it, and re-running could not repair that.
+func TestUninstallKeepsTheCloneWhenTheSaveFails(t *testing.T) {
+	interactive(t)
+	startFakeHost(t, "aaaa")
+	seedRepo(t, "tools", state.Extension{Dir: "ext", Name: "Ext", ID: "aaaa"})
+	dir, err := updaterRepoDir("tools")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	failStateSaves(t)
+
+	// "n" to the Chrome question: whether Chrome untouched-on-failure holds
+	// is TestUninstallDoesNotTouchChromeWhenAborting's business.
+	out, err := run(t, "n\n", "uninstall", "tools")
+	if err == nil {
+		t.Fatalf("uninstall should fail when the state cannot be saved:\n%s", out)
+	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Errorf("the clone must survive a failed save: %v", err)
+	}
+}
+
+// The repair path makes the same promise.
+func TestRepairUninstallKeepsTheCloneWhenTheSaveFails(t *testing.T) {
+	interactive(t)
+	startFakeHost(t)
+	writeRawState(t, `{"version":3,"repos":{
+      "tools":{"url":"u","track":"branch","branch":"main","head":"h",
+               "extensions":[{"dir":"ext\nFORGED","name":"Ext","id":"aaaa"}]}}}`)
+	dir, err := updaterRepoDir("tools")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	failStateSaves(t)
+
+	out, err := run(t, "", "uninstall", "tools")
+	if err == nil {
+		t.Fatalf("repair uninstall should fail when the state cannot be saved:\n%s", out)
+	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Errorf("the clone must survive a failed repair save: %v", err)
+	}
+}
+
 // A repository can hold stale records for ids it already lost track of.
 // Dropping them with the repository would put those Chrome entries beyond
 // cleanup's reach.

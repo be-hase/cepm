@@ -424,6 +424,23 @@ func (s *State) Save() error {
 	return s.save()
 }
 
+// createTemp is a variable so tests can make a save fail (disk full, a
+// permission lost mid-run). Provoking that through the filesystem is not
+// possible: EnsureLayout deliberately repairs directory permissions on every
+// lock acquisition.
+var createTemp = os.CreateTemp
+
+// FailSaves makes every save fail until the returned restore function is
+// called. Test-only; exported because the callers that must not delete things
+// on a failed save live in other packages.
+func FailSaves() (restore func()) {
+	orig := createTemp
+	createTemp = func(dir, pattern string) (*os.File, error) {
+		return nil, fmt.Errorf("injected save failure")
+	}
+	return func() { createTemp = orig }
+}
+
 func (s *State) save() error {
 	path, err := paths.StateFile()
 	if err != nil {
@@ -436,7 +453,7 @@ func (s *State) save() error {
 	if err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".state-*.json")
+	tmp, err := createTemp(filepath.Dir(path), ".state-*.json")
 	if err != nil {
 		return err
 	}
