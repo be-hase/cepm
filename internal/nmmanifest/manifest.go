@@ -21,11 +21,10 @@ type HostManifest struct {
 	AllowedOrigins []string `json:"allowed_origins"`
 }
 
-// New builds the manifest for a host executable at binPath — normally the
-// cepm-owned launcher script (see internal/launcher), which gives Chrome one
-// stable path across upgrades. The manifest format has no args field, so the
-// launcher (or, legacy, the binary itself detecting the chrome-extension://
-// argv) is responsible for entering native-host mode.
+// New builds the manifest for a host executable at binPath — the cepm-owned
+// launcher script (see internal/launcher), which gives Chrome one stable
+// path across upgrades. The manifest format has no args field, so the
+// launcher is responsible for entering native-host mode.
 func New(binPath string) HostManifest {
 	return HostManifest{
 		Name:           helperext.HostName,

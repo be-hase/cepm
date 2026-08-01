@@ -2,17 +2,13 @@
 package cli
 
 import (
-	"context"
 	"fmt"
 	"log/slog"
-	"os"
-	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/be-hase/cepm/internal/launcher"
 	"github.com/be-hase/cepm/internal/logx"
-	"github.com/be-hase/cepm/internal/nmhost"
 	"github.com/be-hase/cepm/internal/state"
 )
 
@@ -95,14 +91,5 @@ func Execute() error {
 	// repair themselves on the next cepm invocation of any kind.
 	launcher.SelfHeal()
 
-	// The launcher execs "cepm native-host", but also handle Chrome invoking
-	// this binary directly (a pre-launcher manifest): the extension origin
-	// arrives as argv[1].
-	if len(os.Args) > 1 && strings.HasPrefix(os.Args[1], "chrome-extension://") {
-		if err := nmhost.CheckOrigin(os.Args[1]); err != nil {
-			return err
-		}
-		return nmhost.Run(context.Background(), Version)
-	}
 	return newRootCmd().Execute()
 }

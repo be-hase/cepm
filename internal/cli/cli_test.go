@@ -308,7 +308,7 @@ func writeRawState(t *testing.T, content string) {
 func TestDuplicateIDsInExistingStateStopChromeSideEffects(t *testing.T) {
 	interactive(t)
 	host := startFakeHost(t, "xxxx")
-	writeRawState(t, `{"version":2,"repos":{
+	writeRawState(t, `{"version":4,"repos":{
       "a":{"url":"u1","track":"branch","branch":"main","head":"h",
            "extensions":[{"dir":"ext","name":"One","id":"xxxx","key":"K"}]},
       "b":{"url":"u2","track":"branch","branch":"main","head":"h",
@@ -351,7 +351,7 @@ func TestDuplicateIDsInExistingStateStopChromeSideEffects(t *testing.T) {
 func TestUninstallRepairsSeveralDuplicateGroups(t *testing.T) {
 	interactive(t)
 	host := startFakeHost(t, "xxxx", "yyyy")
-	writeRawState(t, `{"version":2,"repos":{
+	writeRawState(t, `{"version":4,"repos":{
       "a":{"url":"u","track":"branch","branch":"main","head":"h",
            "extensions":[{"dir":"ext","name":"A","id":"xxxx","key":"K1"}]},
       "b":{"url":"u","track":"branch","branch":"main","head":"h",
@@ -387,7 +387,7 @@ func TestUninstallRepairsSeveralDuplicateGroups(t *testing.T) {
 func TestUninstallRepairGuidesRebindAndKeepsFiles(t *testing.T) {
 	interactive(t)
 	startFakeHost(t, "xxxx")
-	writeRawState(t, `{"version":2,"repos":{
+	writeRawState(t, `{"version":4,"repos":{
       "keepme":{"url":"u","track":"branch","branch":"main","head":"h",
                 "extensions":[{"dir":"ext","name":"Ext","id":"xxxx","key":"K"}]},
       "dropme":{"url":"u","track":"branch","branch":"main","head":"h",
@@ -425,7 +425,7 @@ func TestUninstallRepairGuidesRebindAndKeepsFiles(t *testing.T) {
 func TestUninstallRepairSaysNothingToRebindWhileAmbiguous(t *testing.T) {
 	interactive(t)
 	startFakeHost(t, "xxxx")
-	writeRawState(t, `{"version":2,"repos":{
+	writeRawState(t, `{"version":4,"repos":{
       "a":{"url":"u","track":"branch","branch":"main","head":"h",
            "extensions":[{"dir":"ext","name":"A","id":"xxxx","key":"K"}]},
       "b":{"url":"u","track":"branch","branch":"main","head":"h",
@@ -452,7 +452,7 @@ func TestUninstallRepairSaysNothingToRebindWhileAmbiguous(t *testing.T) {
 func TestUninstallRepairRespectsDisabledSurvivor(t *testing.T) {
 	interactive(t)
 	startFakeHost(t, "xxxx")
-	writeRawState(t, `{"version":2,"repos":{
+	writeRawState(t, `{"version":4,"repos":{
       "keepme":{"url":"u","track":"branch","branch":"main","head":"h",
                 "extensions":[{"dir":"ext","name":"Ext","id":"xxxx","key":"K","disabled":true}]},
       "dropme":{"url":"u","track":"branch","branch":"main","head":"h",
@@ -478,7 +478,7 @@ func TestControlCharactersInLegacyStateAreNeverPrintedRaw(t *testing.T) {
 	// hint — a path built with the directory name and shell-quoted, which is
 	// the route that bypassed escaping.
 	startFakeHost(t)
-	writeRawState(t, `{"version":2,"repos":{
+	writeRawState(t, `{"version":4,"repos":{
       "tools":{"url":"u","track":"branch","branch":"main","head":"h",
                "extensions":[{"dir":"ext\nFORGED[2K","name":"Ext","id":"aaaa"}]}}}`)
 
@@ -508,7 +508,7 @@ func TestControlCharactersInLegacyStateAreNeverPrintedRaw(t *testing.T) {
 func TestUninstallRepairsControlCharacterOnlyState(t *testing.T) {
 	interactive(t)
 	startFakeHost(t)
-	writeRawState(t, `{"version":2,"repos":{
+	writeRawState(t, `{"version":4,"repos":{
       "tools":{"url":"u","track":"branch","branch":"main","head":"h",
                "extensions":[{"dir":"ext\nFORGED","name":"Ext","id":"aaaa"}]}}}`)
 
@@ -533,7 +533,7 @@ func TestUninstallRepairsControlCharacterOnlyState(t *testing.T) {
 func TestRepairUninstallHonoursKeepFiles(t *testing.T) {
 	interactive(t)
 	startFakeHost(t)
-	writeRawState(t, `{"version":3,"repos":{
+	writeRawState(t, `{"version":4,"repos":{
       "tools":{"url":"u","track":"branch","branch":"main","head":"h",
                "extensions":[{"dir":"ext\nFORGED","name":"Ext","id":"aaaa"}]}}}`)
 	dir, err := updaterRepoDir("tools")
@@ -591,7 +591,7 @@ func TestUninstallKeepsTheCloneWhenTheSaveFails(t *testing.T) {
 func TestRepairUninstallKeepsTheCloneWhenTheSaveFails(t *testing.T) {
 	interactive(t)
 	startFakeHost(t)
-	writeRawState(t, `{"version":3,"repos":{
+	writeRawState(t, `{"version":4,"repos":{
       "tools":{"url":"u","track":"branch","branch":"main","head":"h",
                "extensions":[{"dir":"ext\nFORGED","name":"Ext","id":"aaaa"}]}}}`)
 	dir, err := updaterRepoDir("tools")
@@ -618,7 +618,7 @@ func TestRepairUninstallKeepsTheCloneWhenTheSaveFails(t *testing.T) {
 func TestRepairUninstallCarriesStaleEntriesOver(t *testing.T) {
 	interactive(t)
 	startFakeHost(t, "xxxx", "sssss")
-	writeRawState(t, `{"version":3,"repos":{
+	writeRawState(t, `{"version":4,"repos":{
       "a":{"url":"u","track":"branch","branch":"main","head":"h",
            "extensions":[{"dir":"ext","name":"A","id":"xxxx","key":"K"}]},
       "b":{"url":"u","track":"branch","branch":"main","head":"h",
@@ -744,7 +744,7 @@ func TestUninstallOrphansAnExtensionLoadedDuringThePrompt(t *testing.T) {
 func TestRepairUninstallKeepFilesIsNeverAdvisedForDeletion(t *testing.T) {
 	interactive(t)
 	startFakeHost(t)
-	writeRawState(t, `{"version":3,"repos":{
+	writeRawState(t, `{"version":4,"repos":{
       "a":{"url":"u","track":"branch","branch":"main","head":"h",
            "extensions":[{"dir":"ext","name":"A","id":"xxxx","key":"K"}]},
       "b":{"url":"u","track":"branch","branch":"main","head":"h",
@@ -836,7 +836,7 @@ func TestRepairUninstallDoesNotAdviseDeletingAReplacedClone(t *testing.T) {
 func TestUninstallRepairsControlCharactersOneRepoAtATime(t *testing.T) {
 	interactive(t)
 	startFakeHost(t)
-	writeRawState(t, `{"version":2,"repos":{
+	writeRawState(t, `{"version":4,"repos":{
       "a":{"url":"u","track":"branch","branch":"main","head":"h",
            "extensions":[{"dir":"ext\nA","name":"A","id":"aaaa"}]},
       "b":{"url":"u","track":"branch","branch":"main","head":"h",
@@ -869,7 +869,7 @@ func TestUninstallRepairsControlCharactersOneRepoAtATime(t *testing.T) {
 func TestUninstallRepairReportsEveryKeptClone(t *testing.T) {
 	interactive(t)
 	startFakeHost(t, "xxxx")
-	writeRawState(t, `{"version":2,"repos":{
+	writeRawState(t, `{"version":4,"repos":{
       "a":{"url":"u","track":"branch","branch":"main","head":"h",
            "extensions":[{"dir":"ext","name":"A","id":"xxxx","key":"K"}]},
       "b":{"url":"u","track":"branch","branch":"main","head":"h",
@@ -912,7 +912,7 @@ func TestUninstallRepairReportsEveryKeptClone(t *testing.T) {
 func TestUninstallRepairsSameRepoDuplicate(t *testing.T) {
 	interactive(t)
 	startFakeHost(t, "xxxx")
-	writeRawState(t, `{"version":2,"repos":{
+	writeRawState(t, `{"version":4,"repos":{
       "tools":{"url":"u","track":"branch","branch":"main","head":"h",
                "extensions":[{"dir":"one","name":"One","id":"xxxx","key":"K"},
                              {"dir":"two","name":"Two","id":"xxxx","key":"K"}]}}}`)
@@ -944,7 +944,7 @@ func TestUninstallRepairsSameRepoDuplicate(t *testing.T) {
 // the state is read rather than at each place that prints it.
 func TestLegacyNamesAreNeutralisedOnLoad(t *testing.T) {
 	startFakeHost(t)
-	writeRawState(t, `{"version":2,"repos":{
+	writeRawState(t, `{"version":4,"repos":{
       "tools":{"url":"u","track":"branch","branch":"main","head":"h",
                "extensions":[{"dir":"ext","name":"OK\nFORGED","id":"aaaa"}],
                "stale":[{"id":"bbbb","name":"Stale\u001b[2K","reason":"removed"}]}},
@@ -974,7 +974,7 @@ func TestLegacyNamesAreNeutralisedOnLoad(t *testing.T) {
 func TestUninstallRepairsThreeWayCollision(t *testing.T) {
 	interactive(t)
 	startFakeHost(t, "xxxx")
-	writeRawState(t, `{"version":2,"repos":{
+	writeRawState(t, `{"version":4,"repos":{
       "a":{"url":"u","track":"branch","branch":"main","head":"h",
            "extensions":[{"dir":"ext","name":"A","id":"xxxx","key":"K"}]},
       "b":{"url":"u","track":"branch","branch":"main","head":"h",
@@ -1005,7 +1005,7 @@ func TestUninstallRepairsThreeWayCollision(t *testing.T) {
 // characters, and those refs reach the terminal through validation errors.
 func TestControlCharactersInStateCannotForgeOutput(t *testing.T) {
 	startFakeHost(t)
-	writeRawState(t, `{"version":2,"repos":{
+	writeRawState(t, `{"version":4,"repos":{
       "a":{"url":"u","track":"branch","branch":"main","head":"h",
            "extensions":[{"dir":"ext\nFORGED[2K","name":"A","id":"xxxx","key":"K"}]},
       "b":{"url":"u","track":"branch","branch":"main","head":"h",
@@ -1032,7 +1032,7 @@ func TestControlCharactersInStateCannotForgeOutput(t *testing.T) {
 func TestCleanupDropsRecordsForLiveIDs(t *testing.T) {
 	interactive(t)
 	host := startFakeHost(t, "aaaa")
-	writeRawState(t, `{"version":2,"repos":{
+	writeRawState(t, `{"version":4,"repos":{
       "tools":{"url":"u","track":"branch","branch":"main","head":"h",
                "extensions":[{"dir":"ext","name":"Ext","id":"aaaa"}],
                "stale":[{"id":"aaaa","name":"Ext","reason":"removed"}]}},

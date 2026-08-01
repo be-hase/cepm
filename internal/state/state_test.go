@@ -51,11 +51,12 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 // (a crashing host restarts forever and leaves no diagnosis).
 func TestLoadRejectsMalformedState(t *testing.T) {
 	cases := map[string]string{
-		"null repo entry": `{"version":1,"repos":{"broken":null}}`,
-		"traversal name":  `{"version":1,"repos":{"../../evil":{"url":"u"}}}`,
-		"separator name":  `{"version":1,"repos":{"a/b":{"url":"u"}}}`,
-		"invalid json":    `{"version":1,`,
+		"null repo entry": `{"version":4,"repos":{"broken":null}}`,
+		"traversal name":  `{"version":4,"repos":{"../../evil":{"url":"u"}}}`,
+		"separator name":  `{"version":4,"repos":{"a/b":{"url":"u"}}}`,
+		"invalid json":    `{"version":4,`,
 		"future version":  `{"version":99,"repos":{}}`,
+		"older version":   `{"version":3,"repos":{}}`,
 	}
 	for name, content := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -69,36 +70,6 @@ func TestLoadRejectsMalformedState(t *testing.T) {
 				t.Fatalf("Load should reject this state; got %+v", s)
 			}
 		})
-	}
-}
-
-// A version 1 file (no Extension.Key, no Orphans) must load and be rewritten
-// as version 2, so an older binary refuses it instead of silently dropping
-// the new fields on its next write.
-func TestLoadMigratesVersionOne(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("CEPM_HOME", home)
-	v1 := `{"version":1,"repos":{"tools":{"url":"u","track":"branch","branch":"main",
-	  "head":"abc","extensions":[{"dir":"ext","name":"Ext","id":"aaaa"}]}}}`
-	if err := os.WriteFile(filepath.Join(home, "state.json"), []byte(v1), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	s, err := Load()
-	if err != nil {
-		t.Fatalf("a version 1 file must still load: %v", err)
-	}
-	if len(s.Repos["tools"].Extensions) != 1 {
-		t.Fatalf("migration lost data: %+v", s.Repos["tools"])
-	}
-	if err := s.Save(); err != nil {
-		t.Fatal(err)
-	}
-	again, err := Load()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if again.Version != Version {
-		t.Errorf("saved version = %d, want %d", again.Version, Version)
 	}
 }
 
@@ -163,21 +134,12 @@ func TestSaveRefusesDuplicateLiveIDs(t *testing.T) {
 	}
 }
 
-// Every persisted field raises the schema version, because an older binary
-// reads what it knows and drops the rest on its next write. KeptClones is
-// what version 3 protects: losing it would leave repair leftovers untracked.
-func TestKeptClonesSurviveAndRaiseTheVersion(t *testing.T) {
+// Losing a kept clone record would leave repair leftovers untracked, so the
+// entries must survive a save/load cycle intact.
+func TestKeptClonesSurviveARoundTrip(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("CEPM_HOME", home)
-	// A version 2 file, i.e. one written before KeptClones existed.
-	if err := os.WriteFile(filepath.Join(home, "state.json"),
-		[]byte(`{"version":2,"repos":{}}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	s, err := Load()
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := New()
 	s.KeepClone("old-tools", "aabb")
 	if err := s.Save(); err != nil {
 		t.Fatal(err)
@@ -186,9 +148,6 @@ func TestKeptClonesSurviveAndRaiseTheVersion(t *testing.T) {
 	again, err := Load()
 	if err != nil {
 		t.Fatal(err)
-	}
-	if again.Version != Version {
-		t.Errorf("saving KeptClones must raise the schema version, got %d", again.Version)
 	}
 	if len(again.KeptClones) != 1 || again.KeptClones[0].Name != "old-tools" || again.KeptClones[0].Token != "aabb" {
 		t.Errorf("KeptClones did not survive a round trip: %+v", again.KeptClones)

@@ -228,6 +228,11 @@ func Load() (*State, error) {
 	if s.Version > Version {
 		return nil, fmt.Errorf("%s was written by a newer cepm (state version %d); upgrade cepm", path, s.Version)
 	}
+	if s.Version < Version {
+		// No released cepm ever wrote an older version, so nothing is
+		// migrated: only a development build can have left this behind.
+		return nil, fmt.Errorf("%s has state version %d, this cepm expects %d; delete the file and re-run cepm install", path, s.Version, Version)
+	}
 	if s.Repos == nil {
 		s.Repos = map[string]*Repo{}
 	}
@@ -271,16 +276,11 @@ func (s *State) sanitizeNames() {
 	}
 }
 
-// Version is the state schema version this build writes. Every field added
-// here raises it, because an older binary reads what it understands and drops
-// the rest on its next write: version 2 added Extension.Key and
-// State.Orphans (ids would revert to path-derived, and entries only cleanup
-// can remove would vanish), version 3 added State.KeptClones (directories
-// held back during a repair would stop being tracked and never be cleaned
-// up), and version 4 changed KeptClones from absolute paths to validated
-// repository names with an ownership token. No version 3 file was ever
-// written outside development, so there is no migration: an old file simply
-// fails validation.
+// Version is the state schema version this build writes and the only one it
+// reads. Every change to what is persisted raises it: a mismatched binary
+// would silently drop fields it does not know on its next write, so Load
+// refuses anything else instead. There are no migrations — pre-release
+// development builds are the only writers so far.
 const Version = 4
 
 var repoNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
