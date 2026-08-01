@@ -113,35 +113,65 @@ type State struct {
 	// before the user removed them from Chrome). Keeping them here is what
 	// lets "cepm cleanup" still finish the job later.
 	Orphans []StaleExtension `json:"orphans,omitempty"`
-	// KeptClones are repository *names* whose clone was left on disk because
+	// KeptClones are repositories whose clone was left on disk because
 	// Chrome might still be loading it. A repair takes several uninstalls,
 	// and without this the earlier ones would be forgotten and their files
 	// left behind forever. Names, not paths: this file is user-editable, and
 	// whatever ends up here is eventually shown next to "rm -rf" — a name
 	// passes the same validation as a registered repository and can only
 	// ever resolve to one directory under ~/.cepm/repos.
-	KeptClones []string `json:"keptClones,omitempty"`
+	KeptClones []KeptClone `json:"keptClones,omitempty"`
 }
 
-// KeepClone records a repository name whose clone stays on disk, ignoring
-// duplicates.
-func (s *State) KeepClone(name string) {
-	for _, n := range s.KeptClones {
-		if n == name {
+// KeptClone identifies one clone held back during a repair.
+type KeptClone struct {
+	Name string `json:"name"`
+	// Token matches a marker file written into the clone when it was kept.
+	// The name says where the clone was; the token proves the directory
+	// there is still that clone — and not something the user has since put
+	// in its place, which no deletion advice may point at. Empty means
+	// unprovable (the marker could not be written, or the record predates
+	// tokens): such a clone is reported, never fed to rm.
+	Token string `json:"token,omitempty"`
+}
+
+// UnmarshalJSON also accepts the bare-string form version 3 files used.
+func (k *KeptClone) UnmarshalJSON(b []byte) error {
+	if len(b) > 0 && b[0] == '"' {
+		return json.Unmarshal(b, &k.Name)
+	}
+	type plain KeptClone
+	var p plain
+	if err := json.Unmarshal(b, &p); err != nil {
+		return err
+	}
+	*k = KeptClone(p)
+	return nil
+}
+
+// KeepClone records a repository whose clone stays on disk, ignoring
+// duplicates. A name that would not survive Load is refused outright:
+// recording it would produce a state file this very cepm then rejects.
+func (s *State) KeepClone(name, token string) {
+	if !ValidRepoName(name) {
+		return
+	}
+	for _, k := range s.KeptClones {
+		if k.Name == name {
 			return
 		}
 	}
-	s.KeptClones = append(s.KeptClones, name)
+	s.KeptClones = append(s.KeptClones, KeptClone{Name: name, Token: token})
 }
 
-// TakeKeptClones returns the kept names that are still unregistered, and
-// forgets them all. A name that was registered again refers to a live clone
-// now, so advising its deletion would point at the wrong thing.
-func (s *State) TakeKeptClones() []string {
-	var out []string
-	for _, n := range s.KeptClones {
-		if _, live := s.Repos[n]; !live {
-			out = append(out, n)
+// TakeKeptClones returns the kept clones whose name is still unregistered,
+// and forgets them all. A name that was registered again refers to a live
+// clone now, so advising its deletion would point at the wrong thing.
+func (s *State) TakeKeptClones() []KeptClone {
+	var out []KeptClone
+	for _, k := range s.KeptClones {
+		if _, live := s.Repos[k.Name]; !live {
+			out = append(out, k)
 		}
 	}
 	s.KeptClones = nil
@@ -227,13 +257,45 @@ func Load() (*State, error) {
 			return nil, fmt.Errorf("%s: invalid repository name %q", path, name)
 		}
 	}
-	for _, n := range s.KeptClones {
-		if !ValidRepoName(n) {
-			return nil, fmt.Errorf("%s: invalid kept clone name %q (edit or delete the file)", path, term.Safe(n))
+	if s.Version < 4 {
+		if err := s.migrateKeptClones(path); err != nil {
+			return nil, err
+		}
+	}
+	for _, k := range s.KeptClones {
+		if !ValidRepoName(k.Name) {
+			return nil, fmt.Errorf("%s: invalid kept clone name %q (edit or delete the file)", path, term.Safe(k.Name))
 		}
 	}
 	s.sanitizeNames()
 	return &s, nil
+}
+
+// migrateKeptClones converts what version 3 files stored — the clone's
+// absolute path — to the repository name version 4 uses. Only a path lying
+// directly under the repos directory can ever have been written by cepm;
+// anything else is hand-edited, and refusing loudly beats guessing at what
+// to delete. Tokens did not exist yet, so migrated entries stay unproven:
+// they are pointed out, never fed to rm.
+func (s *State) migrateKeptClones(path string) error {
+	if len(s.KeptClones) == 0 {
+		return nil
+	}
+	reposDir, err := paths.ReposDir()
+	if err != nil {
+		return err
+	}
+	for i, k := range s.KeptClones {
+		if ValidRepoName(k.Name) {
+			continue
+		}
+		rel, relErr := filepath.Rel(reposDir, k.Name)
+		if relErr != nil || !ValidRepoName(rel) {
+			return fmt.Errorf("%s: invalid kept clone %q (edit or delete the file)", path, term.Safe(k.Name))
+		}
+		s.KeptClones[i] = KeptClone{Name: rel}
+	}
+	return nil
 }
 
 // sanitizeNames strips what a display name must never carry. Names are
@@ -261,8 +323,10 @@ func (s *State) sanitizeNames() {
 // State.Orphans (ids would revert to path-derived, and entries only cleanup
 // can remove would vanish), version 3 added State.KeptClones (directories
 // held back during a repair would stop being tracked and never be cleaned
-// up).
-const Version = 3
+// up), and version 4 changed KeptClones from absolute paths to validated
+// repository names with an ownership token (Load migrates the version 3
+// form).
+const Version = 4
 
 var repoNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 
@@ -315,10 +379,10 @@ func (s *State) normalize() {
 	}
 	// The same rule for kept clones: a name registered again is a live clone,
 	// and a record recommending its deletion must not outlive that.
-	var clones []string
-	for _, n := range s.KeptClones {
-		if _, live := s.Repos[n]; !live {
-			clones = append(clones, n)
+	var clones []KeptClone
+	for _, k := range s.KeptClones {
+		if _, live := s.Repos[k.Name]; !live {
+			clones = append(clones, k)
 		}
 	}
 	s.KeptClones = clones
@@ -434,6 +498,13 @@ func (s *State) Validate() error {
 				return fmt.Errorf("%s has control characters in its directory name; "+
 					"uninstall %s and re-install it", ExtRef{Repo: name, Dir: e.Dir}, term.Quote(name))
 			}
+		}
+	}
+	// KeepClone refuses these, so this only trips on a hand-built value —
+	// but saving one would produce a file the next Load rejects.
+	for _, k := range s.KeptClones {
+		if !ValidRepoName(k.Name) {
+			return fmt.Errorf("invalid kept clone name %q", term.Safe(k.Name))
 		}
 	}
 	return nil

@@ -19,6 +19,7 @@ import (
 	"github.com/be-hase/cepm/internal/nmmanifest"
 	"github.com/be-hase/cepm/internal/paths"
 	"github.com/be-hase/cepm/internal/state"
+	"github.com/be-hase/cepm/internal/term"
 	"github.com/be-hase/cepm/internal/updater"
 )
 
@@ -772,6 +773,60 @@ func TestRepairUninstallKeepFilesIsNeverAdvisedForDeletion(t *testing.T) {
 	}
 	if _, err := os.Stat(dirA); err != nil {
 		t.Errorf("the clone should still be on disk: %v", err)
+	}
+}
+
+// A kept clone the user deleted and replaced with their own data must never
+// be advised for rm -rf: the name still resolves to the same path, but the
+// contents are not cepm's any more. The marker written at keep time is what
+// tells the two apart.
+func TestRepairUninstallDoesNotAdviseDeletingAReplacedClone(t *testing.T) {
+	interactive(t)
+	startFakeHost(t)
+	// Three owners: the first two uninstalls each keep their clone, and only
+	// the second one resolves the collision and prints the advice.
+	writeRawState(t, `{"version":4,"repos":{
+      "a":{"url":"u","track":"branch","branch":"main","head":"h",
+           "extensions":[{"dir":"ext","name":"A","id":"xxxx","key":"K"}]},
+      "b":{"url":"u","track":"branch","branch":"main","head":"h",
+           "extensions":[{"dir":"ext","name":"B","id":"xxxx","key":"K"}]},
+      "c":{"url":"u","track":"branch","branch":"main","head":"h",
+           "extensions":[{"dir":"ext","name":"C","id":"xxxx","key":"K"}]}}}`)
+	dirA, _ := updaterRepoDir("a")
+	dirB, _ := updaterRepoDir("b")
+	for _, d := range []string{dirA, dirB} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if out, err := run(t, "", "uninstall", "a"); err != nil {
+		t.Fatalf("first uninstall: %v\n%s", err, out)
+	}
+	// The user deletes the kept clone and puts their own data at its path.
+	if err := os.RemoveAll(dirA); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dirA, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dirA, "notes.txt"), []byte("mine"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := run(t, "", "uninstall", "b")
+	if err != nil {
+		t.Fatalf("second uninstall: %v\n%s", err, out)
+	}
+	if strings.Contains(out, "rm -rf "+term.Quote(dirA)) {
+		t.Errorf("the replaced clone must not be advised for deletion:\n%s", out)
+	}
+	if !strings.Contains(out, "review it manually") {
+		t.Errorf("the replaced clone should be pointed out for manual review:\n%s", out)
+	}
+	// The clone kept just now, marker intact, is still proven.
+	if !strings.Contains(out, "rm -rf "+term.Quote(dirB)) {
+		t.Errorf("the untouched kept clone should still be advised:\n%s", out)
 	}
 }
 

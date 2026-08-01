@@ -178,7 +178,7 @@ func TestKeptClonesSurviveAndRaiseTheVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s.KeepClone("old-tools")
+	s.KeepClone("old-tools", "aabb")
 	if err := s.Save(); err != nil {
 		t.Fatal(err)
 	}
@@ -187,14 +187,48 @@ func TestKeptClonesSurviveAndRaiseTheVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if again.Version < 3 {
+	if again.Version != Version {
 		t.Errorf("saving KeptClones must raise the schema version, got %d", again.Version)
 	}
-	if len(again.KeptClones) != 1 || again.KeptClones[0] != "old-tools" {
+	if len(again.KeptClones) != 1 || again.KeptClones[0].Name != "old-tools" || again.KeptClones[0].Token != "aabb" {
 		t.Errorf("KeptClones did not survive a round trip: %+v", again.KeptClones)
 	}
 	if got := again.TakeKeptClones(); len(got) != 1 || again.KeptClones != nil {
 		t.Errorf("TakeKeptClones should hand them over once: %+v / %+v", got, again.KeptClones)
+	}
+}
+
+// Version 3 stored kept clones as absolute paths. A user who ran a repair on
+// that version must not be locked out of every command after upgrading, so
+// paths directly under the repos directory migrate to their name — without a
+// token, because nothing proves the directory's contents any more.
+func TestLoadMigratesVersionThreeKeptClonePaths(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("CEPM_HOME", home)
+	raw := `{"version":3,"repos":{},"keptClones":[` +
+		strconv.Quote(filepath.Join(home, "repos", "tools")) + `]}`
+	if err := os.WriteFile(filepath.Join(home, "state.json"), []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Load()
+	if err != nil {
+		t.Fatalf("a version 3 kept clone path must migrate, not brick the state: %v", err)
+	}
+	if len(s.KeptClones) != 1 || s.KeptClones[0].Name != "tools" || s.KeptClones[0].Token != "" {
+		t.Fatalf("migrated entry should be the unproven name, got %+v", s.KeptClones)
+	}
+	if err := s.Save(); err != nil {
+		t.Fatal(err)
+	}
+	again, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.Version != 4 {
+		t.Errorf("migration should be persisted as version 4, got %d", again.Version)
+	}
+	if len(again.KeptClones) != 1 || again.KeptClones[0].Name != "tools" {
+		t.Errorf("migrated entry lost on re-save: %+v", again.KeptClones)
 	}
 }
 
@@ -218,12 +252,12 @@ func TestKeptClonesAreValidatedAndDroppedWhenLiveAgain(t *testing.T) {
 
 	// Re-registered name: both Save and TakeKeptClones must drop it.
 	s := New()
-	s.KeepClone("tools")
+	s.KeepClone("tools", "tok")
 	s.Repos["tools"] = &Repo{URL: "u", Track: TrackBranch, Branch: "main"}
 	if got := s.TakeKeptClones(); len(got) != 0 {
 		t.Errorf("a re-registered name must not be handed out for deletion: %v", got)
 	}
-	s.KeepClone("tools")
+	s.KeepClone("tools", "tok")
 	if err := s.Save(); err != nil {
 		t.Fatal(err)
 	}
@@ -233,6 +267,18 @@ func TestKeptClonesAreValidatedAndDroppedWhenLiveAgain(t *testing.T) {
 	}
 	if len(saved.KeptClones) != 0 {
 		t.Errorf("Save should drop kept names that are registered again: %v", saved.KeptClones)
+	}
+
+	// A name Load would refuse must be refused on the way in as well —
+	// recording it would build a state file this very cepm then rejects.
+	s2 := New()
+	s2.KeepClone("../evil", "tok")
+	if len(s2.KeptClones) != 0 {
+		t.Errorf("KeepClone must refuse an invalid name: %+v", s2.KeptClones)
+	}
+	s2.KeptClones = []KeptClone{{Name: "../evil"}} // bypassing KeepClone
+	if err := s2.Save(); err == nil {
+		t.Error("Save must refuse a kept clone name that would not load back")
 	}
 }
 

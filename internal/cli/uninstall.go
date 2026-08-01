@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -211,7 +213,8 @@ func repairUninstall(cmd *cobra.Command, name, dir string, keepFiles bool) error
 	var (
 		rebind     []rebindTarget
 		kept       bool
-		resolved   []string
+		resolved   []string // kept clone directories proven safe to advise deleting
+		unproven   []string // kept clone directories whose contents cepm cannot vouch for
 		extensions int
 	)
 	err := updater.WithLock(cmd.Context(), func() error {
@@ -272,13 +275,26 @@ func repairUninstall(cmd *cobra.Command, name, dir string, keepFiles bool) error
 		if len(rebind) > 0 {
 			kept = true
 			if !keepFiles {
-				st.KeepClone(name)
+				st.KeepClone(name, writeKeepMarker(dir))
 			}
 		}
 		if st.Validate() == nil {
 			// Fixed: the clones kept along the way can go once the user has
-			// re-pointed Chrome, so hand them back to be reported.
-			resolved = st.TakeKeptClones()
+			// re-pointed Chrome, so hand them back to be reported — but only
+			// those still proven to be the clone that was kept. The user may
+			// have deleted one and put something of their own at its path,
+			// and no deletion advice may point at that.
+			for _, kc := range st.TakeKeptClones() {
+				d, err := updater.RepoDir(kc.Name)
+				if err != nil {
+					continue
+				}
+				if provenKeptClone(st, kc.Token, d) {
+					resolved = append(resolved, d)
+				} else {
+					unproven = append(unproven, d)
+				}
+			}
 			return st.Save()
 		}
 		return st.SaveRepair(before)
@@ -313,22 +329,63 @@ func repairUninstall(cmd *cobra.Command, name, dir string, keepFiles bool) error
 				rb.ID, rb.Name, term.Quote(rb.AbsDir))
 		}
 	}
-	if len(resolved) > 0 && allResolved(rebind) {
-		// resolved holds validated repository names; the directory each one
-		// maps to is computed here, never read back from the state file.
-		var dirs []string
-		for _, n := range resolved {
-			if d, err := updater.RepoDir(n); err == nil {
-				dirs = append(dirs, d)
-			}
+	if (len(resolved) > 0 || len(unproven) > 0) && allResolved(rebind) {
+		fmt.Fprintf(out, "\n✔ No id is contested any more. Once Chrome is pointed at the right\n")
+		fmt.Fprintf(out, "  directories, the leftover clones can go:\n")
+		for _, d := range resolved {
+			fmt.Fprintf(out, "    rm -rf %s\n", term.Quote(d))
 		}
-		if len(dirs) > 0 {
-			fmt.Fprintf(out, "\n✔ No id is contested any more. Once Chrome is pointed at the right\n")
-			fmt.Fprintf(out, "  directories, these leftover clones can go:\n")
-			for _, d := range dirs {
-				fmt.Fprintf(out, "    rm -rf %s\n", term.Quote(d))
-			}
+		for _, d := range unproven {
+			fmt.Fprintf(out, "  • %s was kept during an earlier repair, but its contents\n", term.Quote(d))
+			fmt.Fprintf(out, "    are no longer the clone cepm left there — review it manually before deleting.\n")
 		}
 	}
 	return nil
+}
+
+// keepMarkerName is the marker file a kept clone carries; its content is the
+// token recorded in the state.
+const keepMarkerName = ".cepm-kept"
+
+// writeKeepMarker marks dir as a clone cepm kept and returns the token that
+// proves it, or "" when no proof could be established.
+func writeKeepMarker(dir string) string {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return ""
+	}
+	token := hex.EncodeToString(b)
+	if err := os.WriteFile(filepath.Join(dir, keepMarkerName), []byte(token), 0o600); err != nil {
+		return ""
+	}
+	return token
+}
+
+// provenKeptClone reports whether dir still is the clone that was kept: the
+// marker from keep time must match, the path must be a real directory (not a
+// symlink to elsewhere), and it must not be a live repository's directory —
+// which the exact-name check in TakeKeptClones cannot rule out on a
+// case-insensitive filesystem ("Tools" and "tools" are one directory there).
+func provenKeptClone(st *state.State, token, dir string) bool {
+	if token == "" {
+		return false
+	}
+	info, err := os.Lstat(dir)
+	if err != nil || !info.IsDir() {
+		return false
+	}
+	data, err := os.ReadFile(filepath.Join(dir, keepMarkerName))
+	if err != nil || string(data) != token {
+		return false
+	}
+	for other := range st.Repos {
+		od, err := updater.RepoDir(other)
+		if err != nil {
+			continue
+		}
+		if oi, err := os.Stat(od); err == nil && os.SameFile(info, oi) {
+			return false
+		}
+	}
+	return true
 }
