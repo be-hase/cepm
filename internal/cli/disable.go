@@ -82,10 +82,11 @@ remove it from Chrome too (Chrome shows its own confirmation dialog).`,
 // askChromeRemoval asks which of the given extensions the user wants removed
 // from Chrome. It only asks — nothing is changed — so a caller can still
 // abandon the whole operation after finding the world moved underneath it.
-// The returned set holds ids already absent from Chrome as "gone".
-func askChromeRemoval(cmd *cobra.Command, exts []state.Extension) (approved, gone map[string]bool) {
+// What it learns about Chrome is used only to decide what to ask; whether an
+// extension is actually present is re-checked at removal time.
+func askChromeRemoval(cmd *cobra.Command, exts []state.Extension) (approved map[string]bool) {
 	out := cmd.OutOrStdout()
-	approved, gone = map[string]bool{}, map[string]bool{}
+	approved = map[string]bool{}
 	ctx, cancel := context.WithTimeout(cmd.Context(), 5*time.Second)
 	loaded, err := ipc.ListChrome(ctx)
 	cancel()
@@ -96,7 +97,7 @@ func askChromeRemoval(cmd *cobra.Command, exts []state.Extension) (approved, gon
 			fmt.Fprintf(out, "  Chrome is not reachable; %d entr%s may still be loaded there.\n",
 				len(exts), pluralY(len(exts)))
 		}
-		return approved, gone
+		return approved
 	}
 	loadedSet := map[string]bool{}
 	for _, e := range loaded {
@@ -104,8 +105,7 @@ func askChromeRemoval(cmd *cobra.Command, exts []state.Extension) (approved, gon
 	}
 	for _, e := range exts {
 		if !loadedSet[e.ID] {
-			gone[e.ID] = true
-			continue
+			continue // nothing to ask about
 		}
 		if !assist.IsTTY() {
 			fmt.Fprintf(out, "  %q is still loaded in Chrome — remove it there if unwanted.\n", e.Name)
@@ -115,28 +115,46 @@ func askChromeRemoval(cmd *cobra.Command, exts []state.Extension) (approved, gon
 			approved[e.ID] = true
 		}
 	}
-	return approved, gone
+	return approved
 }
 
-// performChromeRemoval carries out the removals the user approved, adding
-// what is now absent to gone. Chrome shows its own confirmation for each.
-func performChromeRemoval(cmd *cobra.Command, exts []state.Extension, approved, gone map[string]bool) {
+// performChromeRemoval carries out the removals the user approved and reports
+// which ids are absent from Chrome afterwards. Chrome shows its own
+// confirmation for each. Presence is judged fresh here, not at the prompt:
+// the answer may be minutes old, and an extension absent then can have been
+// loaded since (a cepm enable in another terminal) — treating it as still
+// gone would delete its files while Chrome keeps loading them, with no
+// orphan record for cleanup to find. When Chrome cannot be listed nothing is
+// presumed absent, so every id stays covered by a record.
+func performChromeRemoval(cmd *cobra.Command, exts []state.Extension, approved map[string]bool) (gone map[string]bool) {
+	gone = map[string]bool{}
+	ctx, cancel := context.WithTimeout(cmd.Context(), 5*time.Second)
+	loaded, err := ipc.ListChrome(ctx)
+	cancel()
+	loadedNow := map[string]bool{}
+	for _, e := range loaded {
+		loadedNow[e.ID] = true
+	}
 	for _, e := range exts {
-		if !approved[e.ID] || gone[e.ID] {
+		if err == nil && !loadedNow[e.ID] {
+			gone[e.ID] = true
+			continue
+		}
+		if !approved[e.ID] {
 			continue
 		}
 		if uninstallViaChrome(cmd.Context(), cmd, e.ID, e.Name) {
 			gone[e.ID] = true
 		}
 	}
+	return gone
 }
 
 // offerChromeRemoval asks and then acts, for callers that have already
 // committed their state change.
 func offerChromeRemoval(cmd *cobra.Command, exts []state.Extension) map[string]bool {
-	approved, gone := askChromeRemoval(cmd, exts)
-	performChromeRemoval(cmd, exts, approved, gone)
-	return gone
+	approved := askChromeRemoval(cmd, exts)
+	return performChromeRemoval(cmd, exts, approved)
 }
 
 // uninstallViaChrome triggers Chrome's uninstall confirmation dialog for the

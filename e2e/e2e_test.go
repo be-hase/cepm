@@ -4,6 +4,8 @@ package e2e
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -198,8 +200,43 @@ func TestE2E(t *testing.T) {
 // ---- helpers ----
 
 // workRoot is the one directory this suite creates anything under, so a
-// sweep never has to guess whether something in /tmp belongs to it.
-const workRoot = "/tmp/cepm-e2e-work"
+// sweep never has to guess whether something in /tmp belongs to it. The uid
+// suffix keeps users on a shared machine out of each other's roots: pid
+// markers only prove ownership among runs of the same user.
+var workRoot = "/tmp/cepm-e2e-work-" + strconv.Itoa(os.Getuid())
+
+// ensureWorkRoot creates or vets the work root. It is a fixed name in a
+// world-writable directory, so nothing about it can be assumed: anyone may
+// have created it first or planted a symlink there. Refusing is the only
+// safe answer to anything but a directory this user owns.
+func ensureWorkRoot(root string) error {
+	info, err := os.Lstat(root)
+	if os.IsNotExist(err) {
+		if err := os.Mkdir(root, 0o700); err != nil {
+			return err
+		}
+		info, err = os.Lstat(root)
+	}
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%s is a symlink; refusing to work under it", root)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("%s is not a directory", root)
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || int(st.Uid) != os.Getuid() {
+		return fmt.Errorf("%s is not owned by this user; refusing to work under it", root)
+	}
+	if info.Mode().Perm() != 0o700 {
+		if err := os.Chmod(root, 0o700); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
 // markerName holds the pid of the run that created a work directory. A
 // directory is only removed when this file is present and readable and that
@@ -210,7 +247,7 @@ const markerName = ".cepm-e2e-owner"
 // newWorkDir creates a work directory owned by this process.
 func newWorkDir(t *testing.T) string {
 	t.Helper()
-	if err := os.MkdirAll(workRoot, 0o755); err != nil {
+	if err := ensureWorkRoot(workRoot); err != nil {
 		t.Fatal(err)
 	}
 	dir, err := os.MkdirTemp(workRoot, "run-")
@@ -235,6 +272,10 @@ func newWorkDir(t *testing.T) string {
 // owns is reported, not deleted.
 func sweepStaleWorkDirs(t *testing.T) {
 	t.Helper()
+	if err := ensureWorkRoot(workRoot); err != nil {
+		t.Logf("not sweeping: %v", err)
+		return
+	}
 	entries, err := os.ReadDir(workRoot)
 	if err != nil {
 		return // nothing here yet
@@ -262,28 +303,35 @@ func sweepStaleWorkDirs(t *testing.T) {
 	}
 }
 
-// processAlive reports whether a pid still exists.
+// processAlive reports whether a pid still exists. EPERM answers the
+// question asked — the process exists, this user just may not signal it —
+// so only a clean ESRCH-style failure counts as dead.
 func processAlive(pid int) bool {
 	p, err := os.FindProcess(pid)
 	if err != nil {
 		return false
 	}
-	return p.Signal(syscall.Signal(0)) == nil
+	err = p.Signal(syscall.Signal(0))
+	return err == nil || errors.Is(err, syscall.EPERM)
 }
 
 // realGoEnv reports the caller's build caches. Call it before HOME is
-// replaced.
+// replaced. JSON output, because the paths may contain spaces (a home
+// directory with a space in it is perfectly legal).
 func realGoEnv(t *testing.T) []string {
 	t.Helper()
-	out, err := exec.Command("go", "env", "GOMODCACHE", "GOCACHE").Output()
+	out, err := exec.Command("go", "env", "-json", "GOMODCACHE", "GOCACHE").Output()
 	if err != nil {
 		t.Fatalf("go env: %v", err)
 	}
-	lines := strings.Fields(string(out))
-	if len(lines) != 2 {
-		t.Fatalf("go env returned %q", out)
+	var env struct {
+		GoModCache string `json:"GOMODCACHE"`
+		GoCache    string `json:"GOCACHE"`
 	}
-	return []string{"GOMODCACHE=" + lines[0], "GOCACHE=" + lines[1]}
+	if err := json.Unmarshal(out, &env); err != nil || env.GoModCache == "" || env.GoCache == "" {
+		t.Fatalf("go env -json returned %q: %v", out, err)
+	}
+	return []string{"GOMODCACHE=" + env.GoModCache, "GOCACHE=" + env.GoCache}
 }
 
 func buildCepm(t *testing.T, home string, goEnv []string) string {

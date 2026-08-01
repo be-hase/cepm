@@ -145,7 +145,7 @@ func newUninstallCmd() *cobra.Command {
 				candidates = append(candidates, state.Extension{Name: s.Name, ID: s.ID})
 			}
 			before := snapshot(repo)
-			approved, gone := askChromeRemoval(cmd, candidates)
+			approved := askChromeRemoval(cmd, candidates)
 
 			var orphans []state.StaleExtension
 			err = updater.WithLock(cmd.Context(), func() error {
@@ -166,7 +166,7 @@ func newUninstallCmd() *cobra.Command {
 				}
 				// Removing from Chrome happens here, where the state cannot
 				// change under it — the same trade cleanup makes.
-				performChromeRemoval(cmd, candidates, approved, gone)
+				gone := performChromeRemoval(cmd, candidates, approved)
 				orphans = nil
 				for _, e := range candidates {
 					if !gone[e.ID] {
@@ -265,10 +265,15 @@ func repairUninstall(cmd *cobra.Command, name, dir string, keepFiles bool) error
 		delete(st.Repos, name)
 
 		// Keep the clone only while Chrome might be loading it, which is
-		// exactly when another registration shares one of its ids.
+		// exactly when another registration shares one of its ids. With
+		// --keep-files it stays on disk too, but off the record: the user
+		// asked for these files, so no later repair may suggest deleting
+		// them.
 		if len(rebind) > 0 {
-			st.KeepClone(dir)
 			kept = true
+			if !keepFiles {
+				st.KeepClone(name)
+			}
 		}
 		if st.Validate() == nil {
 			// Fixed: the clones kept along the way can go once the user has
@@ -309,10 +314,20 @@ func repairUninstall(cmd *cobra.Command, name, dir string, keepFiles bool) error
 		}
 	}
 	if len(resolved) > 0 && allResolved(rebind) {
-		fmt.Fprintf(out, "\n✔ No id is contested any more. Once Chrome is pointed at the right\n")
-		fmt.Fprintf(out, "  directories, these leftover clones can go:\n")
-		for _, d := range resolved {
-			fmt.Fprintf(out, "    rm -rf %s\n", term.Quote(d))
+		// resolved holds validated repository names; the directory each one
+		// maps to is computed here, never read back from the state file.
+		var dirs []string
+		for _, n := range resolved {
+			if d, err := updater.RepoDir(n); err == nil {
+				dirs = append(dirs, d)
+			}
+		}
+		if len(dirs) > 0 {
+			fmt.Fprintf(out, "\n✔ No id is contested any more. Once Chrome is pointed at the right\n")
+			fmt.Fprintf(out, "  directories, these leftover clones can go:\n")
+			for _, d := range dirs {
+				fmt.Fprintf(out, "    rm -rf %s\n", term.Quote(d))
+			}
 		}
 	}
 	return nil

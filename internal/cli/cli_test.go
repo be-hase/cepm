@@ -686,6 +686,95 @@ func TestUninstallDoesNotTouchChromeWhenAborting(t *testing.T) {
 	}
 }
 
+// "Absent from Chrome" judged at the prompt must not be trusted at removal
+// time: an extension loaded meanwhile (cepm enable in another terminal)
+// would otherwise lose both its files and its orphan record — Chrome keeps
+// running it, and cleanup can never find it again.
+func TestUninstallOrphansAnExtensionLoadedDuringThePrompt(t *testing.T) {
+	interactive(t)
+	// "aaaa" is registered but not loaded; "bbbb" is loaded, so it triggers
+	// the prompt that gives the concurrent load a window.
+	host := startFakeHost(t, "bbbb")
+	seedRepo(t, "tools",
+		state.Extension{Dir: "ext", Name: "Ext", ID: "aaaa"},
+		state.Extension{Dir: "other", Name: "Other", ID: "bbbb"})
+
+	loadedOnce := false
+	assist.IsTTY = func() bool {
+		if !loadedOnce {
+			loadedOnce = true
+			host.mu.Lock()
+			host.loaded["aaaa"] = true
+			host.mu.Unlock()
+		}
+		return true
+	}
+
+	// "n": keep bbbb in Chrome, so both ids must end up as orphans.
+	out, err := run(t, "n\n", "uninstall", "tools")
+	if err != nil {
+		t.Fatalf("uninstall: %v\n%s", err, out)
+	}
+	st, err := state.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := map[string]bool{}
+	for _, o := range st.Orphans {
+		ids[o.ID] = true
+	}
+	if !ids["aaaa"] {
+		t.Errorf("the extension loaded during the prompt must get an orphan record, got %+v", st.Orphans)
+	}
+	if !ids["bbbb"] {
+		t.Errorf("the declined extension must keep its orphan record, got %+v", st.Orphans)
+	}
+	host.mu.Lock()
+	defer host.mu.Unlock()
+	if !host.loaded["aaaa"] {
+		t.Error("nothing was approved, so Chrome must still have the extension")
+	}
+}
+
+// --keep-files on a duplicate-id repair: the clone stays, and it must also
+// stay out of the pending-cleanup list — otherwise the collision's
+// resolution ends with cepm recommending rm -rf of files the user asked to
+// keep.
+func TestRepairUninstallKeepFilesIsNeverAdvisedForDeletion(t *testing.T) {
+	interactive(t)
+	startFakeHost(t)
+	writeRawState(t, `{"version":3,"repos":{
+      "a":{"url":"u","track":"branch","branch":"main","head":"h",
+           "extensions":[{"dir":"ext","name":"A","id":"xxxx","key":"K"}]},
+      "b":{"url":"u","track":"branch","branch":"main","head":"h",
+           "extensions":[{"dir":"ext","name":"B","id":"xxxx","key":"K"}]}}}`)
+	dirA, err := updaterRepoDir("a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dirA, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := run(t, "", "uninstall", "--keep-files", "a")
+	if err != nil {
+		t.Fatalf("uninstall: %v\n%s", err, out)
+	}
+	if strings.Contains(out, "rm -rf") {
+		t.Errorf("--keep-files must not come with deletion advice:\n%s", out)
+	}
+	st, err := state.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(st.KeptClones) != 0 {
+		t.Errorf("a clone kept on the user's request is not pending cleanup: %v", st.KeptClones)
+	}
+	if _, err := os.Stat(dirA); err != nil {
+		t.Errorf("the clone should still be on disk: %v", err)
+	}
+}
+
 // Two such repositories mean the first removal leaves the state still
 // invalid, so it goes through the repair save — which has to recognise a
 // directory name as a defect, not only a duplicated id.

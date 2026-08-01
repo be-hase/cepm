@@ -113,26 +113,37 @@ type State struct {
 	// before the user removed them from Chrome). Keeping them here is what
 	// lets "cepm cleanup" still finish the job later.
 	Orphans []StaleExtension `json:"orphans,omitempty"`
-	// KeptClones are directories of unregistered repositories that were left
-	// on disk because Chrome might still be loading them. A repair takes
-	// several uninstalls, and without this the earlier ones would be
-	// forgotten and their files left behind forever.
+	// KeptClones are repository *names* whose clone was left on disk because
+	// Chrome might still be loading it. A repair takes several uninstalls,
+	// and without this the earlier ones would be forgotten and their files
+	// left behind forever. Names, not paths: this file is user-editable, and
+	// whatever ends up here is eventually shown next to "rm -rf" — a name
+	// passes the same validation as a registered repository and can only
+	// ever resolve to one directory under ~/.cepm/repos.
 	KeptClones []string `json:"keptClones,omitempty"`
 }
 
-// KeepClone records a clone directory left on disk, ignoring duplicates.
-func (s *State) KeepClone(dir string) {
-	for _, d := range s.KeptClones {
-		if d == dir {
+// KeepClone records a repository name whose clone stays on disk, ignoring
+// duplicates.
+func (s *State) KeepClone(name string) {
+	for _, n := range s.KeptClones {
+		if n == name {
 			return
 		}
 	}
-	s.KeptClones = append(s.KeptClones, dir)
+	s.KeptClones = append(s.KeptClones, name)
 }
 
-// TakeKeptClones returns the recorded directories and forgets them.
+// TakeKeptClones returns the kept names that are still unregistered, and
+// forgets them all. A name that was registered again refers to a live clone
+// now, so advising its deletion would point at the wrong thing.
 func (s *State) TakeKeptClones() []string {
-	out := s.KeptClones
+	var out []string
+	for _, n := range s.KeptClones {
+		if _, live := s.Repos[n]; !live {
+			out = append(out, n)
+		}
+	}
 	s.KeptClones = nil
 	return out
 }
@@ -216,6 +227,11 @@ func Load() (*State, error) {
 			return nil, fmt.Errorf("%s: invalid repository name %q", path, name)
 		}
 	}
+	for _, n := range s.KeptClones {
+		if !ValidRepoName(n) {
+			return nil, fmt.Errorf("%s: invalid kept clone name %q (edit or delete the file)", path, term.Safe(n))
+		}
+	}
 	s.sanitizeNames()
 	return &s, nil
 }
@@ -297,6 +313,15 @@ func (s *State) normalize() {
 	if len(s.Orphans) == 0 {
 		s.Orphans = nil
 	}
+	// The same rule for kept clones: a name registered again is a live clone,
+	// and a record recommending its deletion must not outlive that.
+	var clones []string
+	for _, n := range s.KeptClones {
+		if _, live := s.Repos[n]; !live {
+			clones = append(clones, n)
+		}
+	}
+	s.KeptClones = clones
 }
 
 // ExtRef names one registered extension: the repository and the directory

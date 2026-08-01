@@ -3,6 +3,7 @@ package state
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -177,7 +178,7 @@ func TestKeptClonesSurviveAndRaiseTheVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s.KeepClone("/tmp/cepm-kept")
+	s.KeepClone("old-tools")
 	if err := s.Save(); err != nil {
 		t.Fatal(err)
 	}
@@ -189,11 +190,49 @@ func TestKeptClonesSurviveAndRaiseTheVersion(t *testing.T) {
 	if again.Version < 3 {
 		t.Errorf("saving KeptClones must raise the schema version, got %d", again.Version)
 	}
-	if len(again.KeptClones) != 1 || again.KeptClones[0] != "/tmp/cepm-kept" {
+	if len(again.KeptClones) != 1 || again.KeptClones[0] != "old-tools" {
 		t.Errorf("KeptClones did not survive a round trip: %+v", again.KeptClones)
 	}
 	if got := again.TakeKeptClones(); len(got) != 1 || again.KeptClones != nil {
 		t.Errorf("TakeKeptClones should hand them over once: %+v / %+v", got, again.KeptClones)
+	}
+}
+
+// A kept name resolves to a directory that is eventually shown next to
+// "rm -rf", and state.json is user-editable: what does not pass the same
+// validation as a repository name must never be resolved, and a name that
+// was registered again points at a live clone now.
+func TestKeptClonesAreValidatedAndDroppedWhenLiveAgain(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("CEPM_HOME", home)
+
+	for _, bad := range []string{"../evil", "a/b", "/tmp", ".."} {
+		raw := `{"version":3,"repos":{},"keptClones":[` + strconv.Quote(bad) + `]}`
+		if err := os.WriteFile(filepath.Join(home, "state.json"), []byte(raw), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Load(); err == nil {
+			t.Errorf("Load should reject kept clone name %q", bad)
+		}
+	}
+
+	// Re-registered name: both Save and TakeKeptClones must drop it.
+	s := New()
+	s.KeepClone("tools")
+	s.Repos["tools"] = &Repo{URL: "u", Track: TrackBranch, Branch: "main"}
+	if got := s.TakeKeptClones(); len(got) != 0 {
+		t.Errorf("a re-registered name must not be handed out for deletion: %v", got)
+	}
+	s.KeepClone("tools")
+	if err := s.Save(); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(saved.KeptClones) != 0 {
+		t.Errorf("Save should drop kept names that are registered again: %v", saved.KeptClones)
 	}
 }
 
