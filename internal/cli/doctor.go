@@ -246,13 +246,14 @@ func checkRepos(ctx context.Context, hostReachable bool) []diagnostic {
 		return []diagnostic{{Name: "state", Status: "fail", Detail: err.Error()}}
 	}
 	if err := st.Validate(); err != nil {
-		// Covers both a duplicated id and a directory name no current version
-		// would register; either one blocks the commands that touch Chrome.
+		// Covers both a duplicated id and a directory name cepm would never
+		// register; no cepm writes such a file, so it is not repaired —
+		// every state-changing command refuses it.
 		diags = append(diags, diagnostic{
 			Name:   "state",
 			Status: "fail",
 			Detail: oneLine(err.Error()),
-			Hint:   "commands that change Chrome refuse to run until this is resolved",
+			Hint:   "delete ~/.cepm/state.json and re-run cepm install for the repositories you use",
 		})
 	}
 	if len(st.Orphans) > 0 {

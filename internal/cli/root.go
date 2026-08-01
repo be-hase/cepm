@@ -9,7 +9,9 @@ import (
 
 	"github.com/be-hase/cepm/internal/launcher"
 	"github.com/be-hase/cepm/internal/logx"
+	"github.com/be-hase/cepm/internal/paths"
 	"github.com/be-hase/cepm/internal/state"
+	"github.com/be-hase/cepm/internal/term"
 )
 
 var verbose bool
@@ -57,19 +59,18 @@ the affected unpacked extensions in Chrome through a small helper extension.`,
 	return root
 }
 
-// touchesChrome lists the commands that ask Chrome to change something. An
-// inconsistent state must stop them *before* they act, not at the save that
-// follows: earlier versions could write duplicate extension ids, so a file on
-// disk may already be broken, and a removal cannot be undone.
+// touchesChrome lists the commands that ask Chrome or the filesystem to
+// change something. An inconsistent state must stop them *before* they act,
+// not at the save that follows: a removal cannot be undone.
 var touchesChrome = map[string]bool{
-	"install": true, "update": true, "reload": true,
+	"install": true, "uninstall": true, "update": true, "reload": true,
 	"enable": true, "disable": true, "cleanup": true,
 }
 
-// preflight refuses to run a Chrome-affecting command on a state cepm cannot
-// reason about. "uninstall" is deliberately absent: removing a repository is
-// how a duplicate gets resolved, and it skips its own Chrome-side step while
-// the ambiguity lasts.
+// preflight refuses to run a state-changing command on a state cepm cannot
+// reason about. No current cepm can save such a state (install and Save both
+// refuse), so it is corruption or a hand edit — not something to repair by
+// guessing, and fail-closed is the only safe answer.
 func preflight(cmd *cobra.Command) error {
 	if !touchesChrome[cmd.Name()] {
 		return nil
@@ -79,7 +80,13 @@ func preflight(cmd *cobra.Command) error {
 		return err
 	}
 	if err := st.Validate(); err != nil {
-		return fmt.Errorf("%w\n(run cepm doctor for details)", err)
+		sf, pathErr := paths.StateFile()
+		if pathErr != nil {
+			sf = "~/.cepm/state.json"
+		}
+		return fmt.Errorf("%w\nNothing in Chrome or on disk was touched. cepm never writes such a state,"+
+			"\nso it cannot repair it: delete %s and re-run cepm install"+
+			"\nfor the repositories you use (cepm doctor has details)", err, term.Quote(sf))
 	}
 	return nil
 }

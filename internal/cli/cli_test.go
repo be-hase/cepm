@@ -19,7 +19,6 @@ import (
 	"github.com/be-hase/cepm/internal/nmmanifest"
 	"github.com/be-hase/cepm/internal/paths"
 	"github.com/be-hase/cepm/internal/state"
-	"github.com/be-hase/cepm/internal/term"
 	"github.com/be-hase/cepm/internal/updater"
 )
 
@@ -314,17 +313,10 @@ func TestDuplicateIDsInExistingStateStopChromeSideEffects(t *testing.T) {
       "b":{"url":"u2","track":"branch","branch":"main","head":"h",
            "extensions":[{"dir":"other","name":"Two","id":"xxxx","key":"K"}]}}}`)
 
-	for _, args := range [][]string{{"cleanup"}, {"reload"}, {"update"}, {"enable", "a"}} {
+	for _, args := range [][]string{{"cleanup"}, {"reload"}, {"update"}, {"enable", "a"}, {"uninstall", "b"}} {
 		if _, err := run(t, "", args...); err == nil {
 			t.Errorf("%v should refuse to run on a state with duplicate ids", args)
 		}
-	}
-
-	// uninstall is the repair path: it unregisters, but must not act on an
-	// id it cannot attribute.
-	out, err := run(t, "y\n", "uninstall", "b")
-	if err != nil {
-		t.Fatalf("uninstall should still work: %v\n%s", err, out)
 	}
 	host.mu.Lock()
 	sent := len(host.uninstalled)
@@ -332,147 +324,56 @@ func TestDuplicateIDsInExistingStateStopChromeSideEffects(t *testing.T) {
 	if sent != 0 {
 		t.Errorf("nothing should have been removed from Chrome, got %v", host.uninstalled)
 	}
-	st, err := state.Load()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := st.Validate(); err != nil {
-		t.Errorf("uninstalling one side should resolve the duplicate: %v", err)
-	}
-	// And now the normal commands work again.
-	if _, err := run(t, "", "reload"); err != nil && strings.Contains(err.Error(), "claim extension id") {
-		t.Errorf("commands should work once the duplicate is gone: %v", err)
-	}
-}
-
-// Repairing has to work one repository at a time: with two independent
-// collisions, a plain all-or-nothing save would reject every intermediate
-// step and leave the file unfixable.
-func TestUninstallRepairsSeveralDuplicateGroups(t *testing.T) {
-	interactive(t)
-	host := startFakeHost(t, "xxxx", "yyyy")
-	writeRawState(t, `{"version":4,"repos":{
-      "a":{"url":"u","track":"branch","branch":"main","head":"h",
-           "extensions":[{"dir":"ext","name":"A","id":"xxxx","key":"K1"}]},
-      "b":{"url":"u","track":"branch","branch":"main","head":"h",
-           "extensions":[{"dir":"ext","name":"B","id":"xxxx","key":"K1"}]},
-      "c":{"url":"u","track":"branch","branch":"main","head":"h",
-           "extensions":[{"dir":"ext","name":"C","id":"yyyy","key":"K2"}]},
-      "d":{"url":"u","track":"branch","branch":"main","head":"h",
-           "extensions":[{"dir":"ext","name":"D","id":"yyyy","key":"K2"}]}}}`)
-
-	for _, repo := range []string{"b", "d"} {
-		if out, err := run(t, "y\n", "uninstall", repo); err != nil {
-			t.Fatalf("uninstall %s: %v\n%s", repo, err, out)
-		}
-	}
-	st, err := state.Load()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := st.Validate(); err != nil {
-		t.Errorf("state should be repaired after both uninstalls: %v", err)
-	}
-	host.mu.Lock()
-	defer host.mu.Unlock()
-	if len(host.uninstalled) != 0 {
-		t.Errorf("repairing must not touch Chrome, got %v", host.uninstalled)
-	}
-}
-
-// When two registrations claim an id, nothing can tell which directory
-// Chrome loaded. Removing one side must therefore keep its files and point
-// the user at the surviving directory — otherwise Chrome may be left running
-// a copy from a path cepm just deleted, with doctor none the wiser.
-func TestUninstallRepairGuidesRebindAndKeepsFiles(t *testing.T) {
-	interactive(t)
-	startFakeHost(t, "xxxx")
-	writeRawState(t, `{"version":4,"repos":{
-      "keepme":{"url":"u","track":"branch","branch":"main","head":"h",
-                "extensions":[{"dir":"ext","name":"Ext","id":"xxxx","key":"K"}]},
-      "dropme":{"url":"u","track":"branch","branch":"main","head":"h",
-                "extensions":[{"dir":"ext","name":"Ext","id":"xxxx","key":"K"}]}}}`)
-	dropped, err := updaterRepoDir("dropme")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(dropped, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	survivor, err := updaterRepoDir("keepme")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	out, err := run(t, "", "uninstall", "dropme")
-	if err != nil {
-		t.Fatalf("uninstall: %v\n%s", err, out)
-	}
-	if !strings.Contains(out, filepath.Join(survivor, "ext")) {
-		t.Errorf("the guidance must name the surviving directory to load:\n%s", out)
-	}
-	if _, err := os.Stat(dropped); err != nil {
-		t.Errorf("the clone must be kept until Chrome is re-pointed: %v", err)
-	}
-	if strings.Contains(out, "run: cepm cleanup") {
-		t.Errorf("cleanup cannot help here (the id is live again); do not suggest it:\n%s", out)
-	}
-}
-
-// Mid-repair, with two claimants still left, there is no single directory to
-// re-point Chrome at — guidance naming both would ask for two directories
-// under one id.
-func TestUninstallRepairSaysNothingToRebindWhileAmbiguous(t *testing.T) {
-	interactive(t)
-	startFakeHost(t, "xxxx")
-	writeRawState(t, `{"version":4,"repos":{
-      "a":{"url":"u","track":"branch","branch":"main","head":"h",
-           "extensions":[{"dir":"ext","name":"A","id":"xxxx","key":"K"}]},
-      "b":{"url":"u","track":"branch","branch":"main","head":"h",
-           "extensions":[{"dir":"ext","name":"B","id":"xxxx","key":"K"}]},
-      "c":{"url":"u","track":"branch","branch":"main","head":"h",
-           "extensions":[{"dir":"ext","name":"C","id":"xxxx","key":"K"}]}}}`)
-
-	out, err := run(t, "", "uninstall", "b")
-	if err != nil {
-		t.Fatalf("uninstall: %v\n%s", err, out)
-	}
-	if strings.Contains(out, "Load unpacked") {
-		t.Errorf("two claimants remain, so no directory can be named yet:\n%s", out)
-	}
-	if !strings.Contains(out, "still claimed by more than one repository") {
-		t.Errorf("the user should be told the collision is unresolved:\n%s", out)
-	}
-	if strings.Contains(out, "rm -rf") {
-		t.Errorf("the clone must not be declared safe to delete yet:\n%s", out)
-	}
-}
-
-// A survivor the user chose not to use must not be handed back to Chrome.
-func TestUninstallRepairRespectsDisabledSurvivor(t *testing.T) {
-	interactive(t)
-	startFakeHost(t, "xxxx")
-	writeRawState(t, `{"version":4,"repos":{
-      "keepme":{"url":"u","track":"branch","branch":"main","head":"h",
-                "extensions":[{"dir":"ext","name":"Ext","id":"xxxx","key":"K","disabled":true}]},
-      "dropme":{"url":"u","track":"branch","branch":"main","head":"h",
-                "extensions":[{"dir":"ext","name":"Ext","id":"xxxx","key":"K"}]}}}`)
-
-	out, err := run(t, "", "uninstall", "dropme")
-	if err != nil {
-		t.Fatalf("uninstall: %v\n%s", err, out)
-	}
-	if strings.Contains(out, "Load unpacked") {
-		t.Errorf("the survivor is disabled; loading it would undo that choice:\n%s", out)
-	}
-	if !strings.Contains(out, "cepm enable") {
-		t.Errorf("the way back should be mentioned:\n%s", out)
-	}
 }
 
 // Legacy state can hold a directory name no current version would register.
 // Every path cepm prints for it goes through quoting, which must not pass
 // control characters through.
+// An invalid state (a duplicate id, an unprintable directory) is not
+// something any current cepm can save, so on disk it means corruption or a
+// hand edit. There is no repair mode: every state-changing command —
+// uninstall included — must refuse it before touching Chrome or the clones,
+// and say how to start over.
+func TestUninstallFailsClosedOnInvalidState(t *testing.T) {
+	interactive(t)
+	host := startFakeHost(t, "xxxx")
+	writeRawState(t, `{"version":4,"repos":{
+      "a":{"url":"u","track":"branch","branch":"main","head":"h",
+           "extensions":[{"dir":"ext","name":"A","id":"xxxx","key":"K"}]},
+      "b":{"url":"u","track":"branch","branch":"main","head":"h",
+           "extensions":[{"dir":"ext","name":"B","id":"xxxx","key":"K"}]}}}`)
+	dirA, err := updaterRepoDir("a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dirA, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := run(t, "y\n", "uninstall", "a")
+	if err == nil {
+		t.Fatalf("uninstall must refuse an invalid state:\n%s", out)
+	}
+	if !strings.Contains(err.Error(), "state.json") {
+		t.Errorf("the error should say how to start over (delete state.json), got: %v", err)
+	}
+	host.mu.Lock()
+	if len(host.uninstalled) != 0 {
+		t.Errorf("nothing may be removed from Chrome, got %v", host.uninstalled)
+	}
+	host.mu.Unlock()
+	if _, err := os.Stat(dirA); err != nil {
+		t.Errorf("the clone must be left alone: %v", err)
+	}
+	st, err := state.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(st.Repos) != 2 {
+		t.Errorf("the state must be left alone, got %d repos", len(st.Repos))
+	}
+}
+
 func TestControlCharactersInLegacyStateAreNeverPrintedRaw(t *testing.T) {
 	// Nothing loaded in Chrome, so doctor prints the "Load unpacked <path>"
 	// hint — a path built with the directory name and shell-quoted, which is
@@ -499,56 +400,6 @@ func TestControlCharactersInLegacyStateAreNeverPrintedRaw(t *testing.T) {
 	// And the command that would act on Chrome refuses outright.
 	if _, err := run(t, "", "reload"); err == nil {
 		t.Error("reload should refuse a state with such a directory name")
-	}
-}
-
-// The error for a legacy directory name says to uninstall and re-install, so
-// that has to actually work: repair progress cannot be measured in duplicate
-// ids when there are none.
-func TestUninstallRepairsControlCharacterOnlyState(t *testing.T) {
-	interactive(t)
-	startFakeHost(t)
-	writeRawState(t, `{"version":4,"repos":{
-      "tools":{"url":"u","track":"branch","branch":"main","head":"h",
-               "extensions":[{"dir":"ext\nFORGED","name":"Ext","id":"aaaa"}]}}}`)
-
-	out, err := run(t, "", "uninstall", "tools")
-	if err != nil {
-		t.Fatalf("the repair cepm suggests must be possible: %v\n%s", err, out)
-	}
-	st, err := state.Load()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := st.Validate(); err != nil {
-		t.Errorf("state should be usable again: %v", err)
-	}
-	if _, still := st.Repos["tools"]; still {
-		t.Error("the repository should be gone")
-	}
-}
-
-// An explicit --keep-files is a promise, and the repair path used not to see
-// the flag at all.
-func TestRepairUninstallHonoursKeepFiles(t *testing.T) {
-	interactive(t)
-	startFakeHost(t)
-	writeRawState(t, `{"version":4,"repos":{
-      "tools":{"url":"u","track":"branch","branch":"main","head":"h",
-               "extensions":[{"dir":"ext\nFORGED","name":"Ext","id":"aaaa"}]}}}`)
-	dir, err := updaterRepoDir("tools")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	if out, err := run(t, "", "uninstall", "--keep-files", "tools"); err != nil {
-		t.Fatalf("uninstall: %v\n%s", err, out)
-	}
-	if _, err := os.Stat(dir); err != nil {
-		t.Errorf("--keep-files was ignored: %v", err)
 	}
 }
 
@@ -584,62 +435,6 @@ func TestUninstallKeepsTheCloneWhenTheSaveFails(t *testing.T) {
 	}
 	if _, err := os.Stat(dir); err != nil {
 		t.Errorf("the clone must survive a failed save: %v", err)
-	}
-}
-
-// The repair path makes the same promise.
-func TestRepairUninstallKeepsTheCloneWhenTheSaveFails(t *testing.T) {
-	interactive(t)
-	startFakeHost(t)
-	writeRawState(t, `{"version":4,"repos":{
-      "tools":{"url":"u","track":"branch","branch":"main","head":"h",
-               "extensions":[{"dir":"ext\nFORGED","name":"Ext","id":"aaaa"}]}}}`)
-	dir, err := updaterRepoDir("tools")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	failStateSaves(t)
-
-	out, err := run(t, "", "uninstall", "tools")
-	if err == nil {
-		t.Fatalf("repair uninstall should fail when the state cannot be saved:\n%s", out)
-	}
-	if _, err := os.Stat(dir); err != nil {
-		t.Errorf("the clone must survive a failed repair save: %v", err)
-	}
-}
-
-// A repository can hold stale records for ids it already lost track of.
-// Dropping them with the repository would put those Chrome entries beyond
-// cleanup's reach.
-func TestRepairUninstallCarriesStaleEntriesOver(t *testing.T) {
-	interactive(t)
-	startFakeHost(t, "xxxx", "sssss")
-	writeRawState(t, `{"version":4,"repos":{
-      "a":{"url":"u","track":"branch","branch":"main","head":"h",
-           "extensions":[{"dir":"ext","name":"A","id":"xxxx","key":"K"}]},
-      "b":{"url":"u","track":"branch","branch":"main","head":"h",
-           "extensions":[{"dir":"ext","name":"B","id":"xxxx","key":"K"}],
-           "stale":[{"id":"sssss","name":"Gone","reason":"removed"}]}}}`)
-
-	if out, err := run(t, "", "uninstall", "b"); err != nil {
-		t.Fatalf("uninstall: %v\n%s", err, out)
-	}
-	st, err := state.Load()
-	if err != nil {
-		t.Fatal(err)
-	}
-	found := false
-	for _, o := range st.Orphans {
-		if o.ID == "sssss" {
-			found = true
-		}
-	}
-	if !found {
-		t.Errorf("the repository's stale entry should survive as an orphan: %+v", st.Orphans)
 	}
 }
 
@@ -737,209 +532,6 @@ func TestUninstallOrphansAnExtensionLoadedDuringThePrompt(t *testing.T) {
 	}
 }
 
-// --keep-files on a duplicate-id repair: the clone stays, and it must also
-// stay out of the pending-cleanup list — otherwise the collision's
-// resolution ends with cepm recommending rm -rf of files the user asked to
-// keep.
-func TestRepairUninstallKeepFilesIsNeverAdvisedForDeletion(t *testing.T) {
-	interactive(t)
-	startFakeHost(t)
-	writeRawState(t, `{"version":4,"repos":{
-      "a":{"url":"u","track":"branch","branch":"main","head":"h",
-           "extensions":[{"dir":"ext","name":"A","id":"xxxx","key":"K"}]},
-      "b":{"url":"u","track":"branch","branch":"main","head":"h",
-           "extensions":[{"dir":"ext","name":"B","id":"xxxx","key":"K"}]}}}`)
-	dirA, err := updaterRepoDir("a")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(dirA, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	out, err := run(t, "", "uninstall", "--keep-files", "a")
-	if err != nil {
-		t.Fatalf("uninstall: %v\n%s", err, out)
-	}
-	if strings.Contains(out, "rm -rf") {
-		t.Errorf("--keep-files must not come with deletion advice:\n%s", out)
-	}
-	st, err := state.Load()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(st.KeptClones) != 0 {
-		t.Errorf("a clone kept on the user's request is not pending cleanup: %v", st.KeptClones)
-	}
-	if _, err := os.Stat(dirA); err != nil {
-		t.Errorf("the clone should still be on disk: %v", err)
-	}
-}
-
-// A kept clone the user deleted and replaced with their own data must never
-// be advised for rm -rf: the name still resolves to the same path, but the
-// contents are not cepm's any more. The marker written at keep time is what
-// tells the two apart.
-func TestRepairUninstallDoesNotAdviseDeletingAReplacedClone(t *testing.T) {
-	interactive(t)
-	startFakeHost(t)
-	// Three owners: the first two uninstalls each keep their clone, and only
-	// the second one resolves the collision and prints the advice.
-	writeRawState(t, `{"version":4,"repos":{
-      "a":{"url":"u","track":"branch","branch":"main","head":"h",
-           "extensions":[{"dir":"ext","name":"A","id":"xxxx","key":"K"}]},
-      "b":{"url":"u","track":"branch","branch":"main","head":"h",
-           "extensions":[{"dir":"ext","name":"B","id":"xxxx","key":"K"}]},
-      "c":{"url":"u","track":"branch","branch":"main","head":"h",
-           "extensions":[{"dir":"ext","name":"C","id":"xxxx","key":"K"}]}}}`)
-	dirA, _ := updaterRepoDir("a")
-	dirB, _ := updaterRepoDir("b")
-	for _, d := range []string{dirA, dirB} {
-		if err := os.MkdirAll(d, 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	if out, err := run(t, "", "uninstall", "a"); err != nil {
-		t.Fatalf("first uninstall: %v\n%s", err, out)
-	}
-	// The user deletes the kept clone and puts their own data at its path.
-	if err := os.RemoveAll(dirA); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(dirA, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dirA, "notes.txt"), []byte("mine"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	out, err := run(t, "", "uninstall", "b")
-	if err != nil {
-		t.Fatalf("second uninstall: %v\n%s", err, out)
-	}
-	if strings.Contains(out, "rm -rf "+term.Quote(dirA)) {
-		t.Errorf("the replaced clone must not be advised for deletion:\n%s", out)
-	}
-	if !strings.Contains(out, "review it manually") {
-		t.Errorf("the replaced clone should be pointed out for manual review:\n%s", out)
-	}
-	// The clone kept just now, marker intact, is still proven.
-	if !strings.Contains(out, "rm -rf "+term.Quote(dirB)) {
-		t.Errorf("the untouched kept clone should still be advised:\n%s", out)
-	}
-}
-
-// Two such repositories mean the first removal leaves the state still
-// invalid, so it goes through the repair save — which has to recognise a
-// directory name as a defect, not only a duplicated id.
-func TestUninstallRepairsControlCharactersOneRepoAtATime(t *testing.T) {
-	interactive(t)
-	startFakeHost(t)
-	writeRawState(t, `{"version":4,"repos":{
-      "a":{"url":"u","track":"branch","branch":"main","head":"h",
-           "extensions":[{"dir":"ext\nA","name":"A","id":"aaaa"}]},
-      "b":{"url":"u","track":"branch","branch":"main","head":"h",
-           "extensions":[{"dir":"ext\nB","name":"B","id":"bbbb"}]}}}`)
-
-	if out, err := run(t, "", "uninstall", "a"); err != nil {
-		t.Fatalf("first repair must be savable although the state stays invalid: %v\n%s", err, out)
-	}
-	st, err := state.Load()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, still := st.Repos["a"]; still {
-		t.Fatal("the first removal was not persisted")
-	}
-	if err := st.Validate(); err == nil {
-		t.Error("the second repository still has an unprintable name")
-	}
-	if out, err := run(t, "", "uninstall", "b"); err != nil {
-		t.Fatalf("second repair: %v\n%s", err, out)
-	}
-	st, _ = state.Load()
-	if err := st.Validate(); err != nil {
-		t.Errorf("state should be usable again: %v", err)
-	}
-}
-
-// A repair takes several uninstalls, and the clones kept along the way must
-// not be forgotten once the ids stop being contested.
-func TestUninstallRepairReportsEveryKeptClone(t *testing.T) {
-	interactive(t)
-	startFakeHost(t, "xxxx")
-	writeRawState(t, `{"version":4,"repos":{
-      "a":{"url":"u","track":"branch","branch":"main","head":"h",
-           "extensions":[{"dir":"ext","name":"A","id":"xxxx","key":"K"}]},
-      "b":{"url":"u","track":"branch","branch":"main","head":"h",
-           "extensions":[{"dir":"ext","name":"B","id":"xxxx","key":"K"}]},
-      "c":{"url":"u","track":"branch","branch":"main","head":"h",
-           "extensions":[{"dir":"ext","name":"C","id":"xxxx","key":"K"}]}}}`)
-	for _, r := range []string{"a", "b", "c"} {
-		dir, err := updaterRepoDir(r)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	if out, err := run(t, "", "uninstall", "b"); err != nil {
-		t.Fatalf("first repair: %v\n%s", err, out)
-	}
-	out, err := run(t, "", "uninstall", "c")
-	if err != nil {
-		t.Fatalf("second repair: %v\n%s", err, out)
-	}
-	// Both kept clones, not just the one from this run, have to be named.
-	for _, r := range []string{"b", "c"} {
-		dir, _ := updaterRepoDir(r)
-		if !strings.Contains(out, dir) {
-			t.Errorf("the clone kept for %q is not mentioned in the final guidance:\n%s", r, out)
-		}
-	}
-	st, _ := state.Load()
-	if len(st.KeptClones) != 0 {
-		t.Errorf("kept clones should be handed over once reported, got %+v", st.KeptClones)
-	}
-}
-
-// Two directories of one repository claiming the same id: removing that
-// repository resolves it outright, so its clone is not kept and the entry
-// becomes an ordinary orphan cleanup can handle.
-func TestUninstallRepairsSameRepoDuplicate(t *testing.T) {
-	interactive(t)
-	startFakeHost(t, "xxxx")
-	writeRawState(t, `{"version":4,"repos":{
-      "tools":{"url":"u","track":"branch","branch":"main","head":"h",
-               "extensions":[{"dir":"one","name":"One","id":"xxxx","key":"K"},
-                             {"dir":"two","name":"Two","id":"xxxx","key":"K"}]}}}`)
-	dir, err := updaterRepoDir("tools")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	out, err := run(t, "", "uninstall", "tools")
-	if err != nil {
-		t.Fatalf("uninstall: %v\n%s", err, out)
-	}
-	st, _ := state.Load()
-	if err := st.Validate(); err != nil {
-		t.Errorf("state should be valid: %v", err)
-	}
-	if len(st.Orphans) != 1 {
-		t.Errorf("the id is nobody's now, so cleanup should be able to remove it: %+v", st.Orphans)
-	}
-	if _, err := os.Stat(dir); err == nil {
-		t.Error("no other registration claims the id, so the clone should be deleted")
-	}
-}
-
 // Names are display-only, so a legacy one carrying a newline is cleaned when
 // the state is read rather than at each place that prints it.
 func TestLegacyNamesAreNeutralisedOnLoad(t *testing.T) {
@@ -966,38 +558,6 @@ func TestLegacyNamesAreNeutralisedOnLoad(t *testing.T) {
 	out, _ := run(t, "", "list")
 	if strings.Contains(out, "OK\nFORGED") || strings.Contains(out, "\x1b") {
 		t.Errorf("list printed a forged row:\n%q", out)
-	}
-}
-
-// Three repositories sharing one id: each removal leaves the id colliding,
-// so progress has to be measured in claims, not in colliding ids.
-func TestUninstallRepairsThreeWayCollision(t *testing.T) {
-	interactive(t)
-	startFakeHost(t, "xxxx")
-	writeRawState(t, `{"version":4,"repos":{
-      "a":{"url":"u","track":"branch","branch":"main","head":"h",
-           "extensions":[{"dir":"ext","name":"A","id":"xxxx","key":"K"}]},
-      "b":{"url":"u","track":"branch","branch":"main","head":"h",
-           "extensions":[{"dir":"ext","name":"B","id":"xxxx","key":"K"}]},
-      "c":{"url":"u","track":"branch","branch":"main","head":"h",
-           "extensions":[{"dir":"ext","name":"C","id":"xxxx","key":"K"}]}}}`)
-
-	if out, err := run(t, "", "uninstall", "b"); err != nil {
-		t.Fatalf("first repair must be savable even though the id still collides: %v\n%s", err, out)
-	}
-	st, _ := state.Load()
-	if err := st.Validate(); err == nil {
-		t.Error("two claimants remain, so the state is still invalid")
-	}
-	if len(st.Repos) != 2 {
-		t.Fatalf("the first removal was not persisted: %+v", st.RepoNames())
-	}
-	if out, err := run(t, "", "uninstall", "c"); err != nil {
-		t.Fatalf("second repair: %v\n%s", err, out)
-	}
-	st, _ = state.Load()
-	if err := st.Validate(); err != nil {
-		t.Errorf("state should be repaired now: %v", err)
 	}
 }
 

@@ -3,7 +3,6 @@ package state
 import (
 	"os"
 	"path/filepath"
-	"strconv"
 	"testing"
 	"time"
 )
@@ -131,79 +130,6 @@ func TestSaveRefusesDuplicateLiveIDs(t *testing.T) {
 	id, a, b := s2.DuplicateLiveID()
 	if id != "xxxx" || a.Dir == b.Dir {
 		t.Errorf("DuplicateLiveID should identify both directories, got %s: %s and %s", id, a, b)
-	}
-}
-
-// Losing a kept clone record would leave repair leftovers untracked, so the
-// entries must survive a save/load cycle intact.
-func TestKeptClonesSurviveARoundTrip(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("CEPM_HOME", home)
-	s := New()
-	s.KeepClone("old-tools", "aabb")
-	if err := s.Save(); err != nil {
-		t.Fatal(err)
-	}
-
-	again, err := Load()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(again.KeptClones) != 1 || again.KeptClones[0].Name != "old-tools" || again.KeptClones[0].Token != "aabb" {
-		t.Errorf("KeptClones did not survive a round trip: %+v", again.KeptClones)
-	}
-	if got := again.TakeKeptClones(); len(got) != 1 || again.KeptClones != nil {
-		t.Errorf("TakeKeptClones should hand them over once: %+v / %+v", got, again.KeptClones)
-	}
-}
-
-// A kept name resolves to a directory that is eventually shown next to
-// "rm -rf", and state.json is user-editable: what does not pass the same
-// validation as a repository name must never be resolved, and a name that
-// was registered again points at a live clone now.
-func TestKeptClonesAreValidatedAndDroppedWhenLiveAgain(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("CEPM_HOME", home)
-
-	for _, bad := range []string{"../evil", "a/b", "/tmp", ".."} {
-		raw := `{"version":4,"repos":{},"keptClones":[{"name":` + strconv.Quote(bad) + `}]}`
-		if err := os.WriteFile(filepath.Join(home, "state.json"), []byte(raw), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := Load(); err == nil {
-			t.Errorf("Load should reject kept clone name %q", bad)
-		}
-	}
-
-	// Re-registered name: both Save and TakeKeptClones must drop it.
-	s := New()
-	s.KeepClone("tools", "tok")
-	s.Repos["tools"] = &Repo{URL: "u", Track: TrackBranch, Branch: "main"}
-	if got := s.TakeKeptClones(); len(got) != 0 {
-		t.Errorf("a re-registered name must not be handed out for deletion: %v", got)
-	}
-	s.KeepClone("tools", "tok")
-	if err := s.Save(); err != nil {
-		t.Fatal(err)
-	}
-	saved, err := Load()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(saved.KeptClones) != 0 {
-		t.Errorf("Save should drop kept names that are registered again: %v", saved.KeptClones)
-	}
-
-	// A name Load would refuse must be refused on the way in as well —
-	// recording it would build a state file this very cepm then rejects.
-	s2 := New()
-	s2.KeepClone("../evil", "tok")
-	if len(s2.KeptClones) != 0 {
-		t.Errorf("KeepClone must refuse an invalid name: %+v", s2.KeptClones)
-	}
-	s2.KeptClones = []KeptClone{{Name: "../evil"}} // bypassing KeepClone
-	if err := s2.Save(); err == nil {
-		t.Error("Save must refuse a kept clone name that would not load back")
 	}
 }
 

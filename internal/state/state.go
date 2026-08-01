@@ -113,55 +113,6 @@ type State struct {
 	// before the user removed them from Chrome). Keeping them here is what
 	// lets "cepm cleanup" still finish the job later.
 	Orphans []StaleExtension `json:"orphans,omitempty"`
-	// KeptClones are repositories whose clone was left on disk because
-	// Chrome might still be loading it. A repair takes several uninstalls,
-	// and without this the earlier ones would be forgotten and their files
-	// left behind forever. Names, not paths: this file is user-editable, and
-	// whatever ends up here is eventually shown next to "rm -rf" — a name
-	// passes the same validation as a registered repository and can only
-	// ever resolve to one directory under ~/.cepm/repos.
-	KeptClones []KeptClone `json:"keptClones,omitempty"`
-}
-
-// KeptClone identifies one clone held back during a repair.
-type KeptClone struct {
-	Name string `json:"name"`
-	// Token matches a marker file written into the clone when it was kept.
-	// The name says where the clone was; the token proves the directory
-	// there is still that clone — and not something the user has since put
-	// in its place, which no deletion advice may point at. Empty means
-	// unprovable (the marker could not be written, or the record predates
-	// tokens): such a clone is reported, never fed to rm.
-	Token string `json:"token,omitempty"`
-}
-
-// KeepClone records a repository whose clone stays on disk, ignoring
-// duplicates. A name that would not survive Load is refused outright:
-// recording it would produce a state file this very cepm then rejects.
-func (s *State) KeepClone(name, token string) {
-	if !ValidRepoName(name) {
-		return
-	}
-	for _, k := range s.KeptClones {
-		if k.Name == name {
-			return
-		}
-	}
-	s.KeptClones = append(s.KeptClones, KeptClone{Name: name, Token: token})
-}
-
-// TakeKeptClones returns the kept clones whose name is still unregistered,
-// and forgets them all. A name that was registered again refers to a live
-// clone now, so advising its deletion would point at the wrong thing.
-func (s *State) TakeKeptClones() []KeptClone {
-	var out []KeptClone
-	for _, k := range s.KeptClones {
-		if _, live := s.Repos[k.Name]; !live {
-			out = append(out, k)
-		}
-	}
-	s.KeptClones = nil
-	return out
 }
 
 // AddOrphans records stale entries that outlived their repository.
@@ -248,11 +199,6 @@ func Load() (*State, error) {
 			return nil, fmt.Errorf("%s: invalid repository name %q", path, name)
 		}
 	}
-	for _, k := range s.KeptClones {
-		if !ValidRepoName(k.Name) {
-			return nil, fmt.Errorf("%s: invalid kept clone name %q (edit or delete the file)", path, term.Safe(k.Name))
-		}
-	}
 	s.sanitizeNames()
 	return &s, nil
 }
@@ -332,15 +278,6 @@ func (s *State) normalize() {
 	if len(s.Orphans) == 0 {
 		s.Orphans = nil
 	}
-	// The same rule for kept clones: a name registered again is a live clone,
-	// and a record recommending its deletion must not outlive that.
-	var clones []KeptClone
-	for _, k := range s.KeptClones {
-		if _, live := s.Repos[k.Name]; !live {
-			clones = append(clones, k)
-		}
-	}
-	s.KeptClones = clones
 }
 
 // ExtRef names one registered extension: the repository and the directory
@@ -377,89 +314,24 @@ func (s *State) DuplicateLiveID() (id string, a, b ExtRef) {
 	return "", ExtRef{}, ExtRef{}
 }
 
-// IDClaims counts how many registered extensions claim each id.
-func (s *State) IDClaims() map[string]int {
-	claims := map[string]int{}
-	for _, name := range s.RepoNames() {
-		for _, e := range s.Repos[name].Extensions {
-			claims[e.ID]++
-		}
-	}
-	return claims
-}
-
-// defects counts everything that makes a state one cepm refuses to act on:
-// each extra claimant of an id, and each registration whose directory name
-// cannot be printed. Counting them — rather than, say, colliding ids — is
-// what lets repair proceed a repository at a time, whether the file has one
-// id shared three ways or nothing wrong but an unprintable name.
-func (s *State) defects() int {
-	total := 0
-	for _, n := range s.IDClaims() {
-		if n > 1 {
-			total += n - 1
-		}
-	}
-	for _, name := range s.RepoNames() {
-		for _, e := range s.Repos[name].Extensions {
-			if term.HasControl(e.Dir) {
-				total++
-			}
-		}
-	}
-	return total
-}
-
-// SaveRepair writes a state that may still be invalid, provided it is
-// strictly closer to valid than before: no id gains claimants, none becomes
-// contested that was not already, and the total number of defects shrinks.
-// A plain Save is all or nothing, which would reject every intermediate step
-// of a repair that necessarily takes several.
-func (s *State) SaveRepair(before *State) error {
-	was, now := before.IDClaims(), s.IDClaims()
-	for id, n := range now {
-		if n > 1 && was[id] <= 1 {
-			return fmt.Errorf("refusing to save: this would create a new duplicate extension id %s", id)
-		}
-		if n > was[id] {
-			return fmt.Errorf("refusing to save: extension id %s would gain a claimant (%d → %d)", id, was[id], n)
-		}
-	}
-	if s.defects() >= before.defects() {
-		return fmt.Errorf("refusing to save: %d problem(s) before and %d after, no progress",
-			before.defects(), s.defects())
-	}
-	s.normalize()
-	s.Version = Version
-	return s.save()
-}
-
-// Validate reports a state that cepm must not act on. It exists because
-// earlier versions could write duplicate ids, and directory names that no
-// current version would accept: the file on disk may already be
-// inconsistent, and finding that out only at save time would be too late —
-// by then a command may have removed something from Chrome.
+// Validate reports a state that cepm must not act on. No cepm writes such a
+// state (Save refuses), so on disk it means corruption or a hand edit — and
+// finding that out only at save time would be too late: by then a command
+// may have removed something from Chrome.
 func (s *State) Validate() error {
 	if id, a, b := s.DuplicateLiveID(); id != "" {
 		return fmt.Errorf("%s and %s both claim extension id %s "+
-			"(they pin the same manifest \"key\"); uninstall one of them", a, b, id)
+			"(they pin the same manifest \"key\")", a, b, id)
 	}
 	for _, name := range s.RepoNames() {
 		for _, e := range s.Repos[name].Extensions {
 			if term.HasControl(e.Dir) {
 				// Such a directory reaches the terminal through every
-				// suggestion cepm prints; newer versions refuse to register
-				// one, but a file written earlier can still hold it.
-				return fmt.Errorf("%s has control characters in its directory name; "+
-					"uninstall %s and re-install it", ExtRef{Repo: name, Dir: e.Dir}, term.Quote(name))
+				// suggestion cepm prints; install refuses to register one,
+				// so only a hand-edited file can hold it.
+				return fmt.Errorf("%s has control characters in its directory name",
+					ExtRef{Repo: name, Dir: e.Dir})
 			}
-		}
-	}
-	// KeepClone refuses these, so this only trips on a hand-built value —
-	// but saving one would produce a file the next Load rejects.
-	for _, k := range s.KeptClones {
-		if !ValidRepoName(k.Name) {
-			return fmt.Errorf("invalid kept clone name %q", term.Safe(k.Name))
 		}
 	}
 	return nil
