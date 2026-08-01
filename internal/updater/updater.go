@@ -140,7 +140,9 @@ func Update(ctx context.Context, names []string, opts Options) ([]RepoResult, er
 			res := updateRepo(ctx, name, repo, opts, liveIDsExcept(st, name))
 			repo.LastPull = time.Now()
 			if res.Err != nil {
-				repo.LastError = res.Err.Error()
+				// Sanitized at the source: this is mostly git/ssh stderr, which can
+				// carry escape sequences, and it is displayed by list and doctor.
+				repo.LastError = term.Strip(res.Err.Error())
 			} else {
 				repo.LastError = ""
 			}
@@ -422,7 +424,8 @@ func refreshExtensions(name string, r *state.Repo, dir string, res *RepoResult, 
 			se.Disabled = prev.Disabled
 			if prev.ID != id {
 				noteIdentityChange(name, dir, prev, se, res)
-				r.AddStale(state.StaleExtension{ID: prev.ID, Name: prev.Name, Reason: "id changed"})
+				r.AddStale(state.StaleExtension{ID: prev.ID, Name: prev.Name, Reason: "id changed",
+					SrcDir: prev.Dir, SrcKey: prev.Key})
 			}
 		} else {
 			// New extensions arrive as "available"; the user opts in with
@@ -454,7 +457,8 @@ func refreshExtensions(name string, r *state.Repo, dir string, res *RepoResult, 
 			AbsDir: added[i].AbsDir, OldID: match.ID, NewID: added[i].ID,
 			Enabled: match.Enabled(),
 		})
-		r.AddStale(state.StaleExtension{ID: match.ID, Name: match.Name, Reason: "renamed", NewDir: added[i].Dir})
+		r.AddStale(state.StaleExtension{ID: match.ID, Name: match.Name, Reason: "renamed",
+			NewDir: added[i].Dir, SrcDir: match.Dir, SrcKey: match.Key})
 		delete(removed, match.Dir)
 		added[i].Name = "" // consumed by the rename
 	}
@@ -465,7 +469,8 @@ func refreshExtensions(name string, r *state.Repo, dir string, res *RepoResult, 
 	}
 	for _, e := range removed {
 		res.Removed = append(res.Removed, e)
-		r.AddStale(state.StaleExtension{ID: e.ID, Name: e.Name, Reason: "removed"})
+		r.AddStale(state.StaleExtension{ID: e.ID, Name: e.Name, Reason: "removed",
+			SrcDir: e.Dir, SrcKey: e.Key})
 	}
 	r.Extensions = newList
 	// Extension IDs are derived from paths, so reverting a deletion or a

@@ -281,7 +281,7 @@ func TestUpdateRefusesKeyCollisionAcrossRepos(t *testing.T) {
 	}
 	st, _ := state.Load()
 	st.Repos["other"] = &state.Repo{
-		URL: "u2", Track: state.TrackBranch, Branch: "main", Head: "abc",
+		URL: "u2", Track: state.TrackBranch, Branch: "main", Head: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		Extensions: []state.Extension{{Dir: "pinned", Name: "Pinned", ID: keyID, Key: key}},
 	}
 	if err := st.Save(); err != nil {

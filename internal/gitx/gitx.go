@@ -157,8 +157,11 @@ func (r Repo) Checkout(ctx context.Context, branch string) error {
 }
 
 // ChangedFiles lists paths (repo-relative) that differ between two commits.
+// The trailing "--" terminates the revision list: the callers validate that
+// from/to are commit OIDs, and this makes git agree that nothing here is an
+// option or a pathspec.
 func (r Repo) ChangedFiles(ctx context.Context, from, to string) ([]string, error) {
-	out, err := run(ctx, r.Dir, "diff", "--name-only", from, to)
+	out, err := run(ctx, r.Dir, "diff", "--name-only", from, to, "--")
 	if err != nil {
 		return nil, err
 	}

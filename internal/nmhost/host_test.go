@@ -116,7 +116,7 @@ func TestHostEndToEnd(t *testing.T) {
 	// The host only acts on extensions cepm manages, so register them.
 	st := state.New()
 	st.Repos["testrepo"] = &state.Repo{
-		URL: "git@example.com:t/r.git", Track: state.TrackBranch, Branch: "main",
+		URL: "git@example.com:t/r.git", Track: state.TrackBranch, Branch: "main", Head: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		Extensions: []state.Extension{
 			{Dir: "a", Name: "A", ID: idA, Key: keyA},
 			{Dir: "b", Name: "B", ID: idB, Key: keyB},
@@ -212,7 +212,7 @@ func TestHostCatchUpReloadsEnabledExtensionsOnly(t *testing.T) {
 
 	st := state.New()
 	st.Repos["testrepo"] = &state.Repo{
-		URL: "git@example.com:t/r.git", Track: state.TrackBranch, Branch: "main",
+		URL: "git@example.com:t/r.git", Track: state.TrackBranch, Branch: "main", Head: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		Extensions: []state.Extension{
 			{Dir: "on", Name: "On", ID: idA, Key: keyA},
 			{Dir: "off", Name: "Off", ID: idB, Key: keyB, Disabled: true},
@@ -323,7 +323,14 @@ func TestAutoUpdateRetriesFailedReloads(t *testing.T) {
 	}
 	t.Cleanup(func() { os.RemoveAll(dir) })
 	t.Setenv("CEPM_HOME", dir)
-	if err := state.New().Save(); err != nil {
+	// The owed id has to be live and enabled: pending reloads are re-checked
+	// against the state before every attempt.
+	st := state.New()
+	st.Repos["testrepo"] = &state.Repo{
+		URL: "u", Track: state.TrackBranch, Branch: "main", Head: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		Extensions: []state.Extension{{Dir: "a", Name: "A", ID: idA, Key: keyA}},
+	}
+	if err := st.Save(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -352,6 +359,8 @@ func TestAutoUpdateRetriesFailedReloads(t *testing.T) {
 			}
 		}
 	}()
+	// The hello-triggered catch-up reload would race these assertions.
+	h.caughtUp.Store(true)
 	go func() { _ = h.readLoop(ctx) }()
 	helper := &fakeHelper{t: t, toHost: helperToHostW, from: hostToHelperR,
 		reloads: make(chan []string, 4)}
@@ -390,5 +399,95 @@ func TestAutoUpdateRetriesFailedReloads(t *testing.T) {
 	case ids := <-helper.reloads:
 		t.Errorf("a settled reload must not be retried, got %v", ids)
 	case <-time.After(500 * time.Millisecond):
+	}
+}
+
+// An owed reload is a promise made against an old state: if the user
+// disables or uninstalls the extension before the retry, delivering it
+// anyway would override that choice — the debt is dropped instead.
+func TestPendingReloadDropsDisabledAndUninstalledExtensions(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "cepm-host")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	t.Setenv("CEPM_HOME", dir)
+	head := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	st := state.New()
+	st.Repos["testrepo"] = &state.Repo{
+		URL: "u", Track: state.TrackBranch, Branch: "main", Head: head,
+		Extensions: []state.Extension{
+			{Dir: "a", Name: "A", ID: idA, Key: keyA},
+			{Dir: "b", Name: "B", ID: idB, Key: keyB},
+		},
+	}
+	if err := st.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	helperToHostR, helperToHostW := io.Pipe()
+	hostToHelperR, hostToHelperW := io.Pipe()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	h := &Host{
+		version:   "test",
+		log:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		in:        helperToHostR,
+		out:       make(chan []byte, 16),
+		pending:   map[string]chan json.RawMessage{},
+		startedAt: time.Now(),
+	}
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case frame := <-h.out:
+				if err := WriteMessage(hostToHelperW, frame); err != nil {
+					return
+				}
+			}
+		}
+	}()
+	// The hello-triggered catch-up reload would race these assertions.
+	h.caughtUp.Store(true)
+	go func() { _ = h.readLoop(ctx) }()
+	helper := &fakeHelper{t: t, toHost: helperToHostW, from: hostToHelperR,
+		reloads: make(chan []string, 4)}
+	go helper.run()
+
+	// Both reloads fail transiently and stay owed.
+	helper.failReloads.Store(true)
+	h.addPendingReloads([]string{idA, idB})
+	h.flushPendingReloads(ctx)
+	select {
+	case <-helper.reloads:
+	case <-time.After(10 * time.Second):
+		t.Fatal("no reload attempt reached the helper")
+	}
+
+	// Before the retry: the user disables A and uninstalls B's repository
+	// entry entirely.
+	st, err = state.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.Repos["testrepo"].Extensions[0].Disabled = true
+	st.Repos["testrepo"].Extensions = st.Repos["testrepo"].Extensions[:1]
+	if err := st.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	helper.failReloads.Store(false)
+	h.flushPendingReloads(ctx)
+	select {
+	case ids := <-helper.reloads:
+		t.Errorf("neither a disabled nor an uninstalled extension may be reloaded, got %v", ids)
+	case <-time.After(500 * time.Millisecond):
+	}
+	h.pendingReloadMu.Lock()
+	defer h.pendingReloadMu.Unlock()
+	if len(h.pendingReload) != 0 {
+		t.Errorf("dropped debts must not linger, got %v", h.pendingReload)
 	}
 }

@@ -98,6 +98,44 @@ func (h *Host) flushPendingReloads(ctx context.Context) {
 	if len(ids) == 0 {
 		return
 	}
+
+	// The debt was recorded at update time; the user may have disabled or
+	// uninstalled since. What is owed is decided by the state *now*: ids no
+	// longer live-and-enabled are dropped, and when the state cannot be
+	// read nothing is sent (but nothing is forgotten either).
+	st, err := state.LoadValid()
+	if err != nil {
+		h.log.Error("pending reload: load state", "err", err)
+		return
+	}
+	enabled := map[string]bool{}
+	for _, name := range st.RepoNames() {
+		for _, e := range st.Repos[name].Extensions {
+			if e.Enabled() {
+				enabled[e.ID] = true
+			}
+		}
+	}
+	var send, drop []string
+	for _, id := range ids {
+		if enabled[id] {
+			send = append(send, id)
+		} else {
+			drop = append(drop, id)
+		}
+	}
+	if len(drop) > 0 {
+		h.log.Info("dropping owed reloads no longer wanted", "ids", drop)
+		h.pendingReloadMu.Lock()
+		for _, id := range drop {
+			delete(h.pendingReload, id)
+		}
+		h.pendingReloadMu.Unlock()
+	}
+	if len(send) == 0 {
+		return
+	}
+	ids = send
 	sort.Strings(ids)
 
 	results, err := h.Reload(ctx, ids)
@@ -436,12 +474,51 @@ func (h *Host) maybeRefreshHelper(ctx context.Context) {
 		"from", installed, "to", helperext.Version)
 }
 
-// ManagedIDs restricts what the control socket may act on to extensions cepm
-// registered (plus stale and orphan records it is meant to clean up). The
+// The control socket may only act on extensions cepm can vouch for. The
 // socket is only reachable by this user, but the helper holds the management
 // permission for *every* installed extension, so the host must not relay
-// arbitrary IDs. Exported so tests can hold their fake host to the same rule.
-func ManagedIDs(ids []string) ([]string, error) {
+// arbitrary IDs. Authorization is per command: a reload makes sense only for
+// a live, enabled extension, while a removal also covers the stale and
+// orphan records cleanup exists for — each set validated (ids re-derived)
+// by LoadValid. Exported so tests hold their fake host to the same rules.
+
+// AuthorizeReload permits ids that are live and enabled right now.
+func AuthorizeReload(ids []string) ([]string, error) {
+	return authorize(ids, func(st *state.State) map[string]bool {
+		ok := map[string]bool{}
+		for _, name := range st.RepoNames() {
+			for _, e := range st.Repos[name].Extensions {
+				if e.Enabled() {
+					ok[e.ID] = true
+				}
+			}
+		}
+		return ok
+	})
+}
+
+// AuthorizeRemoval permits live extensions plus validated stale/orphan
+// records.
+func AuthorizeRemoval(ids []string) ([]string, error) {
+	return authorize(ids, func(st *state.State) map[string]bool {
+		ok := map[string]bool{}
+		for _, name := range st.RepoNames() {
+			r := st.Repos[name]
+			for _, e := range r.Extensions {
+				ok[e.ID] = true
+			}
+			for _, s := range r.Stale {
+				ok[s.ID] = true
+			}
+		}
+		for _, o := range st.Orphans {
+			ok[o.ID] = true
+		}
+		return ok
+	})
+}
+
+func authorize(ids []string, allowed func(*state.State) map[string]bool) ([]string, error) {
 	if len(ids) == 0 {
 		return nil, fmt.Errorf("no extension ids given")
 	}
@@ -450,21 +527,9 @@ func ManagedIDs(ids []string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	known := map[string]bool{}
-	for _, name := range st.RepoNames() {
-		r := st.Repos[name]
-		for _, e := range r.Extensions {
-			known[e.ID] = true
-		}
-		for _, s := range r.Stale {
-			known[s.ID] = true
-		}
-	}
-	for _, o := range st.Orphans {
-		known[o.ID] = true
-	}
+	ok := allowed(st)
 	for _, id := range ids {
-		if !known[id] {
+		if !ok[id] {
 			return nil, fmt.Errorf("extension %s is not managed by cepm", id)
 		}
 	}
@@ -576,7 +641,7 @@ func (h *Host) handleIPC(ctx context.Context, req ipc.Request) ipc.Response {
 		}
 		return ipc.Response{OK: true, Host: info}
 	case ipc.CmdReload:
-		ids, err := ManagedIDs(req.IDs)
+		ids, err := AuthorizeReload(req.IDs)
 		if err != nil {
 			return ipc.Response{Error: err.Error()}
 		}
@@ -592,7 +657,7 @@ func (h *Host) handleIPC(ctx context.Context, req ipc.Request) ipc.Response {
 		}
 		return ipc.Response{OK: true, Extensions: exts}
 	case ipc.CmdUninstall:
-		if _, err := ManagedIDs([]string{req.ID}); err != nil {
+		if _, err := AuthorizeRemoval([]string{req.ID}); err != nil {
 			return ipc.Response{Error: err.Error()}
 		}
 		status, err := h.Uninstall(ctx, req.ID)

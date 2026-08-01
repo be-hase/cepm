@@ -135,7 +135,28 @@ func runDiagnostics(ctx context.Context) []diagnostic {
 	}
 
 	diags = append(diags, checkRepos(ctx, pingErr == nil)...)
+	diags = append(diags, checkStagingLeftovers()...)
 	return diags
+}
+
+// checkStagingLeftovers reports .install-* directories an interrupted
+// install left under ~/.cepm. They hold nothing but an abandoned clone, so
+// deleting them is always safe — but cepm never deletes on its own.
+func checkStagingLeftovers() []diagnostic {
+	home, err := paths.CepmDir()
+	if err != nil {
+		return nil
+	}
+	leftovers, err := filepath.Glob(filepath.Join(home, ".install-*"))
+	if err != nil || len(leftovers) == 0 {
+		return nil
+	}
+	return []diagnostic{{
+		Name:   "staging leftovers",
+		Status: "warn",
+		Detail: fmt.Sprintf("%d staging director(y/ies) from interrupted installs: %s", len(leftovers), strings.Join(leftovers, ", ")),
+		Hint:   "safe to delete: rm -rf " + strings.Join(leftovers, " "),
+	}}
 }
 
 func checkHelperFiles() []diagnostic {
@@ -354,8 +375,12 @@ func checkRepos(ctx context.Context, hostReachable bool) []diagnostic {
 
 // oneLine collapses embedded newlines so that a multi-line git error (which
 // is what LastError usually holds) cannot break column alignment.
+// oneLine flattens s for a single table cell. term.Safe last: much of what
+// passes through here (git stderr, stale reasons) originates outside cepm,
+// and Fields only folds whitespace — ESC sequences and bidi overrides would
+// survive it.
 func oneLine(s string) string {
-	return strings.Join(strings.Fields(strings.ReplaceAll(s, "\n", " ")), " ")
+	return term.Safe(strings.Join(strings.Fields(strings.ReplaceAll(s, "\n", " ")), " "))
 }
 
 func executablePath() string {

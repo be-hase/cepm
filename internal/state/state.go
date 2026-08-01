@@ -52,8 +52,17 @@ func (e Extension) Enabled() bool { return !e.Disabled }
 type StaleExtension struct {
 	ID     string `json:"id"`
 	Name   string `json:"name"`
-	Reason string `json:"reason"`           // "renamed" | "removed"
+	Reason string `json:"reason"`           // "renamed" | "removed" | ...
 	NewDir string `json:"newDir,omitempty"` // for renames: where it moved
+	// SrcDir/SrcKey are what ID was derived from when the record was made.
+	// They make the record self-certifying: Validate re-derives the id, so a
+	// hand-edited file cannot smuggle an arbitrary extension id into the set
+	// the native host is willing to remove from Chrome.
+	SrcDir string `json:"srcDir"`
+	SrcKey string `json:"srcKey,omitempty"`
+	// SrcRepo names the repository the id was derived under. Only orphans
+	// carry it — a stale record still lives inside its repository.
+	SrcRepo string `json:"srcRepo,omitempty"`
 }
 
 // Repo is a managed repository.
@@ -245,7 +254,7 @@ func (s *State) sanitizeNames() {
 // would silently drop fields it does not know on its next write, so Load
 // refuses anything else instead. There are no migrations — pre-release
 // development builds are the only writers so far.
-const Version = 4
+const Version = 5
 
 var repoNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 
@@ -339,6 +348,11 @@ func (s *State) DuplicateLiveID() (id string, a, b ExtRef) {
 // extIDRe is Chrome's extension id alphabet: 32 characters, 'a' through 'p'.
 var extIDRe = regexp.MustCompile(`^[a-p]{32}$`)
 
+// headRe is a full git commit OID (SHA-1 or SHA-256). Nothing shorter and
+// nothing else: the head is handed to git on a command line, where a value
+// like "--output=/path" would be read as an option, not a revision.
+var headRe = regexp.MustCompile(`^([0-9a-f]{40}|[0-9a-f]{64})$`)
+
 func (s *State) Validate() error {
 	if id, a, b := s.DuplicateLiveID(); id != "" {
 		return fmt.Errorf("%s and %s both claim extension id %s "+
@@ -366,6 +380,9 @@ func (s *State) Validate() error {
 		case TrackTag:
 		default:
 			return fmt.Errorf("repository %q has unknown track mode %q", name, term.Safe(r.Track))
+		}
+		if !headRe.MatchString(r.Head) {
+			return fmt.Errorf("repository %q has a malformed head %q (must be a full commit id)", name, term.Safe(r.Head))
 		}
 		seenDirs := map[string]bool{}
 		for _, e := range r.Extensions {
@@ -395,21 +412,45 @@ func (s *State) Validate() error {
 			}
 		}
 		for _, st := range r.Stale {
-			if !extIDRe.MatchString(st.ID) {
-				return fmt.Errorf("repository %q has a stale record with malformed id %q", name, term.Safe(st.ID))
+			if err := validateStaleRecord(reposDir, name, st); err != nil {
+				return fmt.Errorf("repository %q: %w", name, err)
 			}
-			if term.HasControl(st.Reason) || term.HasControl(st.NewDir) {
+			if term.HasControl(st.NewDir) {
 				return fmt.Errorf("repository %q has control characters in a stale record", name)
 			}
 		}
 	}
 	for _, o := range s.Orphans {
-		if !extIDRe.MatchString(o.ID) {
-			return fmt.Errorf("orphan record has malformed id %q", term.Safe(o.ID))
+		if o.SrcRepo == "" || !ValidRepoName(o.SrcRepo) {
+			return fmt.Errorf("orphan record %s does not name a valid source repository", term.Safe(o.ID))
 		}
-		if term.HasControl(o.Reason) {
-			return fmt.Errorf("orphan record %s has control characters in its reason", o.ID)
+		if err := validateStaleRecord(reposDir, o.SrcRepo, o); err != nil {
+			return fmt.Errorf("orphan record: %w", err)
 		}
+	}
+	return nil
+}
+
+// validateStaleRecord re-derives a stale/orphan id from what the record says
+// it came from. These ids are exactly what the native host will offer to
+// remove from Chrome, so a record that cannot prove its id is refused — the
+// same self-certification live extensions get.
+func validateStaleRecord(reposDir, repoName string, st StaleExtension) error {
+	if !extIDRe.MatchString(st.ID) {
+		return fmt.Errorf("stale record has malformed id %q", term.Safe(st.ID))
+	}
+	if term.HasControl(st.Reason) {
+		return fmt.Errorf("stale record %s has control characters in its reason", st.ID)
+	}
+	if err := validDir(st.SrcDir); err != nil {
+		return fmt.Errorf("stale record %s: %w", st.ID, err)
+	}
+	want, err := extid.ForExtension(filepath.Join(reposDir, repoName, st.SrcDir), st.SrcKey)
+	if err != nil {
+		return fmt.Errorf("stale record %s: %w", st.ID, err)
+	}
+	if st.ID != want {
+		return fmt.Errorf("stale record claims id %s but its source derives %s", st.ID, want)
 	}
 	return nil
 }

@@ -79,10 +79,12 @@ func extStatus(chromeStatus map[string]ipc.ChromeExt, e state.Extension) string 
 }
 
 func trackRef(r *state.Repo) string {
+	// Branch and tag names come from the remote; Validate rejects control
+	// characters in a state it accepts, but list renders broken states too.
 	if r.Track == state.TrackTag {
-		return fmt.Sprintf("tag:%s", r.Tag)
+		return fmt.Sprintf("tag:%s", term.Safe(r.Tag))
 	}
-	return fmt.Sprintf("branch:%s", r.Branch)
+	return fmt.Sprintf("branch:%s", term.Safe(r.Branch))
 }
 
 func printListTable(cmd *cobra.Command, st *state.State, chromeStatus map[string]ipc.ChromeExt) error {
@@ -102,11 +104,11 @@ func printListTable(cmd *cobra.Command, st *state.State, chromeStatus map[string
 				name, trackRef(r), e.Name, e.ID, term.Safe(e.Dir), extStatus(chromeStatus, e))
 		}
 		for _, s := range r.Stale {
-			fmt.Fprintf(w, "%s\t\t%s\t%s\t(%s)\tstale — run: cepm cleanup\n", name, s.Name, s.ID, s.Reason)
+			fmt.Fprintf(w, "%s\t\t%s\t%s\t(%s)\tstale — run: cepm cleanup\n", name, s.Name, s.ID, term.Safe(s.Reason))
 		}
 	}
 	for _, o := range st.Orphans {
-		fmt.Fprintf(w, "(uninstalled)\t\t%s\t%s\t(%s)\tstale — run: cepm cleanup\n", o.Name, o.ID, o.Reason)
+		fmt.Fprintf(w, "(uninstalled)\t\t%s\t%s\t(%s)\tstale — run: cepm cleanup\n", o.Name, o.ID, term.Safe(o.Reason))
 	}
 	if err := w.Flush(); err != nil {
 		return err
@@ -115,7 +117,7 @@ func printListTable(cmd *cobra.Command, st *state.State, chromeStatus map[string
 	// otherwise split rows and destroy the column alignment.
 	for _, name := range st.RepoNames() {
 		if e := st.Repos[name].LastError; e != "" {
-			fmt.Fprintf(cmd.OutOrStdout(), "\n⚠ %s: last update failed: %s\n", name, oneLine(e))
+			fmt.Fprintf(cmd.OutOrStdout(), "\n⚠ %s: last update failed: %s\n", name, term.Safe(oneLine(e)))
 		}
 	}
 	return nil

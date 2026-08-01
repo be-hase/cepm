@@ -81,16 +81,15 @@ func runInstall(cmd *cobra.Command, url string, flags installFlags) error {
 	if err != nil {
 		return err
 	}
-	if _, err := os.Stat(dir); err == nil {
-		return fmt.Errorf("%s already exists; pick another --name or run: cepm uninstall %s", dir, name)
-	}
-
 	st, err := state.Load()
 	if err != nil {
 		return err
 	}
 	if _, exists := st.Repos[name]; exists {
 		return fmt.Errorf("repository %q is already registered", name)
+	}
+	if err := destFree(st, name, dir); err != nil {
+		return err
 	}
 
 	// Everything up to the lock — the clone, the scan, the interactive
@@ -136,9 +135,7 @@ func runInstall(cmd *cobra.Command, url string, flags installFlags) error {
 		if _, exists := st.Repos[name]; exists {
 			return fmt.Errorf("repository %q is already registered", name)
 		}
-		if _, err := os.Lstat(dir); err == nil {
-			return fmt.Errorf("%s already exists; pick another --name or run: cepm uninstall %s", dir, name)
-		} else if !errors.Is(err, fs.ErrNotExist) {
+		if err := destFree(st, name, dir); err != nil {
 			return err
 		}
 		if err := os.Rename(stagingClone, dir); err != nil {
@@ -148,14 +145,12 @@ func runInstall(cmd *cobra.Command, url string, flags installFlags) error {
 		// two directories can pin the same manifest "key".
 		st.Repos[name] = repo
 		if err := st.Validate(); err != nil {
-			_ = os.Rename(dir, stagingClone)
-			return fmt.Errorf("cannot install %q: %w", name, err)
+			return undoRename(fmt.Errorf("cannot install %q: %w", name, err), dir, stagingClone)
 		}
 		if err := st.Save(); err != nil {
 			// The state on disk did not change, so the filesystem must not
 			// either: put the clone back before reporting.
-			_ = os.Rename(dir, stagingClone)
-			return err
+			return undoRename(err, dir, stagingClone)
 		}
 		return nil
 	})
@@ -325,6 +320,37 @@ func buildRepo(ctx context.Context, url, dir, idBase, branch, track, tagPattern 
 		r.Extensions = append(r.Extensions, state.Extension{Dir: e.Dir, Name: e.Name, Key: e.Key, ID: id})
 	}
 	return r, nil
+}
+
+// destFree reports whether repos/<name> is available, and — because the two
+// situations need opposite advice — distinguishes a clone that belongs to a
+// registered repository from one left behind by an interrupted install:
+// telling the user to run "cepm uninstall" for the latter is a dead end
+// (uninstall does not know the name).
+func destFree(st *state.State, name, dir string) error {
+	_, err := os.Lstat(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if _, registered := st.Repos[name]; registered {
+		return fmt.Errorf("%s already exists; pick another --name or run: cepm uninstall %s", dir, name)
+	}
+	return fmt.Errorf("%s exists but no repository is registered for it — likely an interrupted install; "+
+		"remove it (rm -rf %s) or run cepm reset, then retry", dir, term.Quote(dir))
+}
+
+// undoRename moves the clone back to staging after a failed registration.
+// If even that fails, the world is exactly the half-installed state the
+// caller tried to avoid, and the user has to hear about both problems.
+func undoRename(cause error, dir, stagingClone string) error {
+	if rbErr := os.Rename(dir, stagingClone); rbErr != nil {
+		return fmt.Errorf("%w; and moving the clone back failed too (%v) — %s now exists unregistered, remove it before retrying",
+			cause, rbErr, dir)
+	}
+	return cause
 }
 
 // repoNameFromURL derives a directory name from a git URL:

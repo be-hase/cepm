@@ -54,9 +54,11 @@ func newUninstallCmd() *cobra.Command {
 			// update lock must not, so only the answer is collected here —
 			// nothing in Chrome has changed yet if the state turns out to have
 			// moved on.
+			// The stale records' derivation info rides along in Dir/Key, so
+			// the orphan records built below stay self-certifying.
 			candidates := append([]state.Extension(nil), repo.Extensions...)
 			for _, s := range repo.Stale {
-				candidates = append(candidates, state.Extension{Name: s.Name, ID: s.ID})
+				candidates = append(candidates, state.Extension{Name: s.Name, ID: s.ID, Dir: s.SrcDir, Key: s.SrcKey})
 			}
 			before := snapshot(repo)
 			approved := askChromeRemoval(cmd, candidates)
@@ -86,6 +88,7 @@ func newUninstallCmd() *cobra.Command {
 					if !gone[e.ID] {
 						orphans = append(orphans, state.StaleExtension{
 							ID: e.ID, Name: e.Name, Reason: "uninstalled",
+							SrcRepo: name, SrcDir: e.Dir, SrcKey: e.Key,
 						})
 					}
 				}

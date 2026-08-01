@@ -37,7 +37,7 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 		Track:      TrackTag,
 		Tag:        "v1.2.0",
 		TagPattern: "v*",
-		Head:       "abc123",
+		Head:       "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		LastPull:   time.Now().Truncate(time.Second),
 		Extensions: []Extension{
 			{Dir: "ext/a", Name: "Ext A", ID: id, Key: key},
@@ -61,10 +61,10 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 // (a crashing host restarts forever and leaves no diagnosis).
 func TestLoadRejectsMalformedState(t *testing.T) {
 	cases := map[string]string{
-		"null repo entry": `{"version":4,"repos":{"broken":null}}`,
-		"traversal name":  `{"version":4,"repos":{"../../evil":{"url":"u"}}}`,
-		"separator name":  `{"version":4,"repos":{"a/b":{"url":"u"}}}`,
-		"invalid json":    `{"version":4,`,
+		"null repo entry": `{"version":5,"repos":{"broken":null}}`,
+		"traversal name":  `{"version":5,"repos":{"../../evil":{"url":"u"}}}`,
+		"separator name":  `{"version":5,"repos":{"a/b":{"url":"u"}}}`,
+		"invalid json":    `{"version":5,`,
 		"future version":  `{"version":99,"repos":{}}`,
 		"older version":   `{"version":3,"repos":{}}`,
 	}
@@ -91,11 +91,11 @@ func TestSaveDropsRecordsForLiveIDs(t *testing.T) {
 	key, id := fixtureKey("live-again")
 	s := New()
 	s.Repos["tools"] = &Repo{
-		URL: "u", Track: TrackBranch, Branch: "main",
+		URL: "u", Track: TrackBranch, Branch: "main", Head: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		Extensions: []Extension{{Dir: "ext", Name: "Ext", ID: id, Key: key}},
 	}
-	s.Repos["tools"].AddStale(StaleExtension{ID: id, Name: "Ext", Reason: "removed"})
-	s.AddOrphans([]StaleExtension{{ID: id, Name: "Ext", Reason: "uninstalled"}})
+	s.Repos["tools"].AddStale(StaleExtension{ID: id, Name: "Ext", Reason: "removed", SrcDir: "ext", SrcKey: key})
+	s.AddOrphans([]StaleExtension{{ID: id, Name: "Ext", Reason: "uninstalled", SrcRepo: "tools", SrcDir: "ext", SrcKey: key}})
 	if err := s.Save(); err != nil {
 		t.Fatal(err)
 	}
@@ -201,7 +201,7 @@ func TestValidateRejectsStructurallyBrokenStates(t *testing.T) {
 	_, otherID := fixtureKey("someone-else")
 	base := func() *State {
 		s := New()
-		s.Repos["tools"] = &Repo{URL: "u", Track: TrackBranch, Branch: "main",
+		s.Repos["tools"] = &Repo{URL: "u", Track: TrackBranch, Branch: "main", Head: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 			Extensions: []Extension{{Dir: "ext", Name: "Ext", ID: id, Key: key}}}
 		return s
 	}
@@ -227,14 +227,30 @@ func TestValidateRejectsStructurallyBrokenStates(t *testing.T) {
 			s.Repos["tools"].Extensions = append(s.Repos["tools"].Extensions,
 				Extension{Dir: "ext", Name: "Two", ID: id2, Key: k2})
 		},
+		"short head":       func(s *State) { s.Repos["tools"].Head = "abc123" },
+		"option-like head": func(s *State) { s.Repos["tools"].Head = "--output=/tmp/pwned" },
+		"empty head":       func(s *State) { s.Repos["tools"].Head = "" },
 		"malformed stale id": func(s *State) {
-			s.Repos["tools"].Stale = []StaleExtension{{ID: "zzzz", Name: "S", Reason: "removed"}}
+			s.Repos["tools"].Stale = []StaleExtension{{ID: "zzzz", Name: "S", Reason: "removed", SrcDir: "ext"}}
+		},
+		"underivable stale id": func(s *State) {
+			_, sid := fixtureKey("someone-else")
+			s.Repos["tools"].Stale = []StaleExtension{{ID: sid, Name: "S", Reason: "removed", SrcDir: "gone", SrcKey: key}}
+		},
+		"orphan without source repo": func(s *State) {
+			_, oid := fixtureKey("someone-else")
+			s.Orphans = []StaleExtension{{ID: oid, Name: "O", Reason: "uninstalled", SrcDir: "ext"}}
+		},
+		"underivable orphan id": func(s *State) {
+			_, oid := fixtureKey("someone-else")
+			s.Orphans = []StaleExtension{{ID: oid, Name: "O", Reason: "uninstalled", SrcRepo: "tools", SrcDir: "ext"}}
 		},
 		"control char stale reason": func(s *State) {
-			s.Repos["tools"].Stale = []StaleExtension{{ID: otherID, Name: "S", Reason: "removed\x1b[2K"}}
+			k2, id2 := fixtureKey("stale-src")
+			s.Repos["tools"].Stale = []StaleExtension{{ID: id2, Name: "S", Reason: "removed\x1b[2K", SrcDir: "gone", SrcKey: k2}}
 		},
 		"malformed orphan id": func(s *State) {
-			s.Orphans = []StaleExtension{{ID: "zz", Name: "O", Reason: "uninstalled"}}
+			s.Orphans = []StaleExtension{{ID: "zz", Name: "O", Reason: "uninstalled", SrcRepo: "tools", SrcDir: "ext"}}
 		},
 	}
 	for name, mutate := range cases {
@@ -261,7 +277,7 @@ func TestValidateAcceptsPathDerivedIDs(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := New()
-	s.Repos["tools"] = &Repo{URL: "u", Track: TrackBranch, Branch: "main",
+	s.Repos["tools"] = &Repo{URL: "u", Track: TrackBranch, Branch: "main", Head: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		Extensions: []Extension{{Dir: "ext", Name: "Ext", ID: id}}}
 	if err := s.Validate(); err != nil {
 		t.Errorf("a correctly path-derived id must validate: %v", err)
