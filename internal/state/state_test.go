@@ -198,40 +198,6 @@ func TestKeptClonesSurviveAndRaiseTheVersion(t *testing.T) {
 	}
 }
 
-// Version 3 stored kept clones as absolute paths. A user who ran a repair on
-// that version must not be locked out of every command after upgrading, so
-// paths directly under the repos directory migrate to their name — without a
-// token, because nothing proves the directory's contents any more.
-func TestLoadMigratesVersionThreeKeptClonePaths(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("CEPM_HOME", home)
-	raw := `{"version":3,"repos":{},"keptClones":[` +
-		strconv.Quote(filepath.Join(home, "repos", "tools")) + `]}`
-	if err := os.WriteFile(filepath.Join(home, "state.json"), []byte(raw), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	s, err := Load()
-	if err != nil {
-		t.Fatalf("a version 3 kept clone path must migrate, not brick the state: %v", err)
-	}
-	if len(s.KeptClones) != 1 || s.KeptClones[0].Name != "tools" || s.KeptClones[0].Token != "" {
-		t.Fatalf("migrated entry should be the unproven name, got %+v", s.KeptClones)
-	}
-	if err := s.Save(); err != nil {
-		t.Fatal(err)
-	}
-	again, err := Load()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if again.Version != 4 {
-		t.Errorf("migration should be persisted as version 4, got %d", again.Version)
-	}
-	if len(again.KeptClones) != 1 || again.KeptClones[0].Name != "tools" {
-		t.Errorf("migrated entry lost on re-save: %+v", again.KeptClones)
-	}
-}
-
 // A kept name resolves to a directory that is eventually shown next to
 // "rm -rf", and state.json is user-editable: what does not pass the same
 // validation as a repository name must never be resolved, and a name that
@@ -241,7 +207,7 @@ func TestKeptClonesAreValidatedAndDroppedWhenLiveAgain(t *testing.T) {
 	t.Setenv("CEPM_HOME", home)
 
 	for _, bad := range []string{"../evil", "a/b", "/tmp", ".."} {
-		raw := `{"version":3,"repos":{},"keptClones":[` + strconv.Quote(bad) + `]}`
+		raw := `{"version":4,"repos":{},"keptClones":[{"name":` + strconv.Quote(bad) + `}]}`
 		if err := os.WriteFile(filepath.Join(home, "state.json"), []byte(raw), 0o600); err != nil {
 			t.Fatal(err)
 		}

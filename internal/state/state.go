@@ -135,20 +135,6 @@ type KeptClone struct {
 	Token string `json:"token,omitempty"`
 }
 
-// UnmarshalJSON also accepts the bare-string form version 3 files used.
-func (k *KeptClone) UnmarshalJSON(b []byte) error {
-	if len(b) > 0 && b[0] == '"' {
-		return json.Unmarshal(b, &k.Name)
-	}
-	type plain KeptClone
-	var p plain
-	if err := json.Unmarshal(b, &p); err != nil {
-		return err
-	}
-	*k = KeptClone(p)
-	return nil
-}
-
 // KeepClone records a repository whose clone stays on disk, ignoring
 // duplicates. A name that would not survive Load is refused outright:
 // recording it would produce a state file this very cepm then rejects.
@@ -257,11 +243,6 @@ func Load() (*State, error) {
 			return nil, fmt.Errorf("%s: invalid repository name %q", path, name)
 		}
 	}
-	if s.Version < 4 {
-		if err := s.migrateKeptClones(path); err != nil {
-			return nil, err
-		}
-	}
 	for _, k := range s.KeptClones {
 		if !ValidRepoName(k.Name) {
 			return nil, fmt.Errorf("%s: invalid kept clone name %q (edit or delete the file)", path, term.Safe(k.Name))
@@ -269,33 +250,6 @@ func Load() (*State, error) {
 	}
 	s.sanitizeNames()
 	return &s, nil
-}
-
-// migrateKeptClones converts what version 3 files stored — the clone's
-// absolute path — to the repository name version 4 uses. Only a path lying
-// directly under the repos directory can ever have been written by cepm;
-// anything else is hand-edited, and refusing loudly beats guessing at what
-// to delete. Tokens did not exist yet, so migrated entries stay unproven:
-// they are pointed out, never fed to rm.
-func (s *State) migrateKeptClones(path string) error {
-	if len(s.KeptClones) == 0 {
-		return nil
-	}
-	reposDir, err := paths.ReposDir()
-	if err != nil {
-		return err
-	}
-	for i, k := range s.KeptClones {
-		if ValidRepoName(k.Name) {
-			continue
-		}
-		rel, relErr := filepath.Rel(reposDir, k.Name)
-		if relErr != nil || !ValidRepoName(rel) {
-			return fmt.Errorf("%s: invalid kept clone %q (edit or delete the file)", path, term.Safe(k.Name))
-		}
-		s.KeptClones[i] = KeptClone{Name: rel}
-	}
-	return nil
 }
 
 // sanitizeNames strips what a display name must never carry. Names are
@@ -324,8 +278,9 @@ func (s *State) sanitizeNames() {
 // can remove would vanish), version 3 added State.KeptClones (directories
 // held back during a repair would stop being tracked and never be cleaned
 // up), and version 4 changed KeptClones from absolute paths to validated
-// repository names with an ownership token (Load migrates the version 3
-// form).
+// repository names with an ownership token. No version 3 file was ever
+// written outside development, so there is no migration: an old file simply
+// fails validation.
 const Version = 4
 
 var repoNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
