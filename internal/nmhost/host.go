@@ -10,6 +10,7 @@ import (
 	"math/rand/v2"
 	"net"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -61,6 +62,66 @@ type Host struct {
 	lastPong        atomic.Int64 // unix nano
 	helperRefreshed atomic.Bool  // helper file refresh attempted (once per process)
 	caughtUp        atomic.Bool  // startup catch-up reload done (once per process)
+
+	// pendingReload holds ids whose reload is owed to Chrome: the update
+	// already checked out their new code, but the reload has not been
+	// confirmed. The set survives failed attempts and is retried on every
+	// scheduler tick — without it, one transient helper error would leave
+	// the user running old code until the next commit or Chrome restart.
+	pendingReloadMu sync.Mutex
+	pendingReload   map[string]bool
+}
+
+// addPendingReloads records ids whose reload is owed.
+func (h *Host) addPendingReloads(ids []string) {
+	h.pendingReloadMu.Lock()
+	defer h.pendingReloadMu.Unlock()
+	if h.pendingReload == nil {
+		h.pendingReload = map[string]bool{}
+	}
+	for _, id := range ids {
+		h.pendingReload[id] = true
+	}
+}
+
+// flushPendingReloads tries to deliver every owed reload. Only an outcome
+// that settles the intent — reloaded, not installed, skipped by the user's
+// choice — clears an id; transport errors, per-id errors and missing answers
+// keep it owed for the next attempt.
+func (h *Host) flushPendingReloads(ctx context.Context) {
+	h.pendingReloadMu.Lock()
+	ids := make([]string, 0, len(h.pendingReload))
+	for id := range h.pendingReload {
+		ids = append(ids, id)
+	}
+	h.pendingReloadMu.Unlock()
+	if len(ids) == 0 {
+		return
+	}
+	sort.Strings(ids)
+
+	results, err := h.Reload(ctx, ids)
+	if err != nil {
+		h.log.Error("reload failed; keeping it for the next tick", "err", err, "ids", ids)
+		return
+	}
+	settled := map[string]bool{}
+	for _, r := range results {
+		h.log.Info("reload", "id", r.ID, "status", r.Status, "err", r.Error)
+		switch r.Status {
+		case ipc.StatusReloaded, ipc.StatusNotInstalled, ipc.StatusSkippedDisabled, ipc.StatusSkippedSelf:
+			settled[r.ID] = true
+		}
+	}
+	h.pendingReloadMu.Lock()
+	for id := range settled {
+		delete(h.pendingReload, id)
+	}
+	remaining := len(h.pendingReload)
+	h.pendingReloadMu.Unlock()
+	if remaining > 0 {
+		h.log.Warn("reloads still owed; retrying on the next tick", "count", remaining)
+	}
 }
 
 // CheckOrigin verifies the caller identified itself as the cepm helper.
@@ -584,6 +645,8 @@ func (h *Host) autoUpdate(ctx context.Context, cfg *config.Config) {
 	results, err := updater.Update(ctx, nil, updater.Options{StashDirty: cfg.Git.StashDirty})
 	if err != nil {
 		h.log.Error("auto update failed", "err", err)
+		// Reloads owed from earlier ticks do not depend on this update.
+		h.flushPendingReloads(ctx)
 		return
 	}
 	var ids []string
@@ -601,15 +664,8 @@ func (h *Host) autoUpdate(ctx context.Context, cfg *config.Config) {
 			}
 		}
 	}
-	if len(ids) == 0 {
-		return
-	}
-	results2, err := h.Reload(ctx, ids)
-	if err != nil {
-		h.log.Error("reload after auto update failed", "err", err)
-		return
-	}
-	for _, r := range results2 {
-		h.log.Info("reload", "id", r.ID, "status", r.Status, "err", r.Error)
-	}
+	h.addPendingReloads(ids)
+	// Owed reloads from earlier ticks are retried even when this update
+	// found nothing new.
+	h.flushPendingReloads(ctx)
 }

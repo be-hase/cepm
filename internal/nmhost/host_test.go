@@ -5,11 +5,14 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/be-hase/cepm/internal/config"
 	"github.com/be-hase/cepm/internal/extid"
 	"github.com/be-hase/cepm/internal/helperext"
 	"github.com/be-hase/cepm/internal/ipc"
@@ -24,6 +27,9 @@ type fakeHelper struct {
 	toHost  io.Writer
 	from    io.Reader
 	reloads chan []string // receives extensionIds of every reload request (optional)
+	// failReloads makes reload requests answer status "error" while set —
+	// the transient helper failure the pending-reload retry exists for.
+	failReloads atomic.Bool
 }
 
 func (f *fakeHelper) send(msg any) {
@@ -61,9 +67,13 @@ func (f *fakeHelper) run() {
 			if f.reloads != nil {
 				f.reloads <- msg.ExtensionIDs
 			}
+			status := "reloaded"
+			if f.failReloads.Load() {
+				status = "error"
+			}
 			results := make([]map[string]string, len(msg.ExtensionIDs))
 			for i, id := range msg.ExtensionIDs {
-				results[i] = map[string]string{"id": id, "status": "reloaded"}
+				results[i] = map[string]string{"id": id, "status": status}
 			}
 			f.send(map[string]any{"type": "reloadResult", "requestId": msg.RequestID, "results": results})
 		case "listExtensions":
@@ -299,5 +309,86 @@ func TestHostRefreshesOutdatedHelper(t *testing.T) {
 	case <-runDone:
 	case <-time.After(5 * time.Second):
 		t.Fatal("host did not exit after stdin EOF")
+	}
+}
+
+// A reload that fails after a successful auto update must stay owed: the
+// checkout has already happened, and forgetting the reload would leave the
+// user running old code until the next commit or a Chrome restart. The next
+// scheduler tick — even one that finds nothing new — retries it.
+func TestAutoUpdateRetriesFailedReloads(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "cepm-host")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	t.Setenv("CEPM_HOME", dir)
+	if err := state.New().Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	helperToHostR, helperToHostW := io.Pipe()
+	hostToHelperR, hostToHelperW := io.Pipe()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	h := &Host{
+		version:   "test",
+		log:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		in:        helperToHostR,
+		out:       make(chan []byte, 16),
+		pending:   map[string]chan json.RawMessage{},
+		startedAt: time.Now(),
+	}
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case frame := <-h.out:
+				if err := WriteMessage(hostToHelperW, frame); err != nil {
+					return
+				}
+			}
+		}
+	}()
+	go func() { _ = h.readLoop(ctx) }()
+	helper := &fakeHelper{t: t, toHost: helperToHostW, from: hostToHelperR,
+		reloads: make(chan []string, 4)}
+	go helper.run()
+
+	// Tick 1: the update itself succeeds (nothing registered, nothing to
+	// pull) but the reload of an owed id fails transiently.
+	helper.failReloads.Store(true)
+	h.addPendingReloads([]string{idA})
+	h.autoUpdate(ctx, &config.Config{})
+	select {
+	case ids := <-helper.reloads:
+		if len(ids) != 1 || ids[0] != idA {
+			t.Fatalf("first attempt should carry the owed id, got %v", ids)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("no reload attempt reached the helper")
+	}
+
+	// Tick 2: up to date again — the owed reload must be retried, and a
+	// healthy helper settles it.
+	helper.failReloads.Store(false)
+	h.autoUpdate(ctx, &config.Config{})
+	select {
+	case ids := <-helper.reloads:
+		if len(ids) != 1 || ids[0] != idA {
+			t.Fatalf("the retry should carry the owed id, got %v", ids)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the owed reload was never retried")
+	}
+
+	// Settled: a third tick owes nothing.
+	h.autoUpdate(ctx, &config.Config{})
+	select {
+	case ids := <-helper.reloads:
+		t.Errorf("a settled reload must not be retried, got %v", ids)
+	case <-time.After(500 * time.Millisecond):
 	}
 }
