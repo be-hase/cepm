@@ -1,11 +1,21 @@
 package state
 
 import (
+	"encoding/base64"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/be-hase/cepm/internal/extid"
 )
+
+// Fixture ids pinned by manifest keys, because Validate re-derives every
+// live id from its recorded key or path.
+func fixtureKey(seed string) (key, id string) {
+	return base64.StdEncoding.EncodeToString([]byte(seed)),
+		extid.FromPublicKey([]byte(seed))
+}
 
 func TestLoadMissingReturnsEmpty(t *testing.T) {
 	t.Setenv("CEPM_HOME", t.TempDir())
@@ -20,6 +30,7 @@ func TestLoadMissingReturnsEmpty(t *testing.T) {
 
 func TestSaveLoadRoundTrip(t *testing.T) {
 	t.Setenv("CEPM_HOME", t.TempDir())
+	key, id := fixtureKey("round-trip")
 	s := New()
 	s.Repos["mytools"] = &Repo{
 		URL:        "git@example.com:team/mytools.git",
@@ -29,7 +40,7 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 		Head:       "abc123",
 		LastPull:   time.Now().Truncate(time.Second),
 		Extensions: []Extension{
-			{Dir: "ext/a", Name: "Ext A", ID: "aaaabbbbccccddddeeeeffffgggghhhh"},
+			{Dir: "ext/a", Name: "Ext A", ID: id, Key: key},
 		},
 	}
 	if err := s.Save(); err != nil {
@@ -77,13 +88,14 @@ func TestLoadRejectsMalformedState(t *testing.T) {
 // it recorded would let cleanup uninstall a working extension.
 func TestSaveDropsRecordsForLiveIDs(t *testing.T) {
 	t.Setenv("CEPM_HOME", t.TempDir())
+	key, id := fixtureKey("live-again")
 	s := New()
 	s.Repos["tools"] = &Repo{
 		URL: "u", Track: TrackBranch, Branch: "main",
-		Extensions: []Extension{{Dir: "ext", Name: "Ext", ID: "aaaa"}},
+		Extensions: []Extension{{Dir: "ext", Name: "Ext", ID: id, Key: key}},
 	}
-	s.Repos["tools"].AddStale(StaleExtension{ID: "aaaa", Name: "Ext", Reason: "removed"})
-	s.AddOrphans([]StaleExtension{{ID: "aaaa", Name: "Ext", Reason: "uninstalled"}})
+	s.Repos["tools"].AddStale(StaleExtension{ID: id, Name: "Ext", Reason: "removed"})
+	s.AddOrphans([]StaleExtension{{ID: id, Name: "Ext", Reason: "uninstalled"}})
 	if err := s.Save(); err != nil {
 		t.Fatal(err)
 	}
@@ -175,5 +187,87 @@ func TestRepoNamesSorted(t *testing.T) {
 	names := s.RepoNames()
 	if len(names) != 2 || names[0] != "alpha" || names[1] != "zeta" {
 		t.Errorf("RepoNames = %v", names)
+	}
+}
+
+// Validate has to check everything the current cepm writes, because LoadValid
+// is also the native host's authorization: a hand-edited state naming some
+// other installed extension's id would otherwise put that id under cepm's
+// reload/uninstall control. The base fixture is valid; each case breaks one
+// invariant and must be rejected by Validate and refused by Save.
+func TestValidateRejectsStructurallyBrokenStates(t *testing.T) {
+	t.Setenv("CEPM_HOME", t.TempDir())
+	key, id := fixtureKey("valid")
+	_, otherID := fixtureKey("someone-else")
+	base := func() *State {
+		s := New()
+		s.Repos["tools"] = &Repo{URL: "u", Track: TrackBranch, Branch: "main",
+			Extensions: []Extension{{Dir: "ext", Name: "Ext", ID: id, Key: key}}}
+		return s
+	}
+	if err := base().Validate(); err != nil {
+		t.Fatalf("the base fixture must be valid: %v", err)
+	}
+
+	cases := map[string]func(*State){
+		"empty url":            func(s *State) { s.Repos["tools"].URL = "" },
+		"control char url":     func(s *State) { s.Repos["tools"].URL = "u\x1b[2K" },
+		"unknown track":        func(s *State) { s.Repos["tools"].Track = "rolling" },
+		"branch without name":  func(s *State) { s.Repos["tools"].Branch = "" },
+		"control char branch":  func(s *State) { s.Repos["tools"].Branch = "main\nFORGED" },
+		"empty dir":            func(s *State) { s.Repos["tools"].Extensions[0].Dir = "" },
+		"traversal dir":        func(s *State) { s.Repos["tools"].Extensions[0].Dir = "../outside" },
+		"absolute dir":         func(s *State) { s.Repos["tools"].Extensions[0].Dir = "/tmp/x" },
+		"unnormalized dir":     func(s *State) { s.Repos["tools"].Extensions[0].Dir = "ext/../ext" },
+		"malformed id":         func(s *State) { s.Repos["tools"].Extensions[0].ID = "not-an-id" },
+		"well-formed wrong id": func(s *State) { s.Repos["tools"].Extensions[0].ID = otherID },
+		"undecodable key":      func(s *State) { s.Repos["tools"].Extensions[0].Key = "%%%" },
+		"duplicate dir": func(s *State) {
+			k2, id2 := fixtureKey("second")
+			s.Repos["tools"].Extensions = append(s.Repos["tools"].Extensions,
+				Extension{Dir: "ext", Name: "Two", ID: id2, Key: k2})
+		},
+		"malformed stale id": func(s *State) {
+			s.Repos["tools"].Stale = []StaleExtension{{ID: "zzzz", Name: "S", Reason: "removed"}}
+		},
+		"control char stale reason": func(s *State) {
+			s.Repos["tools"].Stale = []StaleExtension{{ID: otherID, Name: "S", Reason: "removed\x1b[2K"}}
+		},
+		"malformed orphan id": func(s *State) {
+			s.Orphans = []StaleExtension{{ID: "zz", Name: "O", Reason: "uninstalled"}}
+		},
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			s := base()
+			mutate(s)
+			if err := s.Validate(); err == nil {
+				t.Error("Validate should reject this state")
+			}
+			if err := s.Save(); err == nil {
+				t.Error("Save should refuse this state")
+			}
+		})
+	}
+}
+
+// A path-derived id (no manifest key) validates against the id recomputed
+// from the clone's location — the design's foundation, so pin it here.
+func TestValidateAcceptsPathDerivedIDs(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("CEPM_HOME", home)
+	id, err := extid.FromPath(filepath.Join(home, "repos", "tools", "ext"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := New()
+	s.Repos["tools"] = &Repo{URL: "u", Track: TrackBranch, Branch: "main",
+		Extensions: []Extension{{Dir: "ext", Name: "Ext", ID: id}}}
+	if err := s.Validate(); err != nil {
+		t.Errorf("a correctly path-derived id must validate: %v", err)
+	}
+	s.Repos["tools"].Extensions[0].ID = id[1:] + "a" // still well-formed, wrong value
+	if err := s.Validate(); err == nil {
+		t.Error("a well-formed but underivable id must be rejected")
 	}
 }

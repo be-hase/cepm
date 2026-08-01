@@ -2,6 +2,7 @@ package nmhost
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/be-hase/cepm/internal/extid"
 	"github.com/be-hase/cepm/internal/helperext"
 	"github.com/be-hase/cepm/internal/ipc"
 	"github.com/be-hase/cepm/internal/state"
@@ -68,7 +70,7 @@ func (f *fakeHelper) run() {
 			f.send(map[string]any{
 				"type": "listResult", "requestId": msg.RequestID,
 				"extensions": []map[string]any{
-					{"id": "aaaa", "name": "Fake Ext", "version": "1.0", "enabled": true},
+					{"id": idA, "name": "Fake Ext", "version": "1.0", "enabled": true},
 				},
 			})
 		case "uninstall":
@@ -79,6 +81,18 @@ func (f *fakeHelper) run() {
 			})
 		}
 	}
+}
+
+// Fixture ids pinned by manifest keys, because state.Validate re-derives
+// every live id from its recorded key or path.
+var (
+	keyA, idA = fixtureKey("seed-a")
+	keyB, idB = fixtureKey("seed-b")
+)
+
+func fixtureKey(seed string) (key, id string) {
+	return base64.StdEncoding.EncodeToString([]byte(seed)),
+		extid.FromPublicKey([]byte(seed))
 }
 
 func TestHostEndToEnd(t *testing.T) {
@@ -94,8 +108,8 @@ func TestHostEndToEnd(t *testing.T) {
 	st.Repos["testrepo"] = &state.Repo{
 		URL: "git@example.com:t/r.git", Track: state.TrackBranch, Branch: "main",
 		Extensions: []state.Extension{
-			{Dir: "a", Name: "A", ID: "aaaa"},
-			{Dir: "b", Name: "B", ID: "bbbb"},
+			{Dir: "a", Name: "A", ID: idA, Key: keyA},
+			{Dir: "b", Name: "B", ID: idB, Key: keyB},
 		},
 	}
 	if err := st.Save(); err != nil {
@@ -127,7 +141,7 @@ func TestHostEndToEnd(t *testing.T) {
 		t.Errorf("unexpected host info: %+v", info)
 	}
 
-	results, err := ipc.Reload(ctx, []string{"aaaa", "bbbb"})
+	results, err := ipc.Reload(ctx, []string{idA, idB})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,7 +157,7 @@ func TestHostEndToEnd(t *testing.T) {
 		t.Errorf("unexpected extensions: %+v", exts)
 	}
 
-	status, err := ipc.Uninstall(ctx, "aaaa")
+	status, err := ipc.Uninstall(ctx, idA)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -190,8 +204,8 @@ func TestHostCatchUpReloadsEnabledExtensionsOnly(t *testing.T) {
 	st.Repos["testrepo"] = &state.Repo{
 		URL: "git@example.com:t/r.git", Track: state.TrackBranch, Branch: "main",
 		Extensions: []state.Extension{
-			{Dir: "on", Name: "On", ID: "aaaa"},
-			{Dir: "off", Name: "Off", ID: "bbbb", Disabled: true},
+			{Dir: "on", Name: "On", ID: idA, Key: keyA},
+			{Dir: "off", Name: "Off", ID: idB, Key: keyB, Disabled: true},
 		},
 	}
 	if err := st.Save(); err != nil {
@@ -209,7 +223,7 @@ func TestHostCatchUpReloadsEnabledExtensionsOnly(t *testing.T) {
 
 	select {
 	case ids := <-helper.reloads:
-		if len(ids) != 1 || ids[0] != "aaaa" {
+		if len(ids) != 1 || ids[0] != idA {
 			t.Errorf("catch-up should reload only enabled extensions, got %v", ids)
 		}
 	case <-time.After(10 * time.Second):

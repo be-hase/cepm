@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -22,6 +23,24 @@ import (
 	"github.com/be-hase/cepm/internal/state"
 	"github.com/be-hase/cepm/internal/updater"
 )
+
+// Fixture ids pinned by manifest keys. Validate re-derives every live id
+// from its recorded key or path, so a made-up literal like "aaaa" no longer
+// passes; a key-derived id does not depend on the temp directory, which is
+// what lets tests share these as constants.
+var (
+	keyA, idA = fixtureKey("seed-a")
+	keyB, idB = fixtureKey("seed-b")
+	keyZ, idZ = fixtureKey("seed-z")
+)
+
+// idS is a stale/orphan-only id: those are not re-derived, any well-formed
+// id will do.
+var idS = extid.FromPublicKey([]byte("seed-s"))
+
+func fixtureKey(seed string) (key, id string) {
+	return base64.StdEncoding.EncodeToString([]byte(seed)), extid.FromPublicKey([]byte(seed))
+}
 
 // fakeHost stands in for the native messaging host: it serves the control
 // socket the CLI talks to, so command-level tests exercise the real IPC path
@@ -173,8 +192,8 @@ func updaterRepoDir(name string) (string, error) {
 // removal, which made the host refuse every id as "not managed by cepm".
 func TestUninstallRemovesFromChromeBeforeUnregistering(t *testing.T) {
 	interactive(t)
-	host := startFakeHost(t, "aaaa")
-	seedRepo(t, "tools", state.Extension{Dir: "ext", Name: "Ext", ID: "aaaa"})
+	host := startFakeHost(t, idA)
+	seedRepo(t, "tools", state.Extension{Dir: "ext", Name: "Ext", ID: idA, Key: keyA})
 
 	out, err := run(t, "y\n", "uninstall", "tools")
 	if err != nil {
@@ -182,7 +201,7 @@ func TestUninstallRemovesFromChromeBeforeUnregistering(t *testing.T) {
 	}
 	host.mu.Lock()
 	defer host.mu.Unlock()
-	if len(host.uninstalled) != 1 || host.uninstalled[0] != "aaaa" {
+	if len(host.uninstalled) != 1 || host.uninstalled[0] != idA {
 		t.Errorf("Chrome-side removal did not happen: %v\n%s", host.uninstalled, out)
 	}
 	if strings.Contains(out, "not managed by cepm") {
@@ -208,8 +227,8 @@ func TestUninstallRemovesFromChromeBeforeUnregistering(t *testing.T) {
 // repo it belonged to, or cleanup can never finish the job.
 func TestUninstallKeepsOrphanWhenUserDeclines(t *testing.T) {
 	interactive(t)
-	startFakeHost(t, "aaaa")
-	seedRepo(t, "tools", state.Extension{Dir: "ext", Name: "Ext", ID: "aaaa"})
+	startFakeHost(t, idA)
+	seedRepo(t, "tools", state.Extension{Dir: "ext", Name: "Ext", ID: idA, Key: keyA})
 
 	out, err := run(t, "n\n", "uninstall", "tools")
 	if err != nil {
@@ -219,7 +238,7 @@ func TestUninstallKeepsOrphanWhenUserDeclines(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(st.Orphans) != 1 || st.Orphans[0].ID != "aaaa" {
+	if len(st.Orphans) != 1 || st.Orphans[0].ID != idA {
 		t.Fatalf("expected an orphan record, got %+v", st.Orphans)
 	}
 
@@ -241,7 +260,7 @@ func TestUninstallKeepsOrphanWhenUserDeclines(t *testing.T) {
 // lock at exactly that moment.
 func TestCleanupExcludesUpdatesWhileDialogIsOpen(t *testing.T) {
 	interactive(t)
-	host := startFakeHost(t, "aaaa")
+	host := startFakeHost(t, idA)
 	host.onUninstall = func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
@@ -249,7 +268,7 @@ func TestCleanupExcludesUpdatesWhileDialogIsOpen(t *testing.T) {
 			t.Error("the update lock must be held while a removal dialog is pending")
 		}
 	}
-	seedRepo(t, "tools", state.Extension{Dir: "ext", Name: "Ext", ID: "aaaa"})
+	seedRepo(t, "tools", state.Extension{Dir: "ext", Name: "Ext", ID: idA, Key: keyA})
 	if out, err := run(t, "n\n", "uninstall", "tools"); err != nil {
 		t.Fatalf("uninstall: %v\n%s", err, out)
 	}
@@ -262,16 +281,16 @@ func TestCleanupExcludesUpdatesWhileDialogIsOpen(t *testing.T) {
 // what happened in Chrome, not how many records pointed at it.
 func TestCleanupCountsUniqueIDs(t *testing.T) {
 	interactive(t)
-	startFakeHost(t, "aaaa")
-	seedRepo(t, "tools", state.Extension{Dir: "ext", Name: "Ext", ID: "aaaa"})
+	startFakeHost(t, idA)
+	seedRepo(t, "tools", state.Extension{Dir: "ext", Name: "Ext", ID: idA, Key: keyA})
 	if out, err := run(t, "n\n", "uninstall", "tools"); err != nil { // → orphan aaaa
 		t.Fatalf("uninstall: %v\n%s", err, out)
 	}
 	// A second record for the same id, via a repo-level stale entry.
 	st, _ := state.Load()
-	seedRepo(t, "other", state.Extension{Dir: "x", Name: "X", ID: "bbbb"})
+	seedRepo(t, "other", state.Extension{Dir: "x", Name: "X", ID: idB, Key: keyB})
 	st, _ = state.Load()
-	st.Repos["other"].AddStale(state.StaleExtension{ID: "aaaa", Name: "Ext", Reason: "removed"})
+	st.Repos["other"].AddStale(state.StaleExtension{ID: idA, Name: "Ext", Reason: "removed"})
 	if err := st.Save(); err != nil {
 		t.Fatal(err)
 	}
@@ -655,8 +674,8 @@ func failStateSaves(t *testing.T) {
 // registered with nothing behind it, and re-running could not repair that.
 func TestUninstallKeepsTheCloneWhenTheSaveFails(t *testing.T) {
 	interactive(t)
-	startFakeHost(t, "aaaa")
-	seedRepo(t, "tools", state.Extension{Dir: "ext", Name: "Ext", ID: "aaaa"})
+	startFakeHost(t, idA)
+	seedRepo(t, "tools", state.Extension{Dir: "ext", Name: "Ext", ID: idA, Key: keyA})
 	dir, err := updaterRepoDir("tools")
 	if err != nil {
 		t.Fatal(err)
@@ -681,8 +700,8 @@ func TestUninstallKeepsTheCloneWhenTheSaveFails(t *testing.T) {
 // Chrome first — otherwise "nothing was changed" is a lie.
 func TestUninstallDoesNotTouchChromeWhenAborting(t *testing.T) {
 	interactive(t)
-	host := startFakeHost(t, "aaaa")
-	seedRepo(t, "tools", state.Extension{Dir: "ext", Name: "Ext", ID: "aaaa"})
+	host := startFakeHost(t, idA)
+	seedRepo(t, "tools", state.Extension{Dir: "ext", Name: "Ext", ID: idA, Key: keyA})
 
 	// An update lands while the user is being asked. It *adds* an extension
 	// rather than replacing one, so the extension under discussion stays
@@ -698,7 +717,7 @@ func TestUninstallDoesNotTouchChromeWhenAborting(t *testing.T) {
 					return err
 				}
 				st.Repos["tools"].Extensions = append(st.Repos["tools"].Extensions,
-					state.Extension{Dir: "added", Name: "Added", ID: "zzzz"})
+					state.Extension{Dir: "added", Name: "Added", ID: idZ, Key: keyZ})
 				return st.Save()
 			}); err != nil {
 				t.Errorf("simulating a concurrent update: %v", err)
@@ -716,7 +735,7 @@ func TestUninstallDoesNotTouchChromeWhenAborting(t *testing.T) {
 	if len(host.uninstalled) != 0 {
 		t.Errorf("nothing may be removed from Chrome before the abort, got %v", host.uninstalled)
 	}
-	if !host.loaded["aaaa"] {
+	if !host.loaded[idA] {
 		t.Error("the extension should still be loaded in Chrome")
 	}
 }
@@ -727,19 +746,19 @@ func TestUninstallDoesNotTouchChromeWhenAborting(t *testing.T) {
 // running it, and cleanup can never find it again.
 func TestUninstallOrphansAnExtensionLoadedDuringThePrompt(t *testing.T) {
 	interactive(t)
-	// "aaaa" is registered but not loaded; "bbbb" is loaded, so it triggers
+	// idA is registered but not loaded; idB is loaded, so it triggers
 	// the prompt that gives the concurrent load a window.
-	host := startFakeHost(t, "bbbb")
+	host := startFakeHost(t, idB)
 	seedRepo(t, "tools",
-		state.Extension{Dir: "ext", Name: "Ext", ID: "aaaa"},
-		state.Extension{Dir: "other", Name: "Other", ID: "bbbb"})
+		state.Extension{Dir: "ext", Name: "Ext", ID: idA, Key: keyA},
+		state.Extension{Dir: "other", Name: "Other", ID: idB, Key: keyB})
 
 	loadedOnce := false
 	assist.IsTTY = func() bool {
 		if !loadedOnce {
 			loadedOnce = true
 			host.mu.Lock()
-			host.loaded["aaaa"] = true
+			host.loaded[idA] = true
 			host.mu.Unlock()
 		}
 		return true
@@ -758,15 +777,15 @@ func TestUninstallOrphansAnExtensionLoadedDuringThePrompt(t *testing.T) {
 	for _, o := range st.Orphans {
 		ids[o.ID] = true
 	}
-	if !ids["aaaa"] {
+	if !ids[idA] {
 		t.Errorf("the extension loaded during the prompt must get an orphan record, got %+v", st.Orphans)
 	}
-	if !ids["bbbb"] {
+	if !ids[idB] {
 		t.Errorf("the declined extension must keep its orphan record, got %+v", st.Orphans)
 	}
 	host.mu.Lock()
 	defer host.mu.Unlock()
-	if !host.loaded["aaaa"] {
+	if !host.loaded[idA] {
 		t.Error("nothing was approved, so Chrome must still have the extension")
 	}
 }
@@ -830,12 +849,14 @@ func TestControlCharactersInStateCannotForgeOutput(t *testing.T) {
 // must drop them, or doctor asks forever for a cleanup that does nothing.
 func TestCleanupDropsRecordsForLiveIDs(t *testing.T) {
 	interactive(t)
-	host := startFakeHost(t, "aaaa")
-	writeRawState(t, `{"version":4,"repos":{
+	host := startFakeHost(t, idA)
+	// Raw on purpose: Save normalizes these records away, so only a file
+	// written by something else can hold them.
+	writeRawState(t, fmt.Sprintf(`{"version":4,"repos":{
       "tools":{"url":"u","track":"branch","branch":"main","head":"h",
-               "extensions":[{"dir":"ext","name":"Ext","id":"aaaa"}],
-               "stale":[{"id":"aaaa","name":"Ext","reason":"removed"}]}},
-      "orphans":[{"id":"aaaa","name":"Ext","reason":"uninstalled"}]}`)
+               "extensions":[{"dir":"ext","name":"Ext","id":%q,"key":%q}],
+               "stale":[{"id":%q,"name":"Ext","reason":"removed"}]}},
+      "orphans":[{"id":%q,"name":"Ext","reason":"uninstalled"}]}`, idA, keyA, idA, idA))
 
 	out, err := run(t, "", "cleanup")
 	if err != nil {
@@ -864,15 +885,15 @@ func TestCleanupDropsRecordsForLiveIDs(t *testing.T) {
 // scales with the number of dialogs and starves the background updater.
 func TestCleanupReleasesLockBetweenEntries(t *testing.T) {
 	interactive(t)
-	host := startFakeHost(t, "aaaa", "bbbb")
+	host := startFakeHost(t, idA, idB)
 	seedRepo(t, "tools",
-		state.Extension{Dir: "a", Name: "A", ID: "aaaa"},
-		state.Extension{Dir: "b", Name: "B", ID: "bbbb"},
+		state.Extension{Dir: "a", Name: "A", ID: idA, Key: keyA},
+		state.Extension{Dir: "b", Name: "B", ID: idB, Key: keyB},
 	)
 	st, _ := state.Load()
 	st.Repos["tools"].Extensions = nil
-	st.Repos["tools"].AddStale(state.StaleExtension{ID: "aaaa", Name: "A", Reason: "removed"})
-	st.Repos["tools"].AddStale(state.StaleExtension{ID: "bbbb", Name: "B", Reason: "removed"})
+	st.Repos["tools"].AddStale(state.StaleExtension{ID: idA, Name: "A", Reason: "removed"})
+	st.Repos["tools"].AddStale(state.StaleExtension{ID: idB, Name: "B", Reason: "removed"})
 	if err := st.Save(); err != nil {
 		t.Fatal(err)
 	}
@@ -895,7 +916,7 @@ func TestCleanupReleasesLockBetweenEntries(t *testing.T) {
 		}
 		stillRecorded := false
 		for _, s := range st.Repos["tools"].Stale {
-			if s.ID == "aaaa" {
+			if s.ID == idA {
 				stillRecorded = true
 			}
 		}
@@ -921,14 +942,14 @@ func TestCleanupReleasesLockBetweenEntries(t *testing.T) {
 // not then remove the extension that is working again.
 func TestCleanupSpareseLiveExtensionThatWasOrphaned(t *testing.T) {
 	interactive(t)
-	host := startFakeHost(t, "aaaa")
-	seedRepo(t, "tools", state.Extension{Dir: "ext", Name: "Ext", ID: "aaaa"})
+	host := startFakeHost(t, idA)
+	seedRepo(t, "tools", state.Extension{Dir: "ext", Name: "Ext", ID: idA, Key: keyA})
 
 	if out, err := run(t, "n\n", "uninstall", "tools"); err != nil {
 		t.Fatalf("uninstall: %v\n%s", err, out)
 	}
 	// Reinstalling the same repo at the same path yields the same id.
-	seedRepo(t, "tools", state.Extension{Dir: "ext", Name: "Ext", ID: "aaaa"})
+	seedRepo(t, "tools", state.Extension{Dir: "ext", Name: "Ext", ID: idA, Key: keyA})
 
 	out, err := run(t, "y\n", "cleanup")
 	if err != nil {
@@ -958,7 +979,7 @@ func TestLoadCeremonyUsesTheStubbedSideEffects(t *testing.T) {
 	assist.CopyToClipboard = func(string) error { copied++; return nil }
 	t.Cleanup(func() { assist.OpenExtensionsPage, assist.CopyToClipboard = origOpen, origCopy })
 
-	seedRepo(t, "tools", state.Extension{Dir: "ext", Name: "Ext", ID: "aaaa", Disabled: true})
+	seedRepo(t, "tools", state.Extension{Dir: "ext", Name: "Ext", ID: idA, Key: keyA, Disabled: true})
 	// The extension is not in Chrome, so the ceremony would poll; a short
 	// context keeps the test quick.
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -981,10 +1002,10 @@ func TestEnableDisableRoundTrip(t *testing.T) {
 	interactive(t)
 	// Both are already in Chrome, so the load ceremony confirms at once
 	// instead of polling for its full timeout.
-	startFakeHost(t, "aaaa", "bbbb")
+	startFakeHost(t, idA, idB)
 	seedRepo(t, "tools",
-		state.Extension{Dir: "a", Name: "A", ID: "aaaa"},
-		state.Extension{Dir: "b", Name: "B", ID: "bbbb", Disabled: true},
+		state.Extension{Dir: "a", Name: "A", ID: idA, Key: keyA},
+		state.Extension{Dir: "b", Name: "B", ID: idB, Key: keyB, Disabled: true},
 	)
 
 	if out, err := run(t, "", "enable", "tools/b"); err != nil {
@@ -1007,7 +1028,7 @@ func TestEnableDisableRoundTrip(t *testing.T) {
 // Repository URLs can carry a token; no command may print it.
 func TestListDoesNotLeakCredentials(t *testing.T) {
 	startFakeHost(t)
-	seedRepo(t, "tools", state.Extension{Dir: "ext", Name: "Ext", ID: "aaaa"})
+	seedRepo(t, "tools", state.Extension{Dir: "ext", Name: "Ext", ID: idA, Key: keyA})
 
 	for _, args := range [][]string{{"list"}, {"list", "--json"}} {
 		out, err := run(t, "", args...)

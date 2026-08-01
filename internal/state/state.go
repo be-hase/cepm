@@ -11,8 +11,10 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strings"
 	"time"
 
+	"github.com/be-hase/cepm/internal/extid"
 	"github.com/be-hase/cepm/internal/paths"
 	"github.com/be-hase/cepm/internal/term"
 )
@@ -334,21 +336,101 @@ func (s *State) DuplicateLiveID() (id string, a, b ExtRef) {
 // state (Save refuses), so on disk it means corruption or a hand edit — and
 // finding that out only at save time would be too late: by then a command
 // may have removed something from Chrome.
+// extIDRe is Chrome's extension id alphabet: 32 characters, 'a' through 'p'.
+var extIDRe = regexp.MustCompile(`^[a-p]{32}$`)
+
 func (s *State) Validate() error {
 	if id, a, b := s.DuplicateLiveID(); id != "" {
 		return fmt.Errorf("%s and %s both claim extension id %s "+
 			"(they pin the same manifest \"key\")", a, b, id)
 	}
+	reposDir, err := paths.ReposDir()
+	if err != nil {
+		return err
+	}
 	for _, name := range s.RepoNames() {
-		for _, e := range s.Repos[name].Extensions {
-			if term.HasControl(e.Dir) {
-				// Such a directory reaches the terminal through every
-				// suggestion cepm prints; install refuses to register one,
-				// so only a hand-edited file can hold it.
-				return fmt.Errorf("%s has control characters in its directory name",
-					ExtRef{Repo: name, Dir: e.Dir})
+		r := s.Repos[name]
+		if r.URL == "" {
+			return fmt.Errorf("repository %q has no URL", name)
+		}
+		for _, v := range []string{r.URL, r.Branch, r.Tag, r.TagPattern} {
+			if term.HasControl(v) {
+				return fmt.Errorf("repository %q has control characters in its settings", name)
 			}
 		}
+		switch r.Track {
+		case TrackBranch:
+			if r.Branch == "" {
+				return fmt.Errorf("repository %q tracks a branch but names none", name)
+			}
+		case TrackTag:
+		default:
+			return fmt.Errorf("repository %q has unknown track mode %q", name, term.Safe(r.Track))
+		}
+		seenDirs := map[string]bool{}
+		for _, e := range r.Extensions {
+			ref := ExtRef{Repo: name, Dir: e.Dir}
+			if err := validDir(e.Dir); err != nil {
+				return fmt.Errorf("%s: %w", ref, err)
+			}
+			if seenDirs[e.Dir] {
+				return fmt.Errorf("repository %q registers directory %q twice", name, e.Dir)
+			}
+			seenDirs[e.Dir] = true
+			if !extIDRe.MatchString(e.ID) {
+				return fmt.Errorf("%s has a malformed extension id %q", ref, term.Safe(e.ID))
+			}
+			// The recorded id must be re-derivable from what is recorded
+			// next to it. This is what makes the state self-certifying: the
+			// native host authorizes reload/uninstall by these ids, and
+			// without the check a hand-edited file could put any installed
+			// extension's id under cepm's control.
+			want, err := extid.ForExtension(filepath.Join(reposDir, name, e.Dir), e.Key)
+			if err != nil {
+				return fmt.Errorf("%s: %w", ref, err)
+			}
+			if e.ID != want {
+				return fmt.Errorf("%s records id %s, but its key/path derives %s (edited by hand, or ~/.cepm moved)",
+					ref, e.ID, want)
+			}
+		}
+		for _, st := range r.Stale {
+			if !extIDRe.MatchString(st.ID) {
+				return fmt.Errorf("repository %q has a stale record with malformed id %q", name, term.Safe(st.ID))
+			}
+			if term.HasControl(st.Reason) || term.HasControl(st.NewDir) {
+				return fmt.Errorf("repository %q has control characters in a stale record", name)
+			}
+		}
+	}
+	for _, o := range s.Orphans {
+		if !extIDRe.MatchString(o.ID) {
+			return fmt.Errorf("orphan record has malformed id %q", term.Safe(o.ID))
+		}
+		if term.HasControl(o.Reason) {
+			return fmt.Errorf("orphan record %s has control characters in its reason", o.ID)
+		}
+	}
+	return nil
+}
+
+// validDir accepts only a clean repository-relative path ("." is the repo
+// root). Anything else — absolute, traversing, unnormalized, unprintable —
+// would make every place that joins it to the clone directory (reload paths,
+// rm suggestions, Load-unpacked ceremonies) act outside the repository or
+// forge terminal output.
+func validDir(dir string) error {
+	switch {
+	case dir == "":
+		return fmt.Errorf("empty directory name")
+	case term.HasControl(dir):
+		return fmt.Errorf("control characters in the directory name")
+	case filepath.IsAbs(dir):
+		return fmt.Errorf("absolute directory path")
+	case dir != filepath.Clean(dir):
+		return fmt.Errorf("unnormalized directory path")
+	case dir == ".." || strings.HasPrefix(dir, "../"):
+		return fmt.Errorf("directory path escapes the repository")
 	}
 	return nil
 }
