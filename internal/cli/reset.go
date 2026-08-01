@@ -86,14 +86,26 @@ backup, and the clones stay intact until you remove the backup yourself.`,
 				}
 
 				// Whether the state can still name the repositories decides
-				// the recovery guidance printed below.
+				// the recovery guidance printed below. Parsing alone is not
+				// enough: {"repos":{"a":null}} parses fine and holds no URL,
+				// and pointing at that file would hide the working recovery
+				// route. Only a state where every repository actually
+				// carries its URL answers the question being asked.
 				if raw, err := os.ReadFile(stateFile); err == nil {
 					var probe struct {
 						Repos map[string]struct {
 							URL string `json:"url"`
 						} `json:"repos"`
 					}
-					stateReadable = json.Unmarshal(raw, &probe) == nil && len(probe.Repos) > 0
+					if json.Unmarshal(raw, &probe) == nil && len(probe.Repos) > 0 {
+						stateReadable = true
+						for _, r := range probe.Repos {
+							if r.URL == "" {
+								stateReadable = false
+								break
+							}
+						}
+					}
 				}
 
 				// Exclusively created, so a reset never merges into (or

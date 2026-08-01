@@ -539,6 +539,36 @@ func TestResetGuidesRecoveryWithoutAReadableState(t *testing.T) {
 		}
 	})
 
+	// Parseable is not the same as useful: these two load-rejected states
+	// unmarshal fine yet hold no URL, so the clones are still the source.
+	for label, raw := range map[string]string{
+		"null repo entry": `{"version":4,"repos":{"a":null}}`,
+		"missing url":     `{"version":4,"repos":{"a":{"track":"branch","branch":"main"}}}`,
+	} {
+		t.Run(label, func(t *testing.T) {
+			startFakeHost(t)
+			writeRawState(t, raw)
+			dirA, err := updaterRepoDir("a")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(dirA, 0o755); err != nil {
+				t.Fatal(err)
+			}
+
+			out, err := run(t, "", "reset")
+			if err != nil {
+				t.Fatalf("reset: %v\n%s", err, out)
+			}
+			if !strings.Contains(out, "remote get-url origin") {
+				t.Errorf("a state without URLs cannot be the URL source — point at the clones:\n%s", out)
+			}
+			if strings.Contains(out, "repository URLs are in") {
+				t.Errorf("must not claim the backed-up state holds the URLs:\n%s", out)
+			}
+		})
+	}
+
 	t.Run("corrupt state file", func(t *testing.T) {
 		startFakeHost(t)
 		writeRawState(t, `{definitely not json`)
