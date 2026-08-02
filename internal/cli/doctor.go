@@ -3,7 +3,9 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -209,11 +211,20 @@ func checkNMManifests() []diagnostic {
 	launcherPath, _ := paths.LauncherPath()
 	for _, variant := range paths.ChromeVariants {
 		m, path, err := nmmanifest.Read(variant)
-		if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
 			continue // variant not configured (or not installed); fine
 		}
-		foundIn = append(foundIn, variant)
 		name := "NM manifest (" + variant + ")"
+		if err != nil {
+			// A manifest that exists but cannot be read is a broken install,
+			// not a missing one: reporting "not installed" would misdiagnose
+			// it (the hint still repairs it).
+			foundIn = append(foundIn, variant)
+			diags = append(diags, diagnostic{Name: name, Status: "fail",
+				Detail: oneLine(err.Error()), Hint: "run: cepm setup"})
+			continue
+		}
+		foundIn = append(foundIn, variant)
 		// allowed_origins is the authorization boundary for an extension that
 		// can disable any other one, so require it to name exactly the cepm
 		// helper — an extra entry would be someone else's grant.

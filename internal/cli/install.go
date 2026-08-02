@@ -160,9 +160,12 @@ func runInstall(cmd *cobra.Command, url string, flags installFlags) error {
 
 	fmt.Fprintf(out, "\nInstalled %q", name)
 	if repo.Track == state.TrackTag {
-		fmt.Fprintf(out, " (tracking tags %q, currently %s)", repo.TagPattern, repo.Tag)
+		fmt.Fprintf(out, " (tracking tags %q, currently %s)", repo.TagPattern, term.Safe(repo.Tag))
 	} else {
-		fmt.Fprintf(out, " (tracking branch %s)", repo.Branch)
+		// Safe like every other site that prints a branch: reaching here
+		// depends on st.Validate() above having rejected control characters,
+		// which is too remote a guard to lean on.
+		fmt.Fprintf(out, " (tracking branch %s)", term.Safe(repo.Branch))
 	}
 	var targets []loadTarget
 	available := 0
@@ -270,6 +273,13 @@ func buildRepo(ctx context.Context, url, dir, idBase, branch, track, tagPattern 
 	case state.TrackTag:
 		if r.TagPattern = tagPattern; r.TagPattern == "" {
 			r.TagPattern = "v*"
+		}
+		// The cepm.toml path was validated on load; the --tag-pattern flag
+		// arrives here unchecked, and TagsByCreation's contract is that
+		// callers validate (a pattern starting with "-" would read as a git
+		// option).
+		if !scan.ValidTagPattern(r.TagPattern) {
+			return nil, fmt.Errorf("invalid tag pattern %q", term.Safe(r.TagPattern))
 		}
 		tags, err := g.TagsByCreation(ctx, r.TagPattern)
 		if err != nil {

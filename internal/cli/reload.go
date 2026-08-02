@@ -27,12 +27,19 @@ reloaded; otherwise pass repository names.`,
 			}
 			var items []reloadItem
 			skipped := 0
+			// "cepm reload tools tools" must not reload twice: the helper
+			// would run two interleaved disable/enable cycles for one id.
+			seen := map[string]bool{}
 			for _, name := range targets {
 				r, ok := st.Repos[name]
 				if !ok {
 					return fmt.Errorf("repository %q is not registered (see cepm list)", name)
 				}
 				for _, e := range r.Extensions {
+					if seen[e.ID] {
+						continue
+					}
+					seen[e.ID] = true
 					if !e.Enabled() {
 						skipped++
 						continue

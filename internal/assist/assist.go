@@ -25,6 +25,19 @@ var CopyToClipboard = copyToClipboard
 // OpenExtensionsPage opens chrome://extensions in the user's Chrome.
 var OpenExtensionsPage = openExtensionsPage
 
+// chromeVariant selects which Chrome OpenExtensionsPage targets; "stable"
+// until SetChromeVariant says otherwise.
+var chromeVariant = "stable"
+
+// SetChromeVariant records which Chrome variant the user set up, so the
+// ceremony opens the browser that actually has the helper registered rather
+// than always stock Chrome.
+func SetChromeVariant(v string) {
+	if v != "" {
+		chromeVariant = v
+	}
+}
+
 func isCharDevice(f *os.File) bool {
 	fi, err := f.Stat()
 	if err != nil {

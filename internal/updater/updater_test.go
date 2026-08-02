@@ -565,6 +565,9 @@ func TestUpdateFailsOnRewrittenHistory(t *testing.T) {
 	if st.Repos["mytools"].LastError == "" {
 		t.Error("lastError should be recorded in state")
 	}
+	if !st.Repos["mytools"].LastPull.IsZero() {
+		t.Error("a failed pull must not be stamped as pulled (lastPull would lie to list/doctor)")
+	}
 }
 
 // The native host runs Update without the CLI's preflight, so Update itself

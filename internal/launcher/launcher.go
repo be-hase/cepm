@@ -131,5 +131,20 @@ func SelfHeal() {
 	if err != nil || exe == recorded {
 		return
 	}
+	// "go run" and similar produce binaries under the temp dir that vanish
+	// on exit; repointing the launcher at one strands Chrome until a durable
+	// cepm runs again. Heal from such a binary only when the recorded one is
+	// already gone — an ephemeral path beats a dangling one.
+	if underDir(os.TempDir(), exe) {
+		if _, err := os.Stat(recorded); err == nil {
+			return
+		}
+	}
 	_ = Install(exe)
+}
+
+// underDir reports whether path is inside dir.
+func underDir(dir, path string) bool {
+	rel, err := filepath.Rel(dir, path)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }

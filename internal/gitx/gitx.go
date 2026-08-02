@@ -156,12 +156,6 @@ func (r Repo) CheckoutDetached(ctx context.Context, ref string) error {
 	return err
 }
 
-// Checkout checks out a branch.
-func (r Repo) Checkout(ctx context.Context, branch string) error {
-	_, err := run(ctx, r.Dir, "checkout", "--quiet", branch)
-	return err
-}
-
 // ChangedFiles lists paths (repo-relative) that differ between two commits.
 // The trailing "--" terminates the revision list: the callers validate that
 // from/to are commit OIDs, and this makes git agree that nothing here is an

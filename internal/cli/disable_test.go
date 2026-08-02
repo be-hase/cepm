@@ -62,3 +62,16 @@ func TestDisableRemovesFromChromeWhenApproved(t *testing.T) {
 		t.Errorf("the extension should be recorded as disabled, got %+v", e)
 	}
 }
+
+// "cepm reload tools tools" must reach Chrome once per extension: duplicate
+// ids would run two interleaved disable/enable cycles for one extension.
+func TestReloadDeduplicatesRepeatedRepos(t *testing.T) {
+	h := startFakeHost(t, idA)
+	seedRepo(t, "tools", state.Extension{Dir: "ext", Name: "Ext", ID: idA, Key: keyA})
+	if out, err := run(t, "", "reload", "tools", "tools"); err != nil {
+		t.Fatalf("reload failed: %v\n%s", err, out)
+	}
+	if len(h.reloaded) != 1 || h.reloaded[0] != idA {
+		t.Errorf("expected exactly one reload of %s, got %v", idA, h.reloaded)
+	}
+}

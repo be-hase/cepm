@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net"
+	"syscall"
 	"time"
 
 	"github.com/be-hase/cepm/internal/paths"
@@ -69,12 +71,20 @@ func dialWithRetry(ctx context.Context, sock string) (net.Conn, error) {
 		if err == nil {
 			return conn, nil
 		}
+		// Only the states a leader handoff passes through are worth the
+		// retry: no socket yet (ENOENT) or a socket nobody accepts on
+		// (ECONNREFUSED). A permission error or an over-long path will not
+		// heal in three seconds, and reporting it as "is Chrome running?"
+		// sends the user debugging the wrong thing.
+		if !errors.Is(err, fs.ErrNotExist) && !errors.Is(err, syscall.ECONNREFUSED) {
+			return nil, fmt.Errorf("dial host socket: %w", err)
+		}
 		if time.Now().After(deadline) || ctx.Err() != nil {
-			return nil, ErrHostNotRunning
+			return nil, fmt.Errorf("%w (last dial error: %v)", ErrHostNotRunning, err)
 		}
 		select {
 		case <-ctx.Done():
-			return nil, ErrHostNotRunning
+			return nil, fmt.Errorf("%w (last dial error: %v)", ErrHostNotRunning, err)
 		case <-time.After(200 * time.Millisecond):
 		}
 	}

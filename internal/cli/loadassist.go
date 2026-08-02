@@ -15,6 +15,8 @@ import (
 	"github.com/be-hase/cepm/internal/assist"
 	"github.com/be-hase/cepm/internal/helperext"
 	"github.com/be-hase/cepm/internal/ipc"
+	"github.com/be-hase/cepm/internal/nmmanifest"
+	"github.com/be-hase/cepm/internal/paths"
 	"github.com/be-hase/cepm/internal/term"
 )
 
@@ -84,6 +86,17 @@ func selectByNumbers(cmd *cobra.Command, prompt string, items []string) ([]int, 
 }
 
 // confirm asks a yes/no question, defaulting to no.
+// installedChromeVariant reports which Chrome variant has the cepm native
+// messaging manifest installed ("" when none does — setup has not run).
+func installedChromeVariant() string {
+	for _, v := range paths.ChromeVariants {
+		if _, _, err := nmmanifest.Read(v); err == nil {
+			return v
+		}
+	}
+	return ""
+}
+
 func confirm(cmd *cobra.Command, question string) bool {
 	fmt.Fprintf(cmd.OutOrStdout(), "%s [y/N]: ", question)
 	line, err := promptReader(cmd).ReadString('\n')
@@ -113,6 +126,9 @@ func runLoadCeremony(ctx context.Context, cmd *cobra.Command, targets []loadTarg
 		return
 	}
 
+	// Open the Chrome the helper is actually registered with: the manifest
+	// on disk records which variant setup chose.
+	assist.SetChromeVariant(installedChromeVariant())
 	pageOpened := assist.OpenExtensionsPage() == nil
 	for i, t := range targets {
 		fmt.Fprintf(out, "\nLoading steps for %q (%d/%d):\n", t.Name, i+1, len(targets))

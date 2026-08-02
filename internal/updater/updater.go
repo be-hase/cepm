@@ -138,7 +138,12 @@ func Update(ctx context.Context, names []string, opts Options) ([]RepoResult, er
 				continue
 			}
 			res := updateRepo(ctx, name, repo, opts, liveIDsExcept(st, name))
-			repo.LastPull = time.Now()
+			// Only a pull that actually ran gets the timestamp: stamping a
+			// skipped or failed attempt makes list/doctor claim a freshness
+			// the repo does not have.
+			if res.Err == nil && !res.Skipped {
+				repo.LastPull = time.Now()
+			}
 			if res.Err != nil {
 				// Sanitized at the source: this is mostly git/ssh stderr, which can
 				// carry escape sequences, and it is displayed by list and doctor.
@@ -221,7 +226,7 @@ func updateRepo(ctx context.Context, name string, r *state.Repo, opts Options, t
 			return res
 		}
 	}
-	moveErr := moveToLatest(ctx, repo, r, &res)
+	newTag, moveErr := moveToLatest(ctx, repo, r, &res)
 	if stashed {
 		if err := repo.StashPop(ctx); err != nil {
 			// The tree now holds conflict markers, so re-scanning it would
@@ -242,11 +247,21 @@ func updateRepo(ctx context.Context, name string, r *state.Repo, opts Options, t
 		res.Err = err
 		return res
 	}
-	res.NewRef = displayRef(r, newHead)
+	if newTag != "" {
+		res.NewRef = newTag
+	} else {
+		res.NewRef = displayRef(r, newHead)
+	}
 	slog.Debug("repo moved", "repo", name, "from", res.OldRef, "to", res.NewRef, "track", r.Track)
+	// r.Tag advances only together with r.Head, below: persisting the new
+	// tag on a failed run would make the retry display "v2 → v2" for work
+	// it is doing for the first time.
 	if newHead == oldHead {
 		r.Head = newHead
 		refreshExtensions(name, r, dir, &res, nil, takenIDs)
+		if res.Err == nil && newTag != "" {
+			r.Tag = newTag
+		}
 		return res
 	}
 	res.Updated = true
@@ -264,11 +279,16 @@ func updateRepo(ctx context.Context, name string, r *state.Repo, opts Options, t
 		return res
 	}
 	r.Head = newHead
+	if newTag != "" {
+		r.Tag = newTag
+	}
 	return res
 }
 
 // moveToLatest advances the working tree according to the repo's track mode.
-func moveToLatest(ctx context.Context, repo gitx.Repo, r *state.Repo, res *RepoResult) error {
+// In tag mode it reports the tag it moved to; the caller records it on the
+// repo only once the commit is fully processed.
+func moveToLatest(ctx context.Context, repo gitx.Repo, r *state.Repo, res *RepoResult) (newTag string, err error) {
 	if r.Track == state.TrackTag {
 		pattern := r.TagPattern
 		if pattern == "" {
@@ -276,14 +296,14 @@ func moveToLatest(ctx context.Context, repo gitx.Repo, r *state.Repo, res *RepoR
 		}
 		tags, err := repo.TagsByCreation(ctx, pattern)
 		if err != nil {
-			return err
+			return "", err
 		}
 		if len(tags) == 0 {
-			return fmt.Errorf("no tags match pattern %q", pattern)
+			return "", fmt.Errorf("no tags match pattern %q", pattern)
 		}
 		latest, warn := LatestTag(tags, r.Prerelease)
 		if latest == "" {
-			return fmt.Errorf("no release tag to follow: %s", warn)
+			return "", fmt.Errorf("no release tag to follow: %s", warn)
 		}
 		if warn != "" {
 			res.Warnings = append(res.Warnings, warn)
@@ -293,45 +313,44 @@ func moveToLatest(ctx context.Context, repo gitx.Repo, r *state.Repo, res *RepoR
 			// and the fetch above accepts that. Compare commits, not names.
 			want, err := repo.CommitOf(ctx, latest)
 			if err != nil {
-				return err
+				return "", err
 			}
 			head, err := repo.Head(ctx)
 			if err != nil {
-				return err
+				return "", err
 			}
 			if want == head {
-				return nil
+				return "", nil
 			}
 			res.Warnings = append(res.Warnings, fmt.Sprintf("tag %s now points at a different commit", latest))
 		}
 		if err := repo.CheckoutDetached(ctx, latest); err != nil {
-			return fmt.Errorf("checkout tag %s: %w", latest, err)
+			return "", fmt.Errorf("checkout tag %s: %w", latest, err)
 		}
-		r.Tag = latest
-		return nil
+		return latest, nil
 	}
 	branch := r.Branch
 	if branch == "" {
-		return fmt.Errorf("no branch recorded for repo (state.json is inconsistent; reinstall the repo)")
+		return "", fmt.Errorf("no branch recorded for repo (state.json is inconsistent; reinstall the repo)")
 	}
 	// Merging into whatever the user happens to have checked out could
 	// fast-forward their own branch onto the tracked one; refuse instead.
 	current, err := repo.CurrentBranch(ctx)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if current != branch {
 		where := "a detached HEAD"
 		if current != "" {
 			where = "branch " + current
 		}
-		return fmt.Errorf("the clone is on %s but cepm tracks %s; switch back with: git -C %s checkout -- %s",
+		return "", fmt.Errorf("the clone is on %s but cepm tracks %s; switch back with: git -C %s checkout -- %s",
 			term.Safe(where), term.Safe(branch), term.Quote(repo.Dir), term.Quote(branch))
 	}
 	if err := repo.MergeFFOnly(ctx, "origin/"+branch); err != nil {
-		return fmt.Errorf("cannot fast-forward %s (history rewritten?): %w", branch, err)
+		return "", fmt.Errorf("cannot fast-forward %s (history rewritten?): %w", branch, err)
 	}
-	return nil
+	return "", nil
 }
 
 // LatestTag picks the highest semver tag, ignoring tags that are not version
@@ -493,13 +512,27 @@ func refreshExtensions(name string, r *state.Repo, dir string, res *RepoResult, 
 		}
 	}
 	for _, e := range newList {
-		if changedDirs[e.Dir] && e.Enabled() && !containsDir(res.Added, e.Dir) && !renameTarget(res.Renamed, e.Dir) {
+		// A reidentified dir is excluded like added/renamed ones: Chrome does
+		// not have the new id yet, so reloading it can only say
+		// "not_installed" — right after the CLI asked for a one-time Load
+		// unpacked.
+		if changedDirs[e.Dir] && e.Enabled() && !containsDir(res.Added, e.Dir) &&
+			!renameTarget(res.Renamed, e.Dir) && !reidentifiedDir(res.Reidentified, e.Dir) {
 			res.Changed = append(res.Changed, ExtChange{
 				RepoName: name, Dir: e.Dir, AbsDir: filepath.Join(dir, e.Dir), ID: e.ID, Name: e.Name,
 				ManifestChanged: manifestChanged[e.Dir],
 			})
 		}
 	}
+}
+
+func reidentifiedDir(changes []IdentityChange, dir string) bool {
+	for _, c := range changes {
+		if c.Dir == dir {
+			return true
+		}
+	}
+	return false
 }
 
 // noteIdentityChange records that an extension kept its directory but got a

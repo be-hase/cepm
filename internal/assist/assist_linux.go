@@ -25,10 +25,23 @@ func copyToClipboard(s string) error {
 	return errors.New("no clipboard helper found (install wl-clipboard or xclip)")
 }
 
-// openExtensionsPage opens chrome://extensions in Chrome. xdg-open cannot
-// handle chrome:// URLs, so invoke a Chrome binary directly.
+// chromeBins maps a --chrome-variant value to the binaries it usually
+// installs, tried first; any Chrome is a last resort (a wrong window still
+// beats sending the user to type the URL).
+var chromeBins = map[string][]string{
+	"stable":   {"google-chrome", "google-chrome-stable"},
+	"beta":     {"google-chrome-beta"},
+	"dev":      {"google-chrome-unstable"},
+	"chromium": {"chromium", "chromium-browser"},
+}
+
+// openExtensionsPage opens chrome://extensions in the configured Chrome.
+// xdg-open cannot handle chrome:// URLs, so a Chrome binary is invoked
+// directly.
 func openExtensionsPage() error {
-	for _, bin := range []string{"google-chrome", "google-chrome-stable", "chromium", "chromium-browser"} {
+	candidates := append([]string{}, chromeBins[chromeVariant]...)
+	candidates = append(candidates, "google-chrome", "google-chrome-stable", "chromium", "chromium-browser")
+	for _, bin := range candidates {
 		if _, err := exec.LookPath(bin); err == nil {
 			return exec.Command(bin, "chrome://extensions/").Start()
 		}
