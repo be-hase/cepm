@@ -106,9 +106,10 @@ type Response struct {
 // field decodes to "", which readers must treat as "this host does not
 // report compatibility" — a zero-valued bool would have read as a verdict.
 const (
-	HelperCompatUnknown = "unknown" // no hello processed yet
-	HelperCompatOK      = "ok"
-	HelperCompatTooOld  = "too_old"
+	HelperCompatUnknown  = "unknown" // no hello processed yet
+	HelperCompatOK       = "ok"
+	HelperCompatTooOld   = "too_old"  // predates the protocol field
+	HelperCompatMismatch = "mismatch" // announces another protocol generation
 )
 
 // HostInfo describes the running native host (ping response).
@@ -124,6 +125,10 @@ type HostInfo struct {
 	// is HelperCompatTooOld and the host refuses to relay Chrome operations.
 	MinHelperVersion string `json:"minHelperVersion,omitempty"`
 	HelperCompat     string `json:"helperCompat,omitempty"`
+	// HelperProtocol is the wire generation the running helper announced,
+	// and HelperProtocolWanted the one this host speaks.
+	HelperProtocol       int `json:"helperProtocol,omitempty"`
+	HelperProtocolWanted int `json:"helperProtocolWanted,omitempty"`
 	// Protocol is the CLI⇄host protocol generation (see ProtocolVersion);
 	// zero means the host predates protocol reporting.
 	Protocol int `json:"protocol,omitempty"`

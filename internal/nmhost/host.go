@@ -17,8 +17,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"golang.org/x/mod/semver"
-
 	"github.com/be-hase/cepm/internal/config"
 	"github.com/be-hase/cepm/internal/helperext"
 	"github.com/be-hase/cepm/internal/ipc"
@@ -32,8 +30,9 @@ const (
 	pingInterval  = 25 * time.Second // keeps the helper's service worker alive
 	sendTimeout   = 5 * time.Second
 	shutdownGrace = 5 * time.Second
-	// minHelperVersion is the oldest helper this host can talk to; bump it
-	// together with protocol changes.
+	// minHelperVersion is reported for diagnostics only; compatibility is
+	// decided by the wire protocol the running helper announces, not by the
+	// version string beside it (see the hello handler).
 	minHelperVersion = "0.1.0"
 )
 
@@ -67,6 +66,8 @@ type Host struct {
 	// helper the host has no verdict on. Values are the compatVerdict
 	// constants; the refreshed files fix too_old on the next Chrome start.
 	helperCompat atomic.Int32
+	// helperProtocol is what the running helper announced, for diagnostics.
+	helperProtocol atomic.Int32
 
 	// afterReloadAuthorized runs between authorizing a socket reload and
 	// acting on it. Test-only: it is the seam a test needs to land a state
@@ -99,6 +100,7 @@ const (
 	compatUnknown int32 = iota
 	compatOK
 	compatTooOld
+	compatMismatch
 )
 
 // safego runs fn on its own goroutine, logging a panic to the host log
@@ -335,19 +337,28 @@ func (h *Host) readLoop(ctx context.Context) error {
 			var msg helloMsg
 			if err := json.Unmarshal(frame, &msg); err == nil {
 				h.helperVersion.Store(msg.HelperVersion)
-				// Enforce, not just declare: an unparsable version is
-				// treated as too old — fail closed, the refreshed files
-				// repair it on the next Chrome start either way.
-				tooOld := !semver.IsValid("v"+msg.HelperVersion) ||
-					semver.Compare("v"+msg.HelperVersion, "v"+minHelperVersion) < 0
-				if tooOld {
-					h.helperCompat.Store(compatTooOld)
-					h.log.Error("helper is older than this host supports; Chrome operations are paused",
-						"helperVersion", msg.HelperVersion, "minHelperVersion", minHelperVersion,
-						"fix", "restart Chrome to load the refreshed helper")
-				} else {
+				// The wire generation the *running code* announced, not
+				// the manifest version beside it: a refresh writes the
+				// manifest first, so a half-applied one would otherwise
+				// have old code claiming the new version. Exact match, so
+				// a future helper is refused as surely as an old one.
+				h.helperProtocol.Store(int32(msg.Protocol))
+				switch {
+				case msg.Protocol == helperext.Protocol:
 					h.helperCompat.Store(compatOK)
-					h.log.Info("helper connected", "helperVersion", msg.HelperVersion)
+					h.log.Info("helper connected",
+						"helperVersion", msg.HelperVersion, "protocol", msg.Protocol)
+				case msg.Protocol == 0:
+					h.helperCompat.Store(compatTooOld)
+					h.log.Error("helper predates protocol reporting; Chrome operations are paused",
+						"helperVersion", msg.HelperVersion, "wantProtocol", helperext.Protocol,
+						"fix", "restart Chrome to load the refreshed helper")
+				default:
+					h.helperCompat.Store(compatMismatch)
+					h.log.Error("helper speaks another protocol generation; Chrome operations are paused",
+						"helperVersion", msg.HelperVersion, "protocol", msg.Protocol,
+						"wantProtocol", helperext.Protocol,
+						"fix", "restart Chrome to load the refreshed helper")
 				}
 			}
 			// Everything here is off the read loop: sending can block for
@@ -443,10 +454,10 @@ func (h *Host) helperGate() error {
 	switch h.helperCompat.Load() {
 	case compatOK:
 		return nil
-	case compatTooOld:
+	case compatTooOld, compatMismatch:
 		hv, _ := h.helperVersion.Load().(string)
-		return fmt.Errorf("the connected cepm helper (v%s) is older than this host supports (v%s); restart Chrome to load the refreshed helper",
-			hv, minHelperVersion)
+		return fmt.Errorf("the connected cepm helper (v%s, protocol %d) does not match this host (protocol %d); restart Chrome to load the refreshed helper",
+			hv, h.helperProtocol.Load(), helperext.Protocol)
 	default:
 		return fmt.Errorf("the cepm helper has not connected yet; wait a moment, or check it is loaded and enabled in chrome://extensions")
 	}
@@ -781,15 +792,19 @@ func (h *Host) handleIPC(ctx context.Context, req ipc.Request) (resp ipc.Respons
 			compat = ipc.HelperCompatOK
 		case compatTooOld:
 			compat = ipc.HelperCompatTooOld
+		case compatMismatch:
+			compat = ipc.HelperCompatMismatch
 		}
 		info := &ipc.HostInfo{
-			Version:          h.version,
-			PID:              os.Getpid(),
-			Leader:           h.leader.Load(),
-			StartedAt:        h.startedAt,
-			MinHelperVersion: minHelperVersion,
-			HelperCompat:     compat,
-			Protocol:         ipc.ProtocolVersion,
+			Version:              h.version,
+			PID:                  os.Getpid(),
+			Leader:               h.leader.Load(),
+			StartedAt:            h.startedAt,
+			MinHelperVersion:     minHelperVersion,
+			HelperCompat:         compat,
+			HelperProtocol:       int(h.helperProtocol.Load()),
+			HelperProtocolWanted: helperext.Protocol,
+			Protocol:             ipc.ProtocolVersion,
 		}
 		if hv, ok := h.helperVersion.Load().(string); ok {
 			info.HelperVersion = hv

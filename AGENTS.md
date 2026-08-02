@@ -19,8 +19,8 @@ now (`internal/paths` has the OS-specific pieces).
 ```console
 make build     # -> bin/cepm (embeds VERSION via ldflags)
 make test      # go test ./...
-make lint      # gofmt -l check + go vet + staticcheck
-make e2e       # real Chrome; downloads Chrome for Testing on first run
+make lint      # gofmt -l check + go vet + staticcheck (both build tags)
+make e2e       # real Chrome (race-enabled); downloads Chrome for Testing once
 ```
 
 `make e2e` is not optional for changes touching the host, the helper, the
@@ -128,6 +128,8 @@ name the path or command, and never echo a URL that may carry a token
   `golang.org/x/mod/semver`. git is invoked as a subprocess, deliberately, so
   the user's SSH config and credential helpers just work.
 - `gofmt` clean, `go vet` clean, `staticcheck` clean (a go.mod tool: run it
-  with `go tool staticcheck ./...`); all three are CI gates.
+  with `go tool staticcheck ./...`); all three are CI gates. Run the last two
+  with `-tags e2e` as well — `make lint` does — or the e2e harness goes
+  unchecked, which is where a data race last hid.
 - Commit messages are English: a one-line summary, then what changed and why.
 - Commit as work progresses rather than one large drop.

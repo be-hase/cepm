@@ -2,6 +2,7 @@ package helperext
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -137,5 +138,32 @@ func TestReadmesListEveryHelperPermission(t *testing.T) {
 				t.Errorf("%s does not document the %q permission", readme, p)
 			}
 		}
+	}
+}
+
+// The protocol the helper announces has to come from the Go constant, so
+// the generated file and the host cannot disagree about what "current"
+// means. A refresh that failed halfway is exactly when they would.
+func TestGeneratedHelperCarriesTheProtocol(t *testing.T) {
+	dir := t.TempDir()
+	if err := Install(dir); err != nil {
+		t.Fatal(err)
+	}
+	js, err := os.ReadFile(filepath.Join(dir, "background.js"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := fmt.Sprintf("const HELPER_PROTOCOL = %d;", Protocol)
+	if !strings.Contains(string(js), want) {
+		t.Errorf("generated background.js does not carry %q", want)
+	}
+	if strings.Contains(string(js), protocolPlaceholder) {
+		t.Error("the placeholder survived into the generated file")
+	}
+	// Carrying the constant is not enough: the hello has to send it, and
+	// the host has to be told which field. Go tests cannot run this JS, so
+	// the wiring is pinned by contract.
+	if !strings.Contains(string(js), "protocol: HELPER_PROTOCOL") {
+		t.Error("the hello no longer sends the protocol; the host would read a helper of unknown generation")
 	}
 }

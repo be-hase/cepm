@@ -201,12 +201,12 @@ func TestDoctorFlagsAnIncompatibleHelper(t *testing.T) {
 	h.helperTooOld = true
 
 	out, _ := run(t, "", "doctor")
-	for _, want := range []string{"helper v0.0.1", "older than this host supports", "restart Chrome"} {
+	for _, want := range []string{"helper v0.0.1", "predates it", "restart Chrome"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("doctor should report the incompatibility (%q missing):\n%s", want, out)
 		}
 	}
-	if jsonOut, _ := run(t, "", "doctor", "--json"); !strings.Contains(jsonOut, "older than this host supports") {
+	if jsonOut, _ := run(t, "", "doctor", "--json"); !strings.Contains(jsonOut, "Chrome operations are paused") {
 		t.Errorf("doctor --json should carry the incompatibility:\n%s", jsonOut)
 	}
 
@@ -215,7 +215,7 @@ func TestDoctorFlagsAnIncompatibleHelper(t *testing.T) {
 	h.helperTooOld = false
 	h.mu.Unlock()
 	out, _ = run(t, "", "doctor")
-	if strings.Contains(out, "older than this host supports") {
+	if strings.Contains(out, "Chrome operations are paused") {
 		t.Errorf("doctor flags a compatible helper:\n%s", out)
 	}
 }
@@ -266,7 +266,7 @@ func TestDoctorHandlesAHostThatPredatesCompatReporting(t *testing.T) {
 	h.helperVersion = "0.1.0" // a perfectly healthy helper
 
 	out, _ := run(t, "", "doctor")
-	if strings.Contains(out, "older than this host supports") {
+	if strings.Contains(out, "Chrome operations are paused") {
 		t.Errorf("an absent verdict must not read as an incompatible helper:\n%s", out)
 	}
 	if !strings.Contains(out, "restart Chrome to relaunch the updated host") {

@@ -3,6 +3,11 @@
 
 const HOST_NAME = "com.github.be_hase.cepm";
 const KEEPALIVE_ALARM = "cepm-keepalive";
+// Replaced by cepm when it writes this file; the value lives in Go (see
+// helperext.Protocol). The manifest version cannot stand in for it: a
+// refresh that updates manifest.json and then fails on this file would
+// leave old code announcing a new version.
+const HELPER_PROTOCOL = 0;
 
 let port = null;
 let backoffMs = 1000;
@@ -18,7 +23,11 @@ function connect() {
     port = null;
     scheduleReconnect();
   });
-  post({ type: "hello", helperVersion: chrome.runtime.getManifest().version });
+  post({
+    type: "hello",
+    helperVersion: chrome.runtime.getManifest().version,
+    protocol: HELPER_PROTOCOL,
+  });
 }
 
 function scheduleReconnect() {

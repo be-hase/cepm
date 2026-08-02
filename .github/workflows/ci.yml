@@ -29,6 +29,11 @@ jobs:
         run: go vet ./...
       - name: staticcheck
         run: go tool staticcheck ./...
+      - name: staticcheck (e2e tag)
+        # The e2e harness is invisible to the untagged run: build-tagged
+        # files are where a race last hid, so lint them here and race-test
+        # them in the e2e job.
+        run: go tool staticcheck -tags e2e ./...
       - name: test
         # -race on every run: the host/updater locking discipline is this
         # project's hard part, and the suite has real concurrency tests.

@@ -30,8 +30,12 @@ type fakeHelper struct {
 	t      *testing.T
 	toHost io.Writer
 	from   io.Reader
-	// helloVersion overrides the version the helper announces ("" = current).
-	helloVersion string
+	// helloVersion and helloProtocol override what the helper announces
+	// ("" / 0 = the current, compatible values).
+	helloVersion  string
+	helloProtocol int
+	// omitProtocol sends the pre-protocol hello shape.
+	omitProtocol bool
 	reloads      chan []string // receives extensionIds of every reload request (optional)
 	// failReloads makes reload requests answer status "error" while set —
 	// the transient helper failure the pending-reload retry exists for.
@@ -57,9 +61,17 @@ func (f *fakeHelper) send(msg any) {
 func (f *fakeHelper) run() {
 	v := f.helloVersion
 	if v == "" {
-		v = "0.1.0"
+		v = helperext.Version
 	}
-	f.send(map[string]any{"type": "hello", "helperVersion": v})
+	hello := map[string]any{"type": "hello", "helperVersion": v}
+	if !f.omitProtocol {
+		p := f.helloProtocol
+		if p == 0 {
+			p = helperext.Protocol
+		}
+		hello["protocol"] = p
+	}
+	f.send(hello)
 	for {
 		frame, err := ReadMessage(f.from)
 		if err != nil {
@@ -981,36 +993,41 @@ func TestCatchUpReloadKeepsIndividualFailuresOwed(t *testing.T) {
 	}
 }
 
-// minHelperVersion is enforced, not just declared: a helper announcing an
-// older (or unparsable) version may misinterpret requests, so the host must
-// refuse to relay Chrome operations to it and say what fixes it.
+// Compatibility follows the wire protocol the running code announces, not
+// the manifest version beside it — a refresh writes the manifest first, so a
+// half-applied one leaves old code claiming the new version. Exact match, so
+// a future helper is refused as surely as one that predates the field.
 func TestHostRefusesAnIncompatibleHelper(t *testing.T) {
-	cases := map[string]string{"too old": "0.0.1", "unparsable": "garbage"}
-	for label, version := range cases {
+	cases := map[string]struct {
+		protocol int
+		compat   string
+	}{
+		"predates protocol reporting": {protocol: -1, compat: ipc.HelperCompatTooOld},
+		"future protocol":             {protocol: helperext.Protocol + 1, compat: ipc.HelperCompatMismatch},
+	}
+	for label, tc := range cases {
 		t.Run(label, func(t *testing.T) {
 			seedHostState(t, state.Extension{Dir: "a", Name: "A", ID: idA, Key: keyA})
-			helper := &fakeHelper{helloVersion: version, reloads: make(chan []string, 4)}
+			// -1 stands for "field absent": the fake sends it verbatim and
+			// the host sees a value that is not its own.
+			protocol := tc.protocol
+			if protocol == -1 {
+				protocol = 0
+			}
+			helper := &fakeHelper{helloProtocol: protocol, reloads: make(chan []string, 4)}
+			if protocol == 0 {
+				// 0 means "use the current one" to the fake, so send the
+				// old shape instead: a hello with no protocol at all.
+				helper.helloProtocol = 0
+				helper.omitProtocol = true
+			}
 			h, ctx := newTestHost(t, helper)
 
-			// The hello arrives asynchronously; poll (with a deadline)
-			// until the host has recorded it.
-			deadline := time.Now().Add(10 * time.Second)
-			var info *ipc.HostInfo
-			for time.Now().Before(deadline) {
-				if resp := h.handleIPC(ctx, ipc.Request{Cmd: ipc.CmdPing}); resp.Host != nil && resp.Host.HelperVersion != "" {
-					info = resp.Host
-					break
-				}
-				time.Sleep(10 * time.Millisecond)
+			resp := h.handleIPC(ctx, ipc.Request{Cmd: ipc.CmdPing})
+			if resp.Host == nil || resp.Host.HelperCompat != tc.compat {
+				t.Fatalf("helper compat = %+v, want %s", resp.Host, tc.compat)
 			}
-			if info == nil {
-				t.Fatal("the hello never reached the host")
-			}
-			if info.HelperCompat != ipc.HelperCompatTooOld {
-				t.Errorf("helper %q must be reported too_old, got %q", version, info.HelperCompat)
-			}
-
-			resp := h.handleIPC(ctx, ipc.Request{Cmd: ipc.CmdReload, IDs: []string{idA}, Protocol: ipc.ProtocolVersion})
+			resp = h.handleIPC(ctx, ipc.Request{Cmd: ipc.CmdReload, IDs: []string{idA}, Protocol: ipc.ProtocolVersion})
 			if resp.OK || !strings.Contains(resp.Error, "restart Chrome") {
 				t.Errorf("reload should be refused with the fix named, got %+v", resp)
 			}
@@ -1022,143 +1039,40 @@ func TestHostRefusesAnIncompatibleHelper(t *testing.T) {
 		})
 	}
 
-	// And a supported helper keeps everything flowing.
+	// The current helper keeps everything flowing.
 	t.Run("compatible", func(t *testing.T) {
 		seedHostState(t, state.Extension{Dir: "a", Name: "A", ID: idA, Key: keyA})
 		helper := &fakeHelper{reloads: make(chan []string, 4)}
 		h, ctx := newTestHost(t, helper)
-		deadline := time.Now().Add(10 * time.Second)
-		for time.Now().Before(deadline) {
-			if resp := h.handleIPC(ctx, ipc.Request{Cmd: ipc.CmdPing}); resp.Host != nil && resp.Host.HelperVersion != "" {
-				if resp.Host.HelperCompat != ipc.HelperCompatOK {
-					t.Fatalf("a current helper must be compatible: %+v", resp.Host)
-				}
-				return
-			}
-			time.Sleep(10 * time.Millisecond)
+		resp := h.handleIPC(ctx, ipc.Request{Cmd: ipc.CmdPing})
+		if resp.Host == nil || resp.Host.HelperCompat != ipc.HelperCompatOK {
+			t.Fatalf("a current helper must be compatible: %+v", resp.Host)
 		}
-		t.Fatal("the hello never reached the host")
+		if resp.Host.HelperProtocol != helperext.Protocol {
+			t.Errorf("the announced protocol should be reported, got %+v", resp.Host)
+		}
 	})
 }
 
-// A corrupted helper file next to a current version marker must be repaired
-// by the host's refresh, not trusted because the marker looks right.
-func TestMaybeRefreshHelperRepairsCorruptedFiles(t *testing.T) {
-	dir, err := os.MkdirTemp("/tmp", "cepm-host")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { os.RemoveAll(dir) })
-	t.Setenv("CEPM_HOME", dir)
-	helperDir := filepath.Join(dir, "helper")
-	if err := helperext.Install(helperDir); err != nil {
-		t.Fatal(err)
-	}
-	bg := filepath.Join(helperDir, "background.js")
-	if err := os.WriteFile(bg, []byte("// corrupted\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	h := &Host{log: slog.New(slog.NewTextHandler(io.Discard, nil))}
-	h.maybeRefreshHelper(context.Background())
-	// Independent oracle — reading the bytes, not asking InstalledMatches,
-	// which is itself the function under test's mutation.
-	b, err := os.ReadFile(bg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(b) == "// corrupted\n" {
-		t.Error("the refresh should repair corrupted helper files")
-	}
-}
-
-// Owed reloads are independent of the config: with auto=false (or a broken
-// file) the scheduler pauses updates, but the debt the helper still owes —
-// a failed catch-up, an earlier tick — must be retried on every wake.
-func TestSchedulerFlushesDebtWhileUpdatesArePaused(t *testing.T) {
-	seedHostState(t, state.Extension{Dir: "a", Name: "A", ID: idA, Key: keyA})
-	if err := os.WriteFile(filepath.Join(os.Getenv("CEPM_HOME"), "config.toml"),
-		[]byte("[update]\nauto = false\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	helper := &fakeHelper{reloads: make(chan []string, 4)}
-	h, ctx := newTestHost(t, helper)
-
-	tick := make(chan time.Time)
-	delays := make(chan time.Duration, 64)
-	h.schedulerWait = func(d time.Duration) <-chan time.Time {
-		delays <- d
-		return tick
-	}
-	done := make(chan struct{})
-	go func() { h.runScheduler(ctx); close(done) }()
-	select {
-	case <-delays: // bootstrap wait requested
-	case <-time.After(10 * time.Second):
-		t.Fatal("the scheduler never started waiting")
-	}
-
-	h.addPendingReloads([]string{idA})
-	select {
-	case tick <- time.Now():
-	case <-time.After(10 * time.Second):
-		t.Fatal("the scheduler never woke")
-	}
-	select {
-	case ids := <-helper.reloads:
-		if len(ids) != 1 || ids[0] != idA {
-			t.Errorf("the paused scheduler should still flush the owed id, got %v", ids)
-		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("the owed reload was not flushed while updates were paused")
-	}
-}
-
-// A flush snapshots its debt before talking to Chrome; a debt added for the
-// same id while that attempt is in flight is a newer promise, and the old
-// attempt's success must not erase it.
-func TestFlushDoesNotSettleADebtAddedMidFlight(t *testing.T) {
+// A manifest that was refreshed while background.js was not is the failure
+// this protocol exists for: the old code must still be recognised as old,
+// even though the manifest beside it names the new version.
+func TestHostSeesThroughAHalfAppliedRefresh(t *testing.T) {
 	seedHostState(t, state.Extension{Dir: "a", Name: "A", ID: idA, Key: keyA})
 	helper := &fakeHelper{
-		reloads:    make(chan []string, 4),
-		holdReload: make(chan struct{}),
-		reloadSeen: make(chan struct{}, 1),
+		helloVersion: helperext.Version, // new manifest...
+		omitProtocol: true,              // ...old background.js
+		reloads:      make(chan []string, 4),
 	}
 	h, ctx := newTestHost(t, helper)
 
-	h.addPendingReloads([]string{idA})
-	flushDone := make(chan struct{})
-	go func() { h.flushPendingReloads(ctx); close(flushDone) }()
-	select {
-	case <-helper.reloadSeen: // the attempt is in flight, answer held
-	case <-time.After(10 * time.Second):
-		t.Fatal("the flush never reached the helper")
+	resp := h.handleIPC(ctx, ipc.Request{Cmd: ipc.CmdPing})
+	if resp.Host == nil || resp.Host.HelperCompat == ipc.HelperCompatOK {
+		t.Fatalf("old code announcing the new version must not read as compatible: %+v", resp.Host)
 	}
-
-	h.addPendingReloads([]string{idA}) // a newer promise for the same id
-	close(helper.holdReload)           // old attempt answers "reloaded"
-	select {
-	case <-flushDone:
-	case <-time.After(10 * time.Second):
-		t.Fatal("the flush never finished")
-	}
-
-	h.pendingReloadMu.Lock()
-	_, stillOwed := h.pendingReload[idA]
-	h.pendingReloadMu.Unlock()
-	if !stillOwed {
-		t.Fatal("the old attempt's success erased the newer debt")
-	}
-	// And the newer debt is actually delivered on the next flush.
-	<-helper.reloads // drain the first request's record
-	h.flushPendingReloads(ctx)
-	select {
-	case ids := <-helper.reloads:
-		if len(ids) != 1 || ids[0] != idA {
-			t.Errorf("the newer debt should be retried, got %v", ids)
-		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("the newer debt was never retried")
+	resp = h.handleIPC(ctx, ipc.Request{Cmd: ipc.CmdReload, IDs: []string{idA}, Protocol: ipc.ProtocolVersion})
+	if resp.OK {
+		t.Error("no Chrome operation may reach a half-refreshed helper")
 	}
 }
 

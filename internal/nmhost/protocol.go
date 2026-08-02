@@ -26,6 +26,9 @@ type envelope struct {
 type helloMsg struct {
 	Type          string `json:"type"`
 	HelperVersion string `json:"helperVersion"`
+	// Protocol is what the running background.js was generated with; zero
+	// means a helper from before it announced one.
+	Protocol int `json:"protocol"`
 }
 
 type helloAckMsg struct {

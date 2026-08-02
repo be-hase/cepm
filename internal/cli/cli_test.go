@@ -175,13 +175,16 @@ func (h *fakeHost) handle(_ context.Context, req ipc.Request) ipc.Response {
 			}}
 		}
 		compat := ipc.HelperCompatOK
+		helperProtocol := 1
 		if h.helperTooOld {
 			compat = ipc.HelperCompatTooOld
+			helperProtocol = 0
 		}
 		return ipc.Response{OK: true, Host: &ipc.HostInfo{
 			Version: version, Leader: true,
 			HelperVersion: h.helperVersion, MinHelperVersion: "0.1.0",
 			HelperCompat: compat, Protocol: ipc.ProtocolVersion,
+			HelperProtocol: helperProtocol, HelperProtocolWanted: 1,
 		}}
 	}
 	return ipc.Response{Error: "unknown command"}

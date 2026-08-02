@@ -148,14 +148,18 @@ func runDiagnostics(ctx context.Context) []diagnostic {
 		switch {
 		case info.HelperVersion == "":
 			add("helper ⇄ host", "warn", "helper has not said hello yet", "check chrome://extensions for the cepm helper")
-		case info.HelperCompat == ipc.HelperCompatTooOld:
+		case info.HelperCompat == ipc.HelperCompatTooOld || info.HelperCompat == ipc.HelperCompatMismatch:
 			// The host refuses to drive an incompatible helper, so nothing
-			// works until Chrome reloads the refreshed files. Only this
-			// explicit verdict is a failure: an older host reports no
+			// works until Chrome reloads the refreshed files. Only these
+			// explicit verdicts are failures: an older host reports no
 			// verdict at all ("" — never mistaken for one).
+			running := "no protocol (predates it)"
+			if info.HelperProtocol != 0 {
+				running = fmt.Sprintf("protocol %d", info.HelperProtocol)
+			}
 			add("helper ⇄ host", "fail",
-				fmt.Sprintf("helper v%s is older than this host supports (v%s); Chrome operations are paused",
-					info.HelperVersion, info.MinHelperVersion),
+				fmt.Sprintf("helper v%s speaks %s, this host protocol %d; Chrome operations are paused",
+					info.HelperVersion, running, info.HelperProtocolWanted),
 				"restart Chrome to load the refreshed helper")
 		case info.LastPong.IsZero():
 			// Keep-alives start one interval after the connection, so this is

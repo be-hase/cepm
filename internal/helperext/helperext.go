@@ -21,7 +21,18 @@ var assets embed.FS
 // Version is the helper extension version. Bump it whenever assets change;
 // setup and the native host re-install the helper when it differs from the
 // marker file.
-const Version = "0.3.0"
+const Version = "0.4.0"
+
+// Protocol is the helper⇄host wire generation, embedded into the generated
+// background.js from here so the running code announces what it actually
+// is. The manifest version cannot serve: a refresh writes manifest.json
+// first, so a failure on background.js leaves old code reporting the new
+// version. Bump on any change to the messages exchanged with the host.
+const Protocol = 1
+
+// protocolPlaceholder is the line in the asset that carries Protocol into
+// the generated file. Rendering fails loudly if it ever stops matching.
+const protocolPlaceholder = "const HELPER_PROTOCOL = 0;"
 
 // HostName is the native messaging host name shared by the helper extension,
 // the host manifest, and the native host process.
@@ -96,6 +107,12 @@ func renderFiles() ([]struct {
 	if err != nil {
 		return nil, err
 	}
+	rendered := strings.Replace(string(bg),
+		protocolPlaceholder, fmt.Sprintf("const HELPER_PROTOCOL = %d;", Protocol), 1)
+	if rendered == string(bg) {
+		return nil, fmt.Errorf("background.js no longer contains %q", protocolPlaceholder)
+	}
+	bg = []byte(rendered)
 	return []struct {
 		name    string
 		content []byte
