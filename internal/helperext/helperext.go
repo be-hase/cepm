@@ -5,11 +5,11 @@ package helperext
 import (
 	"embed"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
-	"text/template"
 
 	"github.com/be-hase/cepm/internal/extid"
 )
@@ -20,7 +20,7 @@ var assets embed.FS
 // Version is the helper extension version. Bump it whenever assets change;
 // setup and the native host re-install the helper when it differs from the
 // marker file.
-const Version = "0.2.0"
+const Version = "0.3.0"
 
 // HostName is the native messaging host name shared by the helper extension,
 // the host manifest, and the native host process.
@@ -52,21 +52,38 @@ func InstalledVersion(dir string) string {
 	return strings.TrimSpace(string(b))
 }
 
+// manifest is the helper's manifest.json shape. Built with json.Marshal —
+// not a text template — so a future value with a quote or backslash cannot
+// silently corrupt what Chrome loads (nmmanifest made the same choice).
+type manifest struct {
+	ManifestVersion int      `json:"manifest_version"`
+	Name            string   `json:"name"`
+	Version         string   `json:"version"`
+	Description     string   `json:"description"`
+	Key             string   `json:"key"`
+	Permissions     []string `json:"permissions"`
+	Background      struct {
+		ServiceWorker string `json:"service_worker"`
+	} `json:"background"`
+}
+
 // Install writes the helper extension files into dir.
 func Install(dir string) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	tmplData, err := assets.ReadFile("assets/manifest.json.tmpl")
-	if err != nil {
-		return err
+	m := manifest{
+		ManifestVersion: 3,
+		Name:            "cepm helper",
+		Version:         Version,
+		Description:     "Reloads unpacked extensions managed by cepm. Do not remove.",
+		Key:             PublicKeyBase64,
+		// "storage" backs the crash-recovery marker background.js keeps
+		// around its disable→enable pair.
+		Permissions: []string{"management", "nativeMessaging", "alarms", "storage"},
 	}
-	tmpl, err := template.New("manifest").Parse(string(tmplData))
-	if err != nil {
-		return err
-	}
-	var manifest strings.Builder
-	err = tmpl.Execute(&manifest, map[string]string{"Version": Version, "Key": PublicKeyBase64})
+	m.Background.ServiceWorker = "background.js"
+	manifestJSON, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -83,7 +100,7 @@ func Install(dir string) error {
 		name    string
 		content []byte
 	}{
-		{"manifest.json", []byte(manifest.String())},
+		{"manifest.json", append(manifestJSON, '\n')},
 		{"background.js", bg},
 		{versionMarker, []byte(Version + "\n")},
 	}

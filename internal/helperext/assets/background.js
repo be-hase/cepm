@@ -83,8 +83,83 @@ async function handleUninstall(msg) {
   post({ type: "uninstallResult", requestId: msg.requestId, status, error });
 }
 
+// Ids this helper disabled and has not yet re-enabled. Persisted, because
+// Chrome can kill an MV3 worker between the setEnabled(false) and the
+// setEnabled(true) of a reload: without the marker the extension stays off
+// forever, and every later attempt reads that as the user's own choice
+// ("skipped_disabled"). chrome.storage.local survives browser restarts too,
+// so the recovery below also fixes a crash the user rode out by quitting.
+const INFLIGHT_KEY = "cepm-reload-inflight";
+
+// storage has no transactions and reloads run concurrently: marker updates
+// are chained so one id's removal cannot overwrite another id's addition.
+let markerChain = Promise.resolve();
+function updateInflight(mutate) {
+  const next = markerChain.then(async () => {
+    const got = await chrome.storage.local.get(INFLIGHT_KEY);
+    const marks = got[INFLIGHT_KEY] || {};
+    mutate(marks);
+    await chrome.storage.local.set({ [INFLIGHT_KEY]: marks });
+  });
+  markerChain = next.catch(() => {});
+  return next;
+}
+
+async function isInflight(id) {
+  try {
+    const got = await chrome.storage.local.get(INFLIGHT_KEY);
+    return !!(got[INFLIGHT_KEY] || {})[id];
+  } catch (e) {
+    return false;
+  }
+}
+
+// Finish reloads a dead worker left half-done. Everything still marked was
+// disabled by us, so re-enabling restores the user's world, never overrides
+// it. Runs at every worker start.
+async function recoverInflight() {
+  let ids;
+  try {
+    const got = await chrome.storage.local.get(INFLIGHT_KEY);
+    ids = Object.keys(got[INFLIGHT_KEY] || {});
+  } catch (e) {
+    return; // storage unavailable; the markers keep for the next start
+  }
+  for (const id of ids) {
+    let settled = true;
+    try {
+      const info = await chrome.management.get(id);
+      if (!info.enabled) await chrome.management.setEnabled(id, true);
+    } catch (e) {
+      // get() failing means the extension is gone — settled. A failed
+      // re-enable (broken manifest in the pulled commit) keeps the marker,
+      // so the attempt after the next pull still knows the disable was ours.
+      settled = !(await isStillThere(id));
+    }
+    if (settled) {
+      try {
+        await updateInflight((m) => {
+          delete m[id];
+        });
+      } catch (e) {}
+    }
+  }
+}
+
+async function isStillThere(id) {
+  try {
+    await chrome.management.get(id);
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
 async function handleReload(msg) {
-  const ids = msg.extensionIds || [];
+  // Dedupe: two concurrent disable/enable cycles for one id interleave into
+  // racy result rows. Array.isArray keeps a malformed frame from throwing
+  // (an unhandled rejection here reads as a silent CLI timeout upstream).
+  const ids = Array.isArray(msg.extensionIds) ? [...new Set(msg.extensionIds)] : [];
   // Reload concurrently: the host's reply timeout does not grow with the
   // number of managed extensions.
   const results = await Promise.all(ids.map((id) => reloadOne(id)));
@@ -109,19 +184,34 @@ async function reloadOne(id) {
     return { id, status: "skipped_not_unpacked" };
   }
   if (!info.enabled) {
+    if (await isInflight(id)) {
+      // Disabled by us, on an attempt the worker did not survive: finishing
+      // the re-enable is the reload the user is owed.
+      return finishEnable(id);
+    }
     // The user turned it off in chrome://extensions; re-enabling it here
     // would override that on every update.
     return { id, status: "skipped_disabled" };
+  }
+  try {
+    await updateInflight((m) => {
+      m[id] = true;
+    });
+  } catch (e) {
+    // Reload without crash cover rather than not at all (the pre-marker
+    // behaviour).
   }
   try {
     // Disabling and re-enabling an unpacked extension makes Chrome re-read
     // its files from disk.
     await chrome.management.setEnabled(id, false);
   } catch (e) {
+    await clearInflight(id);
     return { id, status: "error", error: String((e && e.message) || e) };
   }
   try {
     await chrome.management.setEnabled(id, true);
+    await clearInflight(id);
     return { id, status: "reloaded" };
   } catch (e) {
     // Never leave an extension disabled because of us: a broken manifest in
@@ -129,8 +219,11 @@ async function reloadOne(id) {
     const detail = String((e && e.message) || e);
     try {
       await chrome.management.setEnabled(id, true);
+      await clearInflight(id);
       return { id, status: "reloaded" };
     } catch (e2) {
+      // The marker stays: recovery (or the attempt after the next pull)
+      // keeps knowing this disable was ours, not the user's.
       return {
         id,
         status: "error",
@@ -138,6 +231,28 @@ async function reloadOne(id) {
       };
     }
   }
+}
+
+async function finishEnable(id) {
+  try {
+    await chrome.management.setEnabled(id, true);
+    await clearInflight(id);
+    return { id, status: "reloaded" };
+  } catch (e) {
+    return {
+      id,
+      status: "error",
+      error: String((e && e.message) || e) + " — the extension is now DISABLED in Chrome",
+    };
+  }
+}
+
+async function clearInflight(id) {
+  try {
+    await updateInflight((m) => {
+      delete m[id];
+    });
+  } catch (e) {}
 }
 
 async function handleList(msg) {
@@ -167,4 +282,5 @@ chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: 0.5 });
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === KEEPALIVE_ALARM) connect();
 });
+recoverInflight();
 connect();

@@ -48,7 +48,7 @@ func TestInstall(t *testing.T) {
 	for _, p := range m.Permissions {
 		perms[p] = true
 	}
-	if !perms["management"] || !perms["nativeMessaging"] || !perms["alarms"] {
+	if !perms["management"] || !perms["nativeMessaging"] || !perms["alarms"] || !perms["storage"] {
 		t.Errorf("missing permissions: %v", m.Permissions)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "background.js")); err != nil {

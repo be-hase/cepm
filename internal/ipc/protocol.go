@@ -20,6 +20,11 @@ const (
 	// the helper leaves it that way instead of re-enabling it on every update.
 	StatusSkippedDisabled = "skipped_disabled"
 	StatusSkippedSelf     = "skipped_self"
+	// StatusSkippedNotUnpacked: the id belongs to a Web Store install (a repo
+	// pinning the "key" of a published extension); the helper refuses to
+	// touch anything the user did not load unpacked. Final: retrying cannot
+	// change it.
+	StatusSkippedNotUnpacked = "skipped_not_unpacked"
 	// StatusSkippedStateChanged: cepm stopped wanting this reload between
 	// accepting the request and acting on it — the extension was disabled or
 	// its repository uninstalled in the meantime. It says nothing about

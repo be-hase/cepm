@@ -154,7 +154,8 @@ func (h *Host) flushPendingReloads(ctx context.Context) {
 	for _, r := range results {
 		h.log.Info("reload", "id", r.ID, "status", r.Status, "err", r.Error)
 		switch r.Status {
-		case ipc.StatusReloaded, ipc.StatusNotInstalled, ipc.StatusSkippedDisabled, ipc.StatusSkippedSelf:
+		case ipc.StatusReloaded, ipc.StatusNotInstalled, ipc.StatusSkippedDisabled,
+			ipc.StatusSkippedSelf, ipc.StatusSkippedNotUnpacked:
 			settled[r.ID] = true
 		}
 	}
