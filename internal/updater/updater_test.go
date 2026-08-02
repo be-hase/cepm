@@ -50,7 +50,10 @@ func writeManifest(t *testing.T, dir, name string) {
 func setupRepo(t *testing.T, name string) (authorDir string) {
 	t.Helper()
 	base := t.TempDir()
-	t.Setenv("CEPM_HOME", filepath.Join(base, "cepmhome"))
+	// A space in the home path, deliberately: every suggested command and
+	// git invocation in this suite then proves its quoting on a path real
+	// macOS home directories can have.
+	t.Setenv("CEPM_HOME", filepath.Join(base, "cepm home"))
 
 	bare := filepath.Join(base, "origin.git")
 	git(t, base, "init", "--bare", "--initial-branch=main", bare)
@@ -396,15 +399,68 @@ func TestUpdateQuotesBranchInSuggestedCommand(t *testing.T) {
 	if results[0].Err != nil {
 		msg = results[0].Err.Error()
 	}
-	if !strings.Contains(msg, "checkout") {
-		t.Fatalf("expected a checkout suggestion, got %q", msg)
+	if !strings.Contains(msg, "switch") {
+		t.Fatalf("expected a switch suggestion, got %q", msg)
 	}
 	// The dangerous part must be inside single quotes, not loose in the line.
-	if strings.Contains(msg, "checkout -- "+hostile) {
+	if strings.Contains(msg, "switch -- "+hostile) {
 		t.Errorf("branch name is not quoted in the suggested command: %s", msg)
 	}
 	if !strings.Contains(msg, "'"+hostile+"'") {
 		t.Errorf("branch name should appear as one quoted word: %s", msg)
+	}
+}
+
+// The suggested recovery command is meant to be pasted and run, so run it:
+// it must return the clone to the tracked branch and must not touch a file
+// that happens to share the branch's name — "checkout -- main" (the old
+// advice) reads "main" as a pathspec and silently discards local edits to
+// that file instead of switching. The home path contains a space to prove
+// the quoting holds up.
+func TestBranchRecoveryAdviceIsExecutableAndNonDestructive(t *testing.T) {
+	setupRepo(t, "mytools") // the home path setupRepo picks contains a space
+
+	dir, err := RepoDir("mytools")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A committed file named exactly like the tracked branch, on both
+	// branches, carrying an uncommitted local edit — the bait the old
+	// advice would destroy.
+	writeFile(t, filepath.Join(dir, "main"), "committed")
+	git(t, dir, "add", "main")
+	git(t, dir, "commit", "-m", "add file named main")
+	git(t, dir, "checkout", "-q", "-b", "something-else")
+	writeFile(t, filepath.Join(dir, "main"), "precious local edit")
+
+	results, err := Update(context.Background(), nil, Options{StashDirty: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if results[0].Err == nil {
+		t.Fatal("expected the wrong-branch refusal")
+	}
+	msg := results[0].Err.Error()
+	i := strings.Index(msg, "switch back with: ")
+	if i < 0 {
+		t.Fatalf("no recovery command in %q", msg)
+	}
+	advice := msg[i+len("switch back with: "):]
+
+	out, cmdErr := exec.Command("/bin/sh", "-c", advice).CombinedOutput()
+	if cmdErr != nil {
+		t.Fatalf("the suggested command failed: %v\n$ %s\n%s", cmdErr, advice, out)
+	}
+	branch := git(t, dir, "branch", "--show-current")
+	if branch != "main" {
+		t.Errorf("the suggested command should switch back to main, now on %q", branch)
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "main"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b) != "precious local edit" {
+		t.Errorf("the suggested command destroyed a local edit: file now %q", b)
 	}
 }
 

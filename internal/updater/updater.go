@@ -233,7 +233,8 @@ func updateRepo(ctx context.Context, name string, r *state.Repo, opts Options, t
 			// misread manifests and unregister extensions. Stop here and let
 			// the user resolve it.
 			res.Err = fmt.Errorf("restoring your local changes failed; resolve the conflict in %s "+
-				"(your changes are still in the stash: git -C %s stash pop): %w", dir, dir, err)
+				"(your changes are still in the stash: git -C %s stash pop): %w",
+				term.Quote(dir), term.Quote(dir), err)
 			return res
 		}
 	}
@@ -344,7 +345,10 @@ func moveToLatest(ctx context.Context, repo gitx.Repo, r *state.Repo, res *RepoR
 		if current != "" {
 			where = "branch " + current
 		}
-		return "", fmt.Errorf("the clone is on %s but cepm tracks %s; switch back with: git -C %s checkout -- %s",
+		// "git switch -- <branch>", not "git checkout -- <branch>": with
+		// checkout the branch name is a pathspec, which restores a file of
+		// that name (discarding local edits to it) and switches nothing.
+		return "", fmt.Errorf("the clone is on %s but cepm tracks %s; switch back with: git -C %s switch -- %s",
 			term.Safe(where), term.Safe(branch), term.Quote(repo.Dir), term.Quote(branch))
 	}
 	if err := repo.MergeFFOnly(ctx, "origin/"+branch); err != nil {
