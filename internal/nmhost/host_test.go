@@ -185,6 +185,16 @@ func newTestHost(t *testing.T, helper *fakeHelper) (*Host, context.Context) {
 	helper.toHost = helperToHostW
 	helper.from = hostToHelperR
 	go helper.run()
+	// Chrome operations are gated until the hello's compat verdict lands;
+	// wait for it so tests exercise their scenario, not the gate.
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if h.helperCompat.Load() != compatUnknown {
+			return h, ctx
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("the helper's hello was never processed")
 	return h, ctx
 }
 
@@ -559,7 +569,7 @@ func TestSocketReloadHoldsTheLockToo(t *testing.T) {
 
 	respDone := make(chan ipc.Response, 1)
 	go func() {
-		respDone <- h.handleIPC(ctx, ipc.Request{Cmd: ipc.CmdReload, IDs: []string{idA}})
+		respDone <- h.handleIPC(ctx, ipc.Request{Cmd: ipc.CmdReload, IDs: []string{idA}, Protocol: ipc.ProtocolVersion})
 	}()
 	select {
 	case <-helper.reloadSeen:
@@ -611,7 +621,7 @@ func TestReloadReportsStateChangeDistinctlyFromChromeDisabled(t *testing.T) {
 	respDone := make(chan ipc.Response, 1)
 	err := updater.WithLock(context.Background(), func() error {
 		go func() {
-			respDone <- h.handleIPC(ctx, ipc.Request{Cmd: ipc.CmdReload, IDs: []string{idA}})
+			respDone <- h.handleIPC(ctx, ipc.Request{Cmd: ipc.CmdReload, IDs: []string{idA}, Protocol: ipc.ProtocolVersion})
 		}()
 		select {
 		case <-authorized:
@@ -666,7 +676,7 @@ func TestHandleIPCRecoversFromAPanic(t *testing.T) {
 	}
 	h.afterReloadAuthorized = func() { panic("kaboom") }
 
-	resp := h.handleIPC(context.Background(), ipc.Request{Cmd: ipc.CmdReload, IDs: []string{idA}})
+	resp := h.handleIPC(context.Background(), ipc.Request{Cmd: ipc.CmdReload, IDs: []string{idA}, Protocol: ipc.ProtocolVersion})
 	if resp.OK || resp.Error == "" {
 		t.Errorf("a panicking request should answer with an error, got %+v", resp)
 	}
@@ -996,11 +1006,11 @@ func TestHostRefusesAnIncompatibleHelper(t *testing.T) {
 			if info == nil {
 				t.Fatal("the hello never reached the host")
 			}
-			if info.HelperOK {
-				t.Errorf("helper %q must be reported incompatible", version)
+			if info.HelperCompat != ipc.HelperCompatTooOld {
+				t.Errorf("helper %q must be reported too_old, got %q", version, info.HelperCompat)
 			}
 
-			resp := h.handleIPC(ctx, ipc.Request{Cmd: ipc.CmdReload, IDs: []string{idA}})
+			resp := h.handleIPC(ctx, ipc.Request{Cmd: ipc.CmdReload, IDs: []string{idA}, Protocol: ipc.ProtocolVersion})
 			if resp.OK || !strings.Contains(resp.Error, "restart Chrome") {
 				t.Errorf("reload should be refused with the fix named, got %+v", resp)
 			}
@@ -1020,7 +1030,7 @@ func TestHostRefusesAnIncompatibleHelper(t *testing.T) {
 		deadline := time.Now().Add(10 * time.Second)
 		for time.Now().Before(deadline) {
 			if resp := h.handleIPC(ctx, ipc.Request{Cmd: ipc.CmdPing}); resp.Host != nil && resp.Host.HelperVersion != "" {
-				if !resp.Host.HelperOK {
+				if resp.Host.HelperCompat != ipc.HelperCompatOK {
 					t.Fatalf("a current helper must be compatible: %+v", resp.Host)
 				}
 				return
@@ -1149,5 +1159,52 @@ func TestFlushDoesNotSettleADebtAddedMidFlight(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("the newer debt was never retried")
+	}
+}
+
+// Before any hello there is nobody verified to talk to: unknown must not be
+// treated as compatible, and refused work stays owed rather than timing out
+// against a helper that may not even exist yet.
+func TestHelperGateFailsClosedBeforeHello(t *testing.T) {
+	seedHostState(t, state.Extension{Dir: "a", Name: "A", ID: idA, Key: keyA})
+	h := &Host{
+		version:   "test",
+		log:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		out:       make(chan []byte, 16),
+		pending:   map[string]chan json.RawMessage{},
+		startedAt: time.Now(),
+	}
+	if _, err := h.Reload(context.Background(), []string{idA}); err == nil ||
+		!strings.Contains(err.Error(), "not connected yet") {
+		t.Errorf("a pre-hello reload must be refused as unknown, got %v", err)
+	}
+	if _, err := h.ListChrome(context.Background()); err == nil {
+		t.Error("a pre-hello list must be refused")
+	}
+	if _, err := h.Uninstall(context.Background(), idA); err == nil {
+		t.Error("a pre-hello uninstall must be refused")
+	}
+}
+
+// A CLI from a different protocol generation is refused with the fix named —
+// except pings, which is how doctor gets to diagnose the mismatch at all.
+func TestHostRefusesAMismatchedProtocol(t *testing.T) {
+	seedHostState(t, state.Extension{Dir: "a", Name: "A", ID: idA, Key: keyA})
+	h := &Host{
+		version:   "test",
+		log:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		out:       make(chan []byte, 16),
+		pending:   map[string]chan json.RawMessage{},
+		startedAt: time.Now(),
+	}
+
+	resp := h.handleIPC(context.Background(), ipc.Request{Cmd: ipc.CmdReload, IDs: []string{idA}}) // Protocol 0: an old CLI
+	if resp.OK || !strings.Contains(resp.Error, "restart Chrome") {
+		t.Errorf("a protocol-0 reload must be refused with the fix named, got %+v", resp)
+	}
+	if resp := h.handleIPC(context.Background(), ipc.Request{Cmd: ipc.CmdPing}); !resp.OK {
+		t.Errorf("pings must answer regardless of protocol, got %+v", resp)
+	} else if resp.Host.Protocol != ipc.ProtocolVersion {
+		t.Errorf("the ping should carry the host protocol, got %+v", resp.Host)
 	}
 }

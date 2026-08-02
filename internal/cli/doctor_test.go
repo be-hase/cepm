@@ -256,3 +256,42 @@ func TestDoctorAndSetupNoticeCorruptedHelperFiles(t *testing.T) {
 		t.Errorf("doctor flags a repaired helper:\n%s", out)
 	}
 }
+
+// A running host from before compatibility and protocol reporting sends
+// zero-valued new fields; that is "no verdict", never "helper too old" — and
+// the generation difference itself gets its own diagnostic.
+func TestDoctorHandlesAHostThatPredatesCompatReporting(t *testing.T) {
+	h := startFakeHost(t)
+	h.oldHostInfo = true
+	h.helperVersion = "0.1.0" // a perfectly healthy helper
+
+	out, _ := run(t, "", "doctor")
+	if strings.Contains(out, "older than this host supports") {
+		t.Errorf("an absent verdict must not read as an incompatible helper:\n%s", out)
+	}
+	if !strings.Contains(out, "restart Chrome to relaunch the updated host") {
+		t.Errorf("the generation difference should be diagnosed:\n%s", out)
+	}
+}
+
+// The host version is displayed verbatim: releases already carry the v
+// prefix and dev builds say "dev" — a forced prefix printed "vv...".
+func TestDoctorShowsHostVersionVerbatim(t *testing.T) {
+	h := startFakeHost(t)
+	h.hostVersion = "v1.2.3"
+	out, _ := run(t, "", "doctor")
+	if strings.Contains(out, "vv1.2.3") {
+		t.Errorf("host version rendered with a double v:\n%s", out)
+	}
+	if !strings.Contains(out, "v1.2.3 connected") {
+		t.Errorf("host version should appear verbatim:\n%s", out)
+	}
+
+	h.mu.Lock()
+	h.hostVersion = "dev"
+	h.mu.Unlock()
+	out, _ = run(t, "", "doctor")
+	if !strings.Contains(out, "dev connected") {
+		t.Errorf("a dev version should appear as-is:\n%s", out)
+	}
+}

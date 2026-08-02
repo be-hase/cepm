@@ -5,6 +5,13 @@ package ipc
 
 import "time"
 
+// ProtocolVersion is the CLI⇄host protocol generation, independent of the
+// release version: the binary on disk (the CLI) and the host Chrome launched
+// at session start can be different builds, and a mismatched pair must fail
+// with "restart Chrome" instead of misunderstanding each other. Bump it
+// whenever the request/response shapes change meaning.
+const ProtocolVersion = 1
+
 // Commands.
 const (
 	CmdPing       = "ping"
@@ -40,6 +47,10 @@ type Request struct {
 	Cmd string   `json:"cmd"`
 	IDs []string `json:"ids,omitempty"` // extension IDs for CmdReload
 	ID  string   `json:"id,omitempty"`  // extension ID for CmdUninstall
+	// Protocol is the sender's ProtocolVersion; zero means a CLI that
+	// predates protocol reporting. The host answers pings regardless (so
+	// doctor can diagnose the mismatch) but refuses everything else.
+	Protocol int `json:"protocol,omitempty"`
 }
 
 type Response struct {
@@ -52,6 +63,16 @@ type Response struct {
 }
 
 // HostInfo describes the running native host (ping response).
+// Helper compatibility verdicts, as reported in HostInfo.HelperCompat. A
+// string, not a bool, deliberately: a HostInfo from a host that predates the
+// field decodes to "", which readers must treat as "this host does not
+// report compatibility" — a zero-valued bool would have read as a verdict.
+const (
+	HelperCompatUnknown = "unknown" // no hello processed yet
+	HelperCompatOK      = "ok"
+	HelperCompatTooOld  = "too_old"
+)
+
 type HostInfo struct {
 	Version       string    `json:"version"`
 	PID           int       `json:"pid"`
@@ -60,10 +81,13 @@ type HostInfo struct {
 	LastPong      time.Time `json:"lastPong"` // last keep-alive reply from the helper
 	HelperVersion string    `json:"helperVersion,omitempty"`
 	// MinHelperVersion is the oldest helper this host drives; when the
-	// connected helper is older (or its version is unparsable), HelperOK is
-	// false and the host refuses to relay Chrome operations to it.
+	// connected helper is older (or its version is unparsable), HelperCompat
+	// is HelperCompatTooOld and the host refuses to relay Chrome operations.
 	MinHelperVersion string `json:"minHelperVersion,omitempty"`
-	HelperOK         bool   `json:"helperOk"`
+	HelperCompat     string `json:"helperCompat,omitempty"`
+	// Protocol is the CLI⇄host protocol generation (see ProtocolVersion);
+	// zero means the host predates protocol reporting.
+	Protocol int `json:"protocol,omitempty"`
 }
 
 type ReloadResult struct {

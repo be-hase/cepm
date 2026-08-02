@@ -129,15 +129,28 @@ func runDiagnostics(ctx context.Context) []diagnostic {
 		add("host process", "warn", "not reachable",
 			"Chrome may not be running, or the helper extension is not loaded/enabled (chrome://extensions). Updates still apply on next Chrome launch.")
 	} else {
+		// info.Version verbatim: build systems already prefix release
+		// versions with "v", and dev builds say "dev" — forcing another
+		// prefix printed "vv0.0.0-..." here.
 		add("host process", "ok",
-			fmt.Sprintf("v%s connected (pid %d, leader=%t, up %s)",
+			fmt.Sprintf("%s connected (pid %d, leader=%t, up %s)",
 				info.Version, info.PID, info.Leader, time.Since(info.StartedAt).Round(time.Second)), "")
+		if info.Protocol != ipc.ProtocolVersion {
+			// Protocol 0 = a host from before protocol reporting; either
+			// way the running host is a different cepm generation than this
+			// binary, and it refuses (or misunderstands) real commands.
+			add("host generation", "warn",
+				fmt.Sprintf("running host speaks protocol %d, this CLI %d", info.Protocol, ipc.ProtocolVersion),
+				"restart Chrome to relaunch the updated host")
+		}
 		switch {
 		case info.HelperVersion == "":
 			add("helper ⇄ host", "warn", "helper has not said hello yet", "check chrome://extensions for the cepm helper")
-		case !info.HelperOK:
+		case info.HelperCompat == ipc.HelperCompatTooOld:
 			// The host refuses to drive an incompatible helper, so nothing
-			// works until Chrome reloads the refreshed files.
+			// works until Chrome reloads the refreshed files. Only this
+			// explicit verdict is a failure: an older host reports no
+			// verdict at all ("" — never mistaken for one).
 			add("helper ⇄ host", "fail",
 				fmt.Sprintf("helper v%s is older than this host supports (v%s); Chrome operations are paused",
 					info.HelperVersion, info.MinHelperVersion),

@@ -65,9 +65,13 @@ type fakeHost struct {
 	dropReloadResults  bool
 	reloadNotInstalled bool
 	reloadStatusByID   map[string]string // per-id status override
-	// Helper-compat presentation for doctor tests.
+	// Host-info presentation for doctor tests: helper compat verdict, host
+	// version string, and oldHostInfo simulates a host from before compat
+	// and protocol reporting (zero-valued new fields).
 	helperVersion string
 	helperTooOld  bool
+	hostVersion   string
+	oldHostInfo   bool
 }
 
 func startFakeHost(t *testing.T, loaded ...string) *fakeHost {
@@ -160,10 +164,24 @@ func (h *fakeHost) handle(_ context.Context, req ipc.Request) ipc.Response {
 		}
 		return ipc.Response{OK: true, Results: results}
 	case ipc.CmdPing:
+		version := h.hostVersion
+		if version == "" {
+			version = "test"
+		}
+		if h.oldHostInfo {
+			// What a pre-compat, pre-protocol host actually sends.
+			return ipc.Response{OK: true, Host: &ipc.HostInfo{
+				Version: version, Leader: true, HelperVersion: h.helperVersion,
+			}}
+		}
+		compat := ipc.HelperCompatOK
+		if h.helperTooOld {
+			compat = ipc.HelperCompatTooOld
+		}
 		return ipc.Response{OK: true, Host: &ipc.HostInfo{
-			Version: "test", Leader: true,
+			Version: version, Leader: true,
 			HelperVersion: h.helperVersion, MinHelperVersion: "0.1.0",
-			HelperOK: !h.helperTooOld,
+			HelperCompat: compat, Protocol: ipc.ProtocolVersion,
 		}}
 	}
 	return ipc.Response{Error: "unknown command"}

@@ -69,10 +69,12 @@ type Host struct {
 	lastPong        atomic.Int64 // unix nano
 	helperRefreshed atomic.Bool  // helper file refresh attempted (once per process)
 	caughtUp        atomic.Bool  // startup catch-up reload done (once per process)
-	// helperTooOld gates every Chrome operation: an incompatible helper may
-	// misinterpret requests, so refusing loudly beats acting wrongly. Set
-	// from the hello; the refreshed files fix it on the next Chrome start.
-	helperTooOld atomic.Bool
+	// helperCompat gates every Chrome operation. Three-valued on purpose:
+	// before a hello is processed the helper is *unknown*, and unknown must
+	// not be treated as compatible — a request sent then could reach a
+	// helper the host has no verdict on. Values are the compatVerdict
+	// constants; the refreshed files fix too_old on the next Chrome start.
+	helperCompat atomic.Int32
 
 	// afterReloadAuthorized runs between authorizing a socket reload and
 	// acting on it. Test-only: it is the seam a test needs to land a state
@@ -99,6 +101,13 @@ type Host struct {
 	pendingReload    map[string]uint64
 	pendingReloadGen uint64
 }
+
+// compatVerdict values for Host.helperCompat.
+const (
+	compatUnknown int32 = iota
+	compatOK
+	compatTooOld
+)
 
 // safego runs fn on its own goroutine, logging a panic to the host log
 // before deciding what dies with it. Chrome discards the host's stderr, so
@@ -339,12 +348,13 @@ func (h *Host) readLoop(ctx context.Context) error {
 				// repair it on the next Chrome start either way.
 				tooOld := !semver.IsValid("v"+msg.HelperVersion) ||
 					semver.Compare("v"+msg.HelperVersion, "v"+minHelperVersion) < 0
-				h.helperTooOld.Store(tooOld)
 				if tooOld {
+					h.helperCompat.Store(compatTooOld)
 					h.log.Error("helper is older than this host supports; Chrome operations are paused",
 						"helperVersion", msg.HelperVersion, "minHelperVersion", minHelperVersion,
 						"fix", "restart Chrome to load the refreshed helper")
 				} else {
+					h.helperCompat.Store(compatOK)
 					h.log.Info("helper connected", "helperVersion", msg.HelperVersion)
 				}
 			}
@@ -431,16 +441,23 @@ func (h *Host) nextRequestID() string {
 	return fmt.Sprintf("%d-%d", os.Getpid(), h.reqSeq.Add(1))
 }
 
-// helperGate refuses to relay Chrome operations to a helper this host does
-// not support: it may misinterpret the request, and a clear refusal with the
-// fix named beats acting wrongly or timing out in silence.
+// helperGate refuses to relay Chrome operations to a helper this host has
+// no compatible hello from: an incompatible one may misinterpret the
+// request, and before any hello there is nobody verified to talk to — a
+// clear refusal with the fix named beats acting wrongly or timing out in
+// silence. Refused work stays owed (the debt machinery keeps it), so a
+// pre-hello refusal costs one recheck, not the reload.
 func (h *Host) helperGate() error {
-	if !h.helperTooOld.Load() {
+	switch h.helperCompat.Load() {
+	case compatOK:
 		return nil
+	case compatTooOld:
+		hv, _ := h.helperVersion.Load().(string)
+		return fmt.Errorf("the connected cepm helper (v%s) is older than this host supports (v%s); restart Chrome to load the refreshed helper",
+			hv, minHelperVersion)
+	default:
+		return fmt.Errorf("the cepm helper has not connected yet; wait a moment, or check it is loaded and enabled in chrome://extensions")
 	}
-	hv, _ := h.helperVersion.Load().(string)
-	return fmt.Errorf("the connected cepm helper (v%s) is older than this host supports (v%s); restart Chrome to load the refreshed helper",
-		hv, minHelperVersion)
 }
 
 // Reload asks the helper to reload the given extension IDs. The deadline
@@ -756,15 +773,31 @@ func (h *Host) handleIPC(ctx context.Context, req ipc.Request) (resp ipc.Respons
 			resp = ipc.Response{Error: "internal error in the host; see " + logHint()}
 		}
 	}()
+	// A CLI from a different protocol generation must not be half-served:
+	// pings still answer (that is how doctor diagnoses the mismatch), but
+	// everything that acts is refused with the fix named.
+	if req.Cmd != ipc.CmdPing && req.Protocol != ipc.ProtocolVersion {
+		return ipc.Response{Error: fmt.Sprintf(
+			"this cepm CLI (protocol %d) does not match the running host (protocol %d); restart Chrome to relaunch the updated host",
+			req.Protocol, ipc.ProtocolVersion)}
+	}
 	switch req.Cmd {
 	case ipc.CmdPing:
+		compat := ipc.HelperCompatUnknown
+		switch h.helperCompat.Load() {
+		case compatOK:
+			compat = ipc.HelperCompatOK
+		case compatTooOld:
+			compat = ipc.HelperCompatTooOld
+		}
 		info := &ipc.HostInfo{
 			Version:          h.version,
 			PID:              os.Getpid(),
 			Leader:           h.leader.Load(),
 			StartedAt:        h.startedAt,
 			MinHelperVersion: minHelperVersion,
-			HelperOK:         !h.helperTooOld.Load(),
+			HelperCompat:     compat,
+			Protocol:         ipc.ProtocolVersion,
 		}
 		if hv, ok := h.helperVersion.Load().(string); ok {
 			info.HelperVersion = hv

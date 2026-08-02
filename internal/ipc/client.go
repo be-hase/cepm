@@ -25,6 +25,7 @@ const dialRetry = 3 * time.Second
 
 // Call sends one request to the native host and returns its response.
 func Call(ctx context.Context, req Request) (*Response, error) {
+	req.Protocol = ProtocolVersion
 	sock, err := paths.SocketPath()
 	if err != nil {
 		return nil, err
