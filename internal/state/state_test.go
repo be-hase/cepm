@@ -70,6 +70,15 @@ func TestLoadRejectsMalformedState(t *testing.T) {
 		"invalid json":    `{"version":6,`,
 		"future version":  `{"version":99,"repos":{}}`,
 		"older version":   `{"version":3,"repos":{}}`,
+		// A misspelling is the dangerous kind of edit: "disable" is dropped,
+		// so the extension reads as enabled — the opposite of what was
+		// meant — and every id still derives correctly, so Validate has
+		// nothing to object to. The next save then erases the evidence.
+		"misspelled field": `{"version":6,"repos":{"tools":{"url":"u","track":"branch","branch":"main",
+			"head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			"extensions":[{"dir":"ext","name":"Ext","id":"aaaa","disable":true}]}}}`,
+		"unknown repo field": `{"version":6,"repos":{"tools":{"url":"u","brunch":"main"}}}`,
+		"unknown top field":  `{"version":6,"repos":{},"reposs":{}}`,
 	}
 	for name, content := range cases {
 		t.Run(name, func(t *testing.T) {

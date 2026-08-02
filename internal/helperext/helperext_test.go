@@ -167,3 +167,37 @@ func TestGeneratedHelperCarriesTheProtocol(t *testing.T) {
 		t.Error("the hello no longer sends the protocol; the host would read a helper of unknown generation")
 	}
 }
+
+// Two invariants in the helper have no Go-side expression and no way to be
+// exercised from here — running this JS would take a browser, and the races
+// they close need a service worker to die at a chosen instant. They are
+// pinned by contract instead, so removing them is at least loud.
+//
+//   - Recovery at worker start and a reload arriving on the port must not
+//     interleave on one id: recovery would otherwise delete the marker a
+//     live reload had just set, and a worker death there leaves the
+//     extension disabled with nothing recording that cepm disabled it.
+//   - The uninstall confirmation dialog must report that it is still open,
+//     or the host and CLI go back to giving up on a dialog that is still on
+//     screen while holding the update lock open for it.
+func TestGeneratedHelperKeepsTheInvariantsGoCannotTest(t *testing.T) {
+	dir := t.TempDir()
+	if err := Install(dir); err != nil {
+		t.Fatal(err)
+	}
+	js, err := os.ReadFile(filepath.Join(dir, "background.js"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []struct{ snippet, why string }{
+		{"function withExtension(", "the per-id serialization is gone"},
+		{"withExtension(id, () => reloadOneLocked(id))", "reloads no longer serialize against recovery"},
+		{"await withExtension(id, async () => {", "recovery no longer serializes against reloads"},
+		{"if (!(await isInflight(id))) return;", "recovery no longer re-checks the marker it is about to delete"},
+		{`post({ type: "uninstallPending"`, "the uninstall dialog no longer reports that it is open"},
+	} {
+		if !strings.Contains(string(js), want.snippet) {
+			t.Errorf("%s (looked for %q)", want.why, want.snippet)
+		}
+	}
+}

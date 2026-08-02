@@ -23,6 +23,7 @@
 package state
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -192,17 +193,35 @@ func Load() (*State, error) {
 	if err != nil {
 		return nil, err
 	}
-	var s State
-	if err := json.Unmarshal(data, &s); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", path, err)
+	// The version is read on its own first, leniently. A state from a newer
+	// cepm may well carry fields this build has never heard of, and it has
+	// to be met with "upgrade cepm" rather than a complaint about one of
+	// them.
+	var probe struct {
+		Version int `json:"version"`
 	}
-	if s.Version > Version {
-		return nil, fmt.Errorf("%s was written by a newer cepm (state version %d); upgrade cepm", path, s.Version)
+	if err := json.Unmarshal(data, &probe); err != nil {
+		return nil, fmt.Errorf("parse %s: %s", path, term.Safe(err.Error()))
 	}
-	if s.Version < Version {
+	if probe.Version > Version {
+		return nil, fmt.Errorf("%s was written by a newer cepm (state version %d); upgrade cepm", path, probe.Version)
+	}
+	if probe.Version < Version {
 		// No released cepm ever wrote an older version, so nothing is
 		// migrated: only a development build can have left this behind.
-		return nil, fmt.Errorf("%s has state version %d, this cepm expects %d; run cepm reset and re-install", path, s.Version, Version)
+		return nil, fmt.Errorf("%s has state version %d, this cepm expects %d; run cepm reset and re-install", path, probe.Version, Version)
+	}
+	// At this build's own version an unknown field is a hand edit that went
+	// wrong, and silence is the dangerous answer: a misspelled "disabled"
+	// reads as enabled, passes Validate — every id still derives correctly —
+	// and disappears at the next save, so the user's intent is inverted and
+	// then erased.
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	var s State
+	if err := dec.Decode(&s); err != nil {
+		return nil, fmt.Errorf("parse %s: %s (state.json is written by cepm; "+
+			"if you edited it, check the spelling of that field)", path, term.Safe(err.Error()))
 	}
 	if s.Repos == nil {
 		s.Repos = map[string]*Repo{}
@@ -541,10 +560,49 @@ func (s *State) save() error {
 	if err := os.Rename(tmp.Name(), path); err != nil {
 		return err
 	}
-	dir, err := os.Open(filepath.Dir(path))
+	// Past this line the new state is what every reader sees. What is left
+	// is only whether it would survive a crash in the next moments, and
+	// that is a different question from "did it happen" — see NotDurable.
+	if err := syncDir(filepath.Dir(path)); err != nil {
+		return &NotDurableError{err}
+	}
+	return nil
+}
+
+// syncDir is a variable so a test can fail the flush alone, which is the
+// only way to reach the window where the state is live but not yet durable.
+var syncDir = func(path string) error {
+	dir, err := os.Open(path)
 	if err != nil {
 		return err
 	}
 	defer dir.Close()
 	return dir.Sync()
 }
+
+// FailDurability makes every save fail *after* state.json has been replaced.
+// Test-only; exported because the callers that must not undo their
+// filesystem changes over it live in other packages.
+func FailDurability() (restore func()) {
+	orig := syncDir
+	syncDir = func(string) error { return fmt.Errorf("injected flush failure") }
+	return func() { syncDir = orig }
+}
+
+// NotDurableError reports that state.json was replaced but the flush that
+// would make the replacement crash-proof did not succeed.
+//
+// The distinction matters to every caller that moves something on disk to
+// match the state it just saved. Treating this as "the save did not happen"
+// makes them undo that move — and installs then delete the clone they just
+// registered, which is the exact "state before filesystem" inversion the
+// rollback exists to prevent. The registration is real; only a crash in the
+// next moments could still lose it.
+type NotDurableError struct{ Err error }
+
+func (e *NotDurableError) Error() string {
+	return fmt.Sprintf("state.json was written but not flushed to disk (%v); "+
+		"it is in effect now and will survive unless this machine crashes in the next moments", e.Err)
+}
+
+func (e *NotDurableError) Unwrap() error { return e.Err }

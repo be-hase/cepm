@@ -58,6 +58,16 @@ reloaded; otherwise pass repository names.`,
 			// on the next launch — a reload that reloads nothing has simply
 			// failed, and a script must be able to see that.
 			outcome := reloadExtensions(cmd.Context(), cmd.OutOrStdout(), items)
+			// Unlike update, this command has no diff to consult, so it
+			// cannot name the extensions whose manifest changed. Saying
+			// nothing would let "↻ reloaded" stand for more than happened:
+			// a reload never applies manifest.json.
+			if outcome.Reloaded > 0 {
+				fmt.Fprintf(cmd.OutOrStdout(),
+					"\nNote: a reload re-reads code, not manifest.json — Chrome keeps the manifest it\n"+
+						"cached. If you changed permissions or the version, restart Chrome (or click\n"+
+						"Reload in chrome://extensions).\n")
+			}
 			if outcome.HostUnreachable {
 				return errors.New("nothing was reloaded: the cepm host is not reachable (is Chrome running with the helper loaded?)")
 			}

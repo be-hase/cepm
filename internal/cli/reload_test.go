@@ -102,6 +102,24 @@ func TestReloadExitCodes(t *testing.T) {
 // An extension that vanished from Chrome between enable's list and its
 // reload still needs the one-time Load unpacked: the not_installed answer
 // must route it back into the load ceremony instead of being shrugged off.
+// "cepm reload" has no diff to consult, so it cannot name the extensions
+// whose manifest.json changed — but it must not let "↻ reloaded" imply the
+// update is fully live either. A reload never applies manifest.json.
+func TestReloadDoesNotClaimTheManifestWasApplied(t *testing.T) {
+	startFakeHost(t, idA)
+	seedRepo(t, "tools", state.Extension{Dir: "ext", Name: "Ext", ID: idA, Key: keyA})
+	out, err := run(t, "", "reload", "tools")
+	if err != nil {
+		t.Fatalf("reload: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "reloaded") {
+		t.Fatalf("fixture: the reload should have succeeded:\n%s", out)
+	}
+	if !strings.Contains(out, "manifest.json") {
+		t.Errorf("the limit of what a reload does must be stated:\n%s", out)
+	}
+}
+
 func TestEnableRoutesVanishedExtensionBackToTheCeremony(t *testing.T) {
 	h := startFakeHost(t, idA)
 	h.reloadNotInstalled = true // listed as loaded, but gone by reload time

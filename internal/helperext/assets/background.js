@@ -125,6 +125,25 @@ function updateInflight(mutate) {
   return next;
 }
 
+// Work on one extension id runs one at a time. Recovery at worker start and
+// a reload arriving on the port would otherwise interleave: recovery reads
+// "already enabled", the reload then marks the id and disables it, and
+// recovery deletes that marker. A worker death right there leaves the
+// extension switched off with nothing recording that cepm switched it off,
+// and every later attempt reads it as the user's own choice
+// ("skipped_disabled") — permanently. Chains are per id, so unrelated
+// extensions still reload in parallel.
+const idChains = new Map();
+function withExtension(id, fn) {
+  const prev = idChains.get(id) || Promise.resolve();
+  const next = prev.then(fn, fn); // a failed predecessor must not block us
+  idChains.set(
+    id,
+    next.catch(() => {}),
+  );
+  return next;
+}
+
 async function isInflight(id) {
   try {
     const got = await chrome.storage.local.get(INFLIGHT_KEY);
@@ -146,23 +165,32 @@ async function recoverInflight() {
     return; // storage unavailable; the markers keep for the next start
   }
   for (const id of ids) {
-    let settled = true;
-    try {
-      const info = await chrome.management.get(id);
-      if (!info.enabled) await chrome.management.setEnabled(id, true);
-    } catch (e) {
-      // get() failing means the extension is gone — settled. A failed
-      // re-enable (broken manifest in the pulled commit) keeps the marker,
-      // so the attempt after the next pull still knows the disable was ours.
-      settled = !(await isStillThere(id));
-    }
-    if (settled) {
+    await withExtension(id, async () => {
+      // Re-read inside the critical section. The list above was taken
+      // before any of this could be queued, so the marker may since have
+      // been cleared by a reload that finished — or set by one that is
+      // about to run, whose marker is not ours to delete.
+      if (!(await isInflight(id))) return;
+      let settled = true;
       try {
-        await updateInflight((m) => {
-          delete m[id];
-        });
-      } catch (e) {}
-    }
+        const info = await chrome.management.get(id);
+        if (!info.enabled) await chrome.management.setEnabled(id, true);
+      } catch (e) {
+        // get() failing means the extension is gone — settled. A failed
+        // re-enable (broken manifest in the pulled commit) keeps the
+        // marker, so the attempt after the next pull still knows the
+        // disable was ours.
+        settled = !(await isStillThere(id));
+      }
+      if (settled) {
+        try {
+          await updateInflight((m) => {
+            delete m[id];
+          });
+        } catch (e) {}
+      }
+      // One id that cannot be settled must not skip the rest.
+    }).catch(() => {});
   }
 }
 
@@ -186,7 +214,14 @@ async function handleReload(msg) {
   post({ type: "reloadResult", requestId: msg.requestId, results });
 }
 
-async function reloadOne(id) {
+// reloadOne serializes against recovery (and against another reload of the
+// same id) so the marker it sets cannot be cleared by work that decided what
+// to do before this reload started.
+function reloadOne(id) {
+  return withExtension(id, () => reloadOneLocked(id));
+}
+
+async function reloadOneLocked(id) {
   if (id === chrome.runtime.id) {
     // Reloading ourselves would tear down the native messaging port, and
     // Chrome does not reliably restart this worker afterwards.

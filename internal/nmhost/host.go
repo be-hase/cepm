@@ -1034,6 +1034,15 @@ func (h *Host) autoUpdate(ctx context.Context, cfg *config.Config) {
 				"changed", len(r.Changed), "added", len(r.Added))
 			for _, c := range r.Changed {
 				ids = append(ids, c.ID)
+				if c.ManifestChanged {
+					// A reload re-reads the code and keeps the manifest
+					// Chrome cached, so logging this one as "reloaded" and
+					// nothing else would report an update as fully live
+					// when its new permissions are not.
+					h.log.Warn("manifest.json changed; Chrome keeps the cached manifest until the "+
+						"extension is re-loaded (restart Chrome, or click Reload in chrome://extensions)",
+						"repo", r.Name, "extension", c.Name, "id", c.ID)
+				}
 			}
 		}
 	}
