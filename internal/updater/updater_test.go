@@ -2,6 +2,7 @@ package updater
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -578,19 +579,27 @@ func TestUpdateRefusesInvalidStateBeforeTouchingClones(t *testing.T) {
 	git(t, author, "commit", "-m", "v2")
 	git(t, author, "push", "origin", "main")
 
-	// Corrupt the state: a second repository claiming alpha's id.
+	// Corrupt the state: a second repository claiming alpha's id. Built by
+	// marshalling the real state so that only that corruption is present —
+	// a hand-written fixture once carried an outdated version number, which
+	// Load's version gate rejected before Validate ever ran, and the test
+	// no longer exercised the invariant it exists for.
 	st, err := state.Load()
 	if err != nil {
 		t.Fatal(err)
 	}
 	alpha := st.Repos["mytools"].Extensions[0]
-	raw := `{"version":4,"repos":{
-	  "mytools":{"url":"u","track":"branch","branch":"main","head":"h",
-	    "extensions":[{"dir":"ext/alpha","name":"Alpha","id":"` + alpha.ID + `","key":"K"}]},
-	  "other":{"url":"u","track":"branch","branch":"main","head":"h",
-	    "extensions":[{"dir":"ext","name":"Copy","id":"` + alpha.ID + `","key":"K"}]}}}`
+	st.Repos["other"] = &state.Repo{
+		URL: "u", Track: state.TrackBranch, Branch: "main",
+		Head:       st.Repos["mytools"].Head,
+		Extensions: []state.Extension{{Dir: "ext", Name: "Copy", ID: alpha.ID, Key: alpha.Key}},
+	}
+	raw, err := json.Marshal(st)
+	if err != nil {
+		t.Fatal(err)
+	}
 	home := os.Getenv("CEPM_HOME")
-	if err := os.WriteFile(filepath.Join(home, "state.json"), []byte(raw), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(home, "state.json"), raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
 
