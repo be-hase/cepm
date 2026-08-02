@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -21,6 +22,7 @@ import (
 	"github.com/be-hase/cepm/internal/helperext"
 	"github.com/be-hase/cepm/internal/ipc"
 	"github.com/be-hase/cepm/internal/nmmanifest"
+	"github.com/be-hase/cepm/internal/paths"
 )
 
 // TestE2E drives a real Chrome (Chrome for Testing, throwaway profile,
@@ -54,16 +56,18 @@ func TestE2E(t *testing.T) {
 	t.Setenv("CEPM_HOME", cepmHome)
 
 	// Registered after the RemoveAll cleanup so it runs before it (LIFO).
-	// The copy under /tmp survives the test for post-mortem debugging.
+	// The log goes into the test output only: a fixed path under /tmp would
+	// be clobbered by concurrent runs and outlives the test on the
+	// developer's machine.
 	t.Cleanup(func() {
+		if !t.Failed() {
+			return
+		}
 		b, err := os.ReadFile(filepath.Join(cepmHome, "logs", "host.log"))
 		if err != nil {
 			return
 		}
-		_ = os.WriteFile("/tmp/cepm-e2e-host.log", b, 0o644)
-		if t.Failed() {
-			t.Logf("host.log (also at /tmp/cepm-e2e-host.log):\n%s", b)
-		}
+		t.Logf("host.log:\n%s", b)
 	})
 
 	bin := buildCepm(t, home, goEnv)
@@ -575,8 +579,23 @@ func stopChrome(t *testing.T, cmd *exec.Cmd) {
 	}
 	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	_, _ = cmd.Process.Wait()
-	// Give the native host a moment to notice EOF and release the socket.
-	time.Sleep(500 * time.Millisecond)
+	// The host exits on stdin EOF, and its death is observable as the
+	// control socket no longer answering — wait for that fact, not for a
+	// guessed delay; a loaded machine just iterates longer.
+	sock, err := paths.SocketPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		conn, err := net.Dial("unix", sock)
+		if err != nil {
+			return // nothing serving: the host is gone
+		}
+		conn.Close()
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("the native host was still serving %s after Chrome was killed", sock)
 }
 
 func waitPing(t *testing.T, timeout time.Duration) {
