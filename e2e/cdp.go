@@ -7,7 +7,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"time"
 )
+
+// cdpReadTimeout bounds every wait for a CDP response. A service-worker
+// target can be destroyed between attach and evaluate — the helper's own
+// reload (setEnabled off/on) does exactly that mid-poll — and Chrome never
+// answers the in-flight command of a dead session: without a deadline the
+// suite hangs to the 20-minute panic instead of the poll loop retrying.
+const cdpReadTimeout = 10 * time.Second
 
 // cdpPipe is a minimal Chrome DevTools Protocol client over
 // --remote-debugging-pipe (fd 3 = commands to Chrome, fd 4 = responses,
@@ -64,10 +72,15 @@ func (c *cdpPipe) callSession(sessionID, method string, params any) (json.RawMes
 	if _, err := c.w.Write(append(payload, 0)); err != nil {
 		return nil, fmt.Errorf("write CDP command: %w", err)
 	}
+	// The deadline is cleared on return: a response that arrives after a
+	// timeout is skipped by the id check on the next call, not misread.
+	if err := c.rf.SetReadDeadline(time.Now().Add(cdpReadTimeout)); err == nil {
+		defer c.rf.SetReadDeadline(time.Time{})
+	}
 	for {
 		raw, err := c.r.ReadBytes(0)
 		if err != nil {
-			return nil, fmt.Errorf("read CDP response: %w", err)
+			return nil, fmt.Errorf("read CDP response to %s: %w", method, err)
 		}
 		var resp struct {
 			ID     int             `json:"id"`
