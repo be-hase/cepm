@@ -109,11 +109,13 @@ func runDiagnostics(ctx context.Context) []diagnostic {
 	if cfg, err := config.Load(); err != nil {
 		add("config", "fail", oneLine(err.Error()),
 			"fix the file (or delete it to fall back to defaults)")
-	} else if !cfg.Update.Auto {
-		add("config", "ok", "auto update disabled by config", "")
 	} else {
+		// The same three effective values whichever way auto points: the
+		// off state is when someone wonders what would apply after turning
+		// it back on.
 		add("config", "ok",
-			fmt.Sprintf("auto update every %s (stash_dirty=%t)", cfg.Update.Interval, cfg.Git.StashDirty), "")
+			fmt.Sprintf("auto=%t, interval=%s, stash_dirty=%t",
+				cfg.Update.Auto, cfg.Update.Interval, cfg.Git.StashDirty), "")
 	}
 
 	diags = append(diags, checkHelperFiles()...)

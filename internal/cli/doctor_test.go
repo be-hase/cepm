@@ -120,7 +120,7 @@ func TestDoctorFlagsABrokenConfig(t *testing.T) {
 
 	// No file at all: the defaults are what actually runs; show them as ok.
 	out, _ := run(t, "", "doctor")
-	if !strings.Contains(out, "auto update every") || !strings.Contains(out, "stash_dirty=") {
+	if !strings.Contains(out, "auto=true") || !strings.Contains(out, "interval=") || !strings.Contains(out, "stash_dirty=") {
 		t.Errorf("doctor should show the effective defaults without a config file:\n%s", out)
 	}
 
@@ -144,14 +144,50 @@ func TestDoctorFlagsABrokenConfig(t *testing.T) {
 		t.Errorf("doctor --json should carry the config failure:\n%s", out)
 	}
 
-	if err := os.WriteFile(cfgPath, []byte("[update]\nauto = false\n"), 0o644); err != nil {
+	// auto=false with non-default interval and stash_dirty: all three
+	// effective values must show — the off state is exactly when someone
+	// wonders what would apply after turning it back on.
+	if err := os.WriteFile(cfgPath,
+		[]byte("[update]\nauto = false\ninterval = \"2h\"\n[git]\nstash_dirty = true\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	out, _ = run(t, "", "doctor")
 	if strings.Contains(out, "fix the file") {
 		t.Errorf("doctor flags a healthy config:\n%s", out)
 	}
-	if !strings.Contains(out, "auto update disabled") {
-		t.Errorf("doctor should report the auto-update state:\n%s", out)
+	for _, want := range []string{"auto=false", "interval=2h0m0s", "stash_dirty=true"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("doctor should show %q even with auto off:\n%s", want, out)
+		}
+	}
+
+	// The JSON output carries the identical diagnostic, decoded, not just
+	// substring-matched.
+	jsonOut, _ := run(t, "", "doctor", "--json")
+	var diags []struct {
+		Name   string `json:"name"`
+		Status string `json:"status"`
+		Detail string `json:"detail"`
+	}
+	if err := json.Unmarshal([]byte(jsonOut), &diags); err != nil {
+		t.Fatalf("doctor --json is not valid JSON: %v\n%s", err, jsonOut)
+	}
+	found := false
+	for _, d := range diags {
+		if d.Name != "config" {
+			continue
+		}
+		found = true
+		if d.Status != "ok" {
+			t.Errorf("config diagnostic status = %q, want ok", d.Status)
+		}
+		for _, want := range []string{"auto=false", "interval=2h0m0s", "stash_dirty=true"} {
+			if !strings.Contains(d.Detail, want) {
+				t.Errorf("config diagnostic detail should carry %q, got %q", want, d.Detail)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("doctor --json has no config diagnostic:\n%s", jsonOut)
 	}
 }
