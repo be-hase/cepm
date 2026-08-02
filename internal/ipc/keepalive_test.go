@@ -42,12 +42,17 @@ func TestTheClientKeepsWaitingWhileTheHostReportsProgress(t *testing.T) {
 		status string
 		err    error
 	}
+	// No caller deadline — that is the case this is about. A deadline of
+	// the caller's own bounds the whole operation on purpose, progress or
+	// not; what has to survive progress is the *silence* budget.
 	const patience = 300 * time.Millisecond
+	prevPatience := clientPatience
+	t.Cleanup(func() { clientPatience = prevPatience })
+	clientPatience = func(Request) time.Duration { return patience }
+
 	done := make(chan result, 1)
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), patience)
-		defer cancel()
-		status, err := Uninstall(ctx, "abcdefghijklmnopabcdefghijklmnop")
+		status, err := Uninstall(context.Background(), "abcdefghijklmnopabcdefghijklmnop")
 		done <- result{status, err}
 	}()
 

@@ -188,9 +188,9 @@ func TestRemoveOthersKeepsOnlyTheNamedVariant(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	removed, err := RemoveOthers(keep)
-	if err != nil {
-		t.Fatal(err)
+	removed, failed := RemoveOthers(keep)
+	if len(failed) != 0 {
+		t.Fatalf("nothing should have failed: %+v", failed)
 	}
 	if len(removed) != 1 || removed[0] != otherPath {
 		t.Errorf("removed = %v, want exactly [%s]", removed, otherPath)
@@ -200,6 +200,44 @@ func TestRemoveOthersKeepsOnlyTheNamedVariant(t *testing.T) {
 	}
 	if _, err := os.Stat(otherPath); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("the other variant's manifest should be gone, got %v", err)
+	}
+}
+
+// Every leftover manifest is a Chrome that can still start a host, so one
+// that cannot be removed must not stop the attempt on the rest — and must
+// be reported rather than swallowed. Stopping at the first failure would
+// leave variants nobody even tried.
+func TestRemoveOthersTriesEveryVariantAndReportsWhatItCouldNot(t *testing.T) {
+	if len(paths.ChromeVariants) < 3 {
+		t.Skipf("need three Chrome variants to have one after the blocked one, have %v", paths.ChromeVariants)
+	}
+	fakeHome(t)
+	keep := paths.ChromeVariants[0]
+	blocked, alsoOther := paths.ChromeVariants[1], paths.ChromeVariants[2]
+	if _, err := Install(keep, "/x/cepm-host"); err != nil {
+		t.Fatal(err)
+	}
+	blockedPath, err := Install(blocked, "/x/cepm-host")
+	if err != nil {
+		t.Fatal(err)
+	}
+	alsoOtherPath, err := Install(alsoOther, "/x/cepm-host")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A directory the user cannot write is how this happens in practice.
+	blockedDir := filepath.Dir(blockedPath)
+	if err := os.Chmod(blockedDir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(blockedDir, 0o700) })
+
+	removed, failed := RemoveOthers(keep)
+	if len(failed) != 1 || failed[0].Path != blockedPath {
+		t.Fatalf("the manifest that survived must be named: removed=%v failed=%+v", removed, failed)
+	}
+	if len(removed) != 1 || removed[0] != alsoOtherPath {
+		t.Errorf("the variant after the blocked one must still be attempted: removed=%v", removed)
 	}
 }
 

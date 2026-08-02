@@ -30,16 +30,46 @@ func Call(ctx context.Context, req Request) (*Response, error) {
 		return nil, err
 	}
 	defer conn.Close()
-	return exchange(conn, r, req, patienceFor(ctx, req))
+	defer watchCancel(ctx, conn)()
+	return exchange(ctx, conn, r, req, patienceFor(ctx, req))
 }
 
+// watchCancel makes cancelling ctx interrupt a read that is already in
+// progress. Without it, cancellation only reaches DialContext: once the
+// connection is up, the read runs to its deadline — which for an uninstall
+// is a Chrome dialog nobody has answered, so Ctrl-C would appear to do
+// nothing at all.
+func watchCancel(ctx context.Context, conn net.Conn) (stop func()) {
+	if ctx.Done() == nil {
+		return func() {}
+	}
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			// A deadline in the past fails the read immediately; exchange
+			// then reports ctx.Err() rather than a confusing timeout.
+			_ = conn.SetDeadline(time.Now())
+		case <-done:
+		}
+	}()
+	return func() { close(done) }
+}
+
+// clientPatience is how long silence from the host is tolerated when the
+// caller set no deadline of its own. A variable so a test can shrink it:
+// the claim it backs is about a deadline, and nothing but a deadline
+// expiring can demonstrate one.
+var clientPatience = ClientDeadline
+
 // patienceFor is how long silence from the host is tolerated. A caller's own
-// deadline wins: it knows something this does not.
+// deadline wins: it bounds the whole operation, progress or not, because it
+// knows something this does not.
 func patienceFor(ctx context.Context, req Request) time.Duration {
 	if deadline, ok := ctx.Deadline(); ok {
 		return time.Until(deadline)
 	}
-	return ClientDeadline(req)
+	return clientPatience(req)
 }
 
 // dialHost opens a connection to the host with the deadline ctx implies, or
@@ -60,7 +90,7 @@ func dialHost(ctx context.Context, req Request) (net.Conn, *bufio.Reader, error)
 	if deadline, ok := ctx.Deadline(); ok {
 		_ = conn.SetDeadline(deadline)
 	} else {
-		_ = conn.SetDeadline(time.Now().Add(ClientDeadline(req)))
+		_ = conn.SetDeadline(time.Now().Add(clientPatience(req)))
 	}
 	return conn, bufio.NewReader(conn), nil
 }
@@ -70,7 +100,7 @@ func dialHost(ctx context.Context, req Request) (net.Conn, *bufio.Reader, error)
 // wait between lines rather than the whole exchange: an uninstall waits on a
 // Chrome dialog that only a person can close, and giving up on it would
 // release the update lock with that dialog still on screen.
-func exchange(conn net.Conn, r *bufio.Reader, req Request, patience time.Duration) (*Response, error) {
+func exchange(ctx context.Context, conn net.Conn, r *bufio.Reader, req Request, patience time.Duration) (*Response, error) {
 	req.Protocol = ProtocolVersion
 	enc, err := json.Marshal(req)
 	if err != nil {
@@ -81,8 +111,13 @@ func exchange(conn net.Conn, r *bufio.Reader, req Request, patience time.Duratio
 	}
 	var resp Response
 	for {
-		line, err := r.ReadBytes('\n')
+		line, err := readLine(r)
 		if err != nil {
+			// Cancellation reaches here as a deadline the watcher moved into
+			// the past; report what actually happened.
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, ctxErr
+			}
 			return nil, fmt.Errorf("read from host: %w", err)
 		}
 		resp = Response{}
@@ -159,15 +194,16 @@ func call(ctx context.Context, req Request) (*Response, error) {
 		return nil, err
 	}
 	defer conn.Close()
+	defer watchCancel(ctx, conn)()
 
-	resp, err := exchange(conn, r, Request{Cmd: CmdPing}, patienceFor(ctx, req))
+	resp, err := exchange(ctx, conn, r, Request{Cmd: CmdPing}, patienceFor(ctx, req))
 	if err != nil {
 		return nil, err
 	}
 	if resp.Host == nil || resp.Host.Protocol != ProtocolVersion {
 		return nil, ErrProtocolMismatch
 	}
-	return exchange(conn, r, req, patienceFor(ctx, req))
+	return exchange(ctx, conn, r, req, patienceFor(ctx, req))
 }
 
 // Reload asks the host to reload the given extension IDs via the helper.

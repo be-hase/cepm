@@ -130,7 +130,7 @@ func Update(ctx context.Context, names []string, opts Options) ([]RepoResult, er
 		if err != nil {
 			return err
 		}
-		targets := names
+		targets := dedupe(names)
 		if len(targets) == 0 {
 			targets = st.RepoNames()
 		}
@@ -438,6 +438,26 @@ func LatestTag(tags []string, includePrerelease bool) (latest string, warning st
 		"tag releases as v1.2.3, or track a branch instead", nonSemver, tags[0])
 }
 
+// dedupe keeps the first occurrence of each name. Updating a repository
+// twice in one command is not merely wasted work: on a dirty clone with
+// --force the second pass stashes the changes the first one just restored,
+// so the run ends with two auto-stash entries where the design leaves one.
+func dedupe(names []string) []string {
+	if len(names) < 2 {
+		return names
+	}
+	seen := make(map[string]bool, len(names))
+	out := names[:0:0]
+	for _, n := range names {
+		if seen[n] {
+			continue
+		}
+		seen[n] = true
+		out = append(out, n)
+	}
+	return out
+}
+
 // checkVanishedAreReallyGone refuses the refresh when a registered directory
 // dropped out of the scan while its manifest.json is still there.
 //
@@ -478,11 +498,24 @@ func checkVanishedAreReallyGone(found []scan.Extension, registered []state.Exten
 // stale so "cepm cleanup" can clear the broken Chrome copies later.
 // changedFiles may be nil (no revision change).
 func refreshExtensions(name string, r *state.Repo, dir string, res *RepoResult, changedFiles []string, takenIDs map[string]string) {
+	// A refresh is all or nothing, and that has to include what it reports.
+	// The checks below run per extension, so a failure on the last one can
+	// arrive with earlier ones already recorded — and the caller prints
+	// those as instructions ("Load unpacked the new directory", "run cepm
+	// cleanup") for a state that was never saved. Repo.Head does not move,
+	// so following them leads to an unmanaged extension and a cleanup with
+	// nothing to clean.
+	staleBefore := append([]state.StaleExtension(nil), r.Stale...)
+	fail := func(err error) {
+		res.Err = err
+		res.Added, res.Renamed, res.Reidentified, res.Removed, res.Changed = nil, nil, nil, nil, nil
+		r.Stale = staleBefore
+	}
 	exts, err := scan.Detect(dir)
 	if err != nil {
 		// Not a warning: reporting success here would let the caller advance
 		// the head past a commit whose extensions were never re-scanned.
-		res.Err = fmt.Errorf("extension scan failed: %w", err)
+		fail(fmt.Errorf("extension scan failed: %w", err))
 		return
 	}
 	old := make(map[string]state.Extension, len(r.Extensions))
@@ -490,7 +523,7 @@ func refreshExtensions(name string, r *state.Repo, dir string, res *RepoResult, 
 		old[e.Dir] = e
 	}
 	if err := checkVanishedAreReallyGone(exts, r.Extensions, dir); err != nil {
-		res.Err = err
+		fail(err)
 		return
 	}
 	var newList []state.Extension
@@ -502,7 +535,7 @@ func refreshExtensions(name string, r *state.Repo, dir string, res *RepoResult, 
 			// All or nothing: dropping just this one would unregister a
 			// working extension (losing its enable choice and marking it for
 			// cleanup) because a pulled commit has a malformed "key".
-			res.Err = fmt.Errorf("%s: %w", e.Dir, err)
+			fail(fmt.Errorf("%s: %w", e.Dir, err))
 			return
 		}
 		if owner, taken := takenIDs[id]; taken {
@@ -511,8 +544,8 @@ func refreshExtensions(name string, r *state.Repo, dir string, res *RepoResult, 
 			// Refuse the whole refresh, keeping the old state. takenIDs also
 			// accumulates this repo's own directories, so two of them pinning
 			// the same key is caught here too.
-			res.Err = fmt.Errorf("%s would get extension id %s, which %s already registers "+
-				"(both pin the same manifest \"key\")", e.Dir, id, owner)
+			fail(fmt.Errorf("%s would get extension id %s, which %s already registers "+
+				"(both pin the same manifest \"key\")", e.Dir, id, owner))
 			return
 		}
 		takenIDs[id] = name + "/" + e.Dir

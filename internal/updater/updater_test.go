@@ -1023,6 +1023,68 @@ func TestUpdateDoesNotAdvancePastAFailedScan(t *testing.T) {
 	}
 }
 
+// A refresh that fails partway must not report the extensions it got
+// through first. Nothing is saved — Repo.Head stays put — so an identity
+// change printed here sends the user to "Load unpacked" a directory cepm
+// does not have registered, and to "cepm cleanup" a record that does not
+// exist.
+func TestAFailedRefreshReportsNoPartialResults(t *testing.T) {
+	author := setupRepo(t, "mytools")
+	// alpha gets a valid new key (an identity change), beta an unusable one
+	// — and beta is scanned second, so alpha's change is already recorded.
+	const goodKey = "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA0lLejiTvG5ElQmwA+FNOPTFTArbjNA65OVcj5zk3efV/myX/PK/TWO7oGT1BE/9zZfbozbaAMwrk6l8FoRVMGqmPaPCfdDdbtJ+ogS+6Evw9EJ3Tx+2oLUS+ddyzLbsMkoeXe0wvDIX4vOnwi1tULgTpxBlsSQ2zF5e8oZG+wMZRb3s8iPDwskfxrqFSgAaDuNH1vmZiRzOqnz+uLNwdjGHpMrP4KTeGbrAW71EBhYFT0eT47ScdgYodPS1LnfnIobpC5ALPIsIcJnDPKNfL//rlfi4/pGXRq08jOSb1z9nz4sMNTfiHl7shswdTSM1aUu9rsIF1fWmJPXVdQ2IbZQIDAQAB"
+	writeFile(t, filepath.Join(author, "ext", "alpha", "manifest.json"),
+		`{"manifest_version": 3, "name": "Alpha", "version": "1.0", "key": "`+goodKey+`"}`)
+	writeFile(t, filepath.Join(author, "ext", "beta", "manifest.json"),
+		`{"manifest_version": 3, "name": "Beta", "version": "1.0", "key": "!!not base64!!"}`)
+	git(t, author, "add", "-A")
+	git(t, author, "commit", "-m", "keys")
+	git(t, author, "push", "origin", "main")
+
+	results, err := Update(context.Background(), nil, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := results[0]
+	if r.Err == nil {
+		t.Fatalf("a malformed key must fail the refresh, got %+v", r)
+	}
+	if len(r.Reidentified) != 0 || len(r.Added) != 0 || len(r.Renamed) != 0 || len(r.Removed) != 0 {
+		t.Errorf("nothing was saved, so nothing may be reported: %+v", r)
+	}
+	st, err := state.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stale := st.Repos["mytools"].Stale; len(stale) != 0 {
+		t.Errorf("a failed refresh must not queue anything for cleanup: %+v", stale)
+	}
+}
+
+// "cepm update tools tools" must do the work once. With --force on a dirty
+// clone the second pass stashes the changes the first one just restored, so
+// the run ends with two auto-stash entries where the design leaves one.
+func TestUpdateProcessesARepositoryOncePerRun(t *testing.T) {
+	setupRepo(t, "mytools")
+	dir, err := RepoDir("mytools")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(dir, "README.md"), "local edit")
+
+	results, err := Update(context.Background(), []string{"mytools", "mytools"}, Options{StashDirty: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 {
+		t.Errorf("the repository should appear once, got %d results", len(results))
+	}
+	stashes := git(t, dir, "stash", "list", "--format=%H")
+	if n := len(strings.Split(strings.TrimSpace(stashes), "\n")); stashes != "" && n > 1 {
+		t.Errorf("one run must leave at most one auto-stash, got %d:\n%s", n, stashes)
+	}
+}
+
 // A stash cepm leaves behind is only acceptable if the user is told: the
 // warning has to name the commit and how to look at it, or the entry is
 // just clutter nobody knows to clean up.

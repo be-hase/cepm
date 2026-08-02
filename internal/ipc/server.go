@@ -131,14 +131,23 @@ func serveConn(ctx context.Context, conn net.Conn, h Handler) {
 	// a leader handoff in between could route the command to a host it
 	// never verified. Anything after a non-ping command ends the loop.
 	for {
-		line, err := r.ReadBytes('\n')
+		line, err := readLine(r)
 		if err != nil {
+			if errors.Is(err, errTooLong) {
+				// Say so rather than just dropping the connection: a client
+				// that hit the limit legitimately has no other way to learn
+				// why its command vanished.
+				_, _ = conn.Write(append(mustMarshal(Response{Error: err.Error()}), '\n'))
+			}
 			return
 		}
 		var req Request
 		var resp Response
 		if err := json.Unmarshal(line, &req); err != nil {
-			resp = Response{Error: "invalid request: " + err.Error()}
+			// Deliberately not echoing the decoder's message: it quotes the
+			// bytes it choked on, and those come from whatever wrote to the
+			// socket. The client prints this.
+			resp = Response{Error: "invalid request"}
 		} else {
 			// The same budget the client waits for and the host works to:
 			// a fixed five minutes cut off a large reload the host was

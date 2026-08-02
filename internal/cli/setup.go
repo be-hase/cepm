@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -13,6 +14,7 @@ import (
 	"github.com/be-hase/cepm/internal/launcher"
 	"github.com/be-hase/cepm/internal/nmmanifest"
 	"github.com/be-hase/cepm/internal/paths"
+	"github.com/be-hase/cepm/internal/term"
 )
 
 func newSetupCmd() *cobra.Command {
@@ -85,12 +87,22 @@ func runSetup(cmd *cobra.Command, variant string, force bool) error {
 	fmt.Fprintf(out, "✔ Native messaging manifest written to %s\n", path)
 	// One Chrome at a time: a manifest left in another variant would let a
 	// second Chrome connect, and only one of them would receive reloads.
-	removed, err := nmmanifest.RemoveOthers(variant)
-	if err != nil {
-		return fmt.Errorf("remove old native messaging manifests: %w", err)
-	}
+	removed, failedRemovals := nmmanifest.RemoveOthers(variant)
 	for _, p := range removed {
 		fmt.Fprintf(out, "✔ Removed registration for a previously used Chrome: %s\n", p)
+	}
+	if len(failedRemovals) > 0 {
+		// This Chrome is registered and the other one still is too. Both can
+		// start a host, only the one that wins the leader lock receives
+		// reloads, and which that is depends on start order — so this cannot
+		// be a warning the setup output scrolls past.
+		var b strings.Builder
+		for _, f := range failedRemovals {
+			fmt.Fprintf(&b, "\n  %s (%s)", term.Quote(f.Path), term.Safe(f.Err.Error()))
+		}
+		return fmt.Errorf("this Chrome is set up, but another Chrome is still registered and "+
+			"cepm could not remove it:%s\n  Two Chromes can now start a cepm host and only one of them "+
+			"gets the reloads — delete the file(s) above, then run cepm setup again", b.String())
 	}
 	if len(removed) > 0 {
 		// Removing a manifest does not touch a host the old Chrome already

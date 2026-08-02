@@ -87,13 +87,25 @@ func writeAtomic(path string, content []byte) error {
 	return os.Rename(tmp.Name(), path)
 }
 
+// RemovalFailure is a manifest that is still registering a Chrome cepm was
+// asked to stop using.
+type RemovalFailure struct {
+	Path string
+	Err  error
+}
+
 // RemoveOthers deletes cepm's manifest from every Chrome variant except
-// keep, returning the removed paths. Manifests decide which Chromes can
-// launch the host, and only one Chrome is supported at a time — leaving a
-// manifest behind after switching variants would quietly allow two Chromes
-// to connect, of which only one receives reloads.
-func RemoveOthers(keep string) ([]string, error) {
-	var removed []string
+// keep, returning the removed paths and the ones it could not remove.
+// Manifests decide which Chromes can launch the host, and only one Chrome is
+// supported at a time — leaving a manifest behind after switching variants
+// would quietly allow two Chromes to connect, of which only one receives
+// reloads.
+//
+// One failure does not stop the rest. Returning early would leave variants
+// nobody even attempted, so a switch that hit a single unwritable directory
+// could leave two other Chromes registered as well; every leftover is a
+// Chrome that can still start a host.
+func RemoveOthers(keep string) (removed []string, failed []RemovalFailure) {
 	for _, v := range paths.ChromeVariants {
 		if v == keep {
 			continue
@@ -107,10 +119,10 @@ func RemoveOthers(keep string) ([]string, error) {
 		case err == nil:
 			removed = append(removed, p)
 		case !os.IsNotExist(err):
-			return removed, err
+			failed = append(failed, RemovalFailure{Path: p, Err: err})
 		}
 	}
-	return removed, nil
+	return removed, failed
 }
 
 // Read loads an installed manifest for doctor-style verification.
