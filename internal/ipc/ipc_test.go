@@ -272,67 +272,84 @@ func TestMatchingProtocolSendsTheOperationOnce(t *testing.T) {
 	}
 }
 
-// The handshake and the command must reach the same host process. With two
-// connections a host can quit in between and a follower from before the
-// upgrade can win leadership and receive a command this CLI only ever
-// verified against its predecessor — so the command must ride the same
-// connection the ping was answered on.
-func TestOperationsSurviveALeaderHandoffAfterTheHandshake(t *testing.T) {
+// handoffResult is what one run of the handoff scenario observed.
+type handoffResult struct {
+	oldHostSaw   []string // commands the pre-protocol successor received
+	successorErr error    // why the successor never took the socket, if so
+}
+
+// runHandoffScenario stages a leader handoff in the middle of a protocol
+// handshake: the current host answers the ping and quits, a host from
+// before the protocol field takes the socket, and a Reload is attempted
+// across the seam. listen builds the successor's listener, so a test can
+// inject a startup failure and check the scenario reports it rather than
+// silently concluding that nothing reached the old host.
+//
+// Everything it creates — temp dir, env var, listeners, goroutines — is
+// cleaned up before it returns, in both the normal and the failure path.
+func runHandoffScenario(t *testing.T, listen func(string) (net.Listener, error)) handoffResult {
+	t.Helper()
 	dir, err := os.MkdirTemp("/tmp", "cepm-ipc")
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { os.RemoveAll(dir) })
-	t.Setenv("CEPM_HOME", dir)
+	defer os.RemoveAll(dir)
+	t.Setenv("CEPM_HOME", dir) // restored by the test framework
 	if err := os.MkdirAll(filepath.Join(dir, "run"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	sock := filepath.Join(dir, "run", "cepm.sock")
 
-	// The current host: answers the handshake, then dies — the moment a
-	// two-connection client would step into.
 	handedOver := make(chan struct{})
 	current, err := Listen(sock)
 	if err != nil {
 		t.Fatal(err)
 	}
 	currentCtx, stopCurrent := context.WithCancel(context.Background())
-	t.Cleanup(stopCurrent)
-	go Serve(currentCtx, current, func(ctx context.Context, req Request) Response {
-		if req.Cmd == CmdPing {
-			// Hand the socket to the old host as soon as the handshake is
-			// answered; the reply is already on its way back.
-			defer func() {
-				stopCurrent()
-				<-handedOver
-			}()
-			return Response{OK: true, Host: &HostInfo{Protocol: ProtocolVersion}}
-		}
-		return Response{OK: true, Results: []ReloadResult{{ID: "aaa", Status: StatusReloaded}}}
-	})
+	defer stopCurrent()
+	currentDone := make(chan struct{})
+	go func() {
+		defer close(currentDone)
+		Serve(currentCtx, current, func(ctx context.Context, req Request) Response {
+			if req.Cmd == CmdPing {
+				// Hand the socket over as soon as the handshake is
+				// answered; the reply is already on its way back.
+				defer func() {
+					stopCurrent()
+					<-handedOver
+				}()
+				return Response{OK: true, Host: &HostInfo{Protocol: ProtocolVersion}}
+			}
+			return Response{OK: true, Results: []ReloadResult{{ID: "aaa", Status: StatusReloaded}}}
+		})
+	}()
 
 	// The successor: a host from before the protocol field, which would
-	// carry out anything it is handed. Its startup error reaches the test —
-	// a successor that never listened would make "the old host received
-	// nothing" true for the wrong reason, and pass even under the mutation.
+	// carry out anything it is handed.
 	var mu sync.Mutex
 	var oldHostSaw []string
 	successorErr := make(chan error, 1)
+	oldClosed := make(chan func(), 1)
 	go func() {
 		<-currentCtx.Done()
-		old, err := listenSuccessor(sock) // replaces the socket, like a new leader
+		old, err := listen(sock) // replaces the socket, like a new leader
 		successorErr <- err
 		if err != nil {
 			close(handedOver)
 			return
 		}
-		t.Cleanup(func() { old.Close() })
-		go Serve(context.Background(), old, func(ctx context.Context, req Request) Response {
-			mu.Lock()
-			oldHostSaw = append(oldHostSaw, req.Cmd)
-			mu.Unlock()
-			return Response{OK: true, Results: []ReloadResult{{ID: "aaa", Status: StatusReloaded}}}
-		})
+		oldCtx, stopOld := context.WithCancel(context.Background())
+		oldDone := make(chan struct{})
+		go func() {
+			defer close(oldDone)
+			Serve(oldCtx, old, func(ctx context.Context, req Request) Response {
+				mu.Lock()
+				oldHostSaw = append(oldHostSaw, req.Cmd)
+				mu.Unlock()
+				return Response{OK: true, Results: []ReloadResult{{ID: "aaa", Status: StatusReloaded}}}
+			})
+		}()
+		oldClosed <- func() { stopOld(); <-oldDone }
 		close(handedOver)
 	}()
 
@@ -340,48 +357,59 @@ func TestOperationsSurviveALeaderHandoffAfterTheHandshake(t *testing.T) {
 	// happen is the old host executing the command.
 	_, _ = Reload(context.Background(), []string{"aaa"})
 	<-handedOver
-	if err := <-successorErr; err != nil {
-		t.Fatalf("the successor host never took the socket, so this test proves nothing: %v", err)
+	err = <-successorErr
+	select {
+	case stop := <-oldClosed:
+		stop()
+	default:
 	}
+	<-currentDone
 
 	mu.Lock()
 	defer mu.Unlock()
-	for _, cmd := range oldHostSaw {
+	return handoffResult{oldHostSaw: append([]string(nil), oldHostSaw...), successorErr: err}
+}
+
+// The handshake and the command must reach the same host process. With two
+// connections a host can quit in between and a follower from before the
+// upgrade can win leadership and receive a command this CLI only ever
+// verified against its predecessor — so the command must ride the same
+// connection the ping was answered on.
+func TestOperationsSurviveALeaderHandoffAfterTheHandshake(t *testing.T) {
+	res := runHandoffScenario(t, Listen)
+	if res.successorErr != nil {
+		t.Fatalf("the successor host never took the socket, so this test proves nothing: %v", res.successorErr)
+	}
+	for _, cmd := range res.oldHostSaw {
 		if cmd != CmdPing {
-			t.Errorf("the pre-protocol host executed %q after the handoff (saw %v)", cmd, oldHostSaw)
+			t.Errorf("the pre-protocol host executed %q after the handoff (saw %v)", cmd, res.oldHostSaw)
 		}
 	}
 }
 
-// A standalone ping must not leave the connection (or a goroutine) behind.
-// listenSuccessor is Listen, with a seam so a test can prove its own oracle:
-// injecting a startup failure must make the handoff test fail rather than
-// quietly conclude that nothing reached the old host.
-var listenSuccessor = Listen
-
-// The handoff test must not pass because the successor never started. Inject
-// that failure and the test itself has to fail.
-func TestHandoffTestFailsIfTheSuccessorCannotListen(t *testing.T) {
-	orig := listenSuccessor
-	listenSuccessor = func(string) (net.Listener, error) {
+// And the scenario must say so when the successor never listened: without
+// that, "the old host received nothing" would be true for the wrong reason
+// and the test above would pass even with the fix reverted.
+func TestHandoffScenarioReportsASuccessorThatCannotListen(t *testing.T) {
+	before := countIPCTempDirs(t)
+	res := runHandoffScenario(t, func(string) (net.Listener, error) {
 		return nil, errors.New("injected listen failure")
+	})
+	if res.successorErr == nil {
+		t.Error("a successor that cannot listen must be reported")
 	}
-	defer func() { listenSuccessor = orig }()
+	if after := countIPCTempDirs(t); after > before {
+		t.Errorf("the scenario leaked temp directories: %d → %d", before, after)
+	}
+}
 
-	fake := &testing.T{}
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		TestOperationsSurviveALeaderHandoffAfterTheHandshake(fake)
-	}()
-	select {
-	case <-done:
-	case <-time.After(60 * time.Second):
-		t.Fatal("the handoff test did not finish")
+func countIPCTempDirs(t *testing.T) int {
+	t.Helper()
+	matches, err := filepath.Glob("/tmp/cepm-ipc*")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !fake.Failed() {
-		t.Error("the handoff test must fail when the successor cannot listen")
-	}
+	return len(matches)
 }
 
 func TestPingClosesItsConnection(t *testing.T) {

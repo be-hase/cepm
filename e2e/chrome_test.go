@@ -395,8 +395,8 @@ func TestResolveChromeFailsRatherThanSkips(t *testing.T) {
 
 // Two runs repairing the same incomplete cache entry must both succeed: the
 // loser of the rename race wants exactly what the winner produced. Both are
-// held at the promotion point — where the collision actually happens —
-// before either is allowed to move its tree into place.
+// held at the quarantine point — past the first rename and its winner
+// check, where the collision the final re-check exists for happens.
 func TestConcurrentRepairOfAnIncompleteCacheBothSucceed(t *testing.T) {
 	cs := newChromeServer(t, "100.0.0", filepath.Join("chrome-testplat", "chrome"))
 	cacheDir := t.TempDir()
@@ -409,13 +409,12 @@ func TestConcurrentRepairOfAnIncompleteCacheBothSucceed(t *testing.T) {
 	}
 
 	const runners = 2
-	atPromotion := make(chan struct{}, runners)
+	atCollision := make(chan struct{}, runners)
 	release := make(chan struct{})
-	beforePromote = func() {
-		atPromotion <- struct{}{}
+	barrier := func() {
+		atCollision <- struct{}{}
 		<-release
 	}
-	t.Cleanup(func() { beforePromote = nil })
 
 	type result struct {
 		bin string
@@ -425,17 +424,21 @@ func TestConcurrentRepairOfAnIncompleteCacheBothSucceed(t *testing.T) {
 	for i := 0; i < runners; i++ {
 		go func() {
 			f := &chromeFetcher{versionsURL: cs.URL + "/versions.json", cacheDir: cacheDir,
-				platform: "testplat", binRel: filepath.Join("chrome-testplat", "chrome")}
+				platform: "testplat", binRel: filepath.Join("chrome-testplat", "chrome"),
+				beforeQuarantine: barrier}
 			bin, _, err := f.ensure(quietf)
 			results <- result{bin, err}
 		}()
 	}
-	// Both must be holding a verified tree before either promotes it.
+	// Both must have found the destination unusable and be about to move
+	// it aside: that is where the collision the winner re-check exists for
+	// actually happens. Releasing earlier lets one finish before the other
+	// looks, which proves nothing.
 	for i := 0; i < runners; i++ {
 		select {
-		case <-atPromotion:
+		case <-atCollision:
 		case <-time.After(30 * time.Second):
-			t.Fatal("a repair never reached the promotion point")
+			t.Fatal("a repair never reached the quarantine point")
 		}
 	}
 	close(release)

@@ -37,6 +37,11 @@ type chromeFetcher struct {
 	cacheDir    string
 	platform    string
 	binRel      string // binary path inside the extracted archive
+	// beforeQuarantine runs once this fetcher has found the destination
+	// occupied by an unusable tree and is about to move it aside — the
+	// exact point two repairs of the same entry collide. Test-only seam
+	// (nil in production), per fetcher rather than global.
+	beforeQuarantine func()
 }
 
 // chromeReporter is the slice of *testing.T resolveChrome needs. Splitting
@@ -228,12 +233,6 @@ func (f *chromeFetcher) lookupDownload() (version, url string, err error) {
 	return "", "", fmt.Errorf("platform %s not in CfT downloads", f.platform)
 }
 
-// beforePromote runs just before a verified staging tree is moved into the
-// cache. Test-only seam (nil in production): promotion is where two runs
-// repairing the same entry actually collide, and a test that only starts
-// them together may never reach that collision.
-var beforePromote func()
-
 // download extracts into a staging directory and moves it into place only
 // once the expected binary is there: an interrupted unzip used to leave a
 // partial tree that the next run happily accepted as a cache hit.
@@ -273,9 +272,6 @@ func (f *chromeFetcher) download(url, dest string) error {
 	if !fileExists(filepath.Join(tree, f.binRel)) {
 		return fmt.Errorf("archive from %s has no %s", url, f.binRel)
 	}
-	if beforePromote != nil {
-		beforePromote()
-	}
 	// Another run may have finished the same version first; its tree is as
 	// good as ours, so treat losing the race as success. A *partial* tree
 	// at dest (an older cepm interrupted mid-unzip) has no such claim: move
@@ -284,6 +280,9 @@ func (f *chromeFetcher) download(url, dest string) error {
 	if err := os.Rename(tree, dest); err != nil {
 		if fileExists(filepath.Join(dest, f.binRel)) {
 			return nil
+		}
+		if f.beforeQuarantine != nil {
+			f.beforeQuarantine()
 		}
 		quarantine, qerr := os.MkdirTemp(f.cacheDir, ".broken-*")
 		if qerr != nil {
