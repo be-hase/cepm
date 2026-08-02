@@ -27,10 +27,12 @@ import (
 // port: it answers hello acks are ignored, pings with pongs, and reload/list
 // requests with canned results.
 type fakeHelper struct {
-	t       *testing.T
-	toHost  io.Writer
-	from    io.Reader
-	reloads chan []string // receives extensionIds of every reload request (optional)
+	t      *testing.T
+	toHost io.Writer
+	from   io.Reader
+	// helloVersion overrides the version the helper announces ("" = current).
+	helloVersion string
+	reloads      chan []string // receives extensionIds of every reload request (optional)
 	// failReloads makes reload requests answer status "error" while set —
 	// the transient helper failure the pending-reload retry exists for.
 	failReloads atomic.Bool
@@ -53,7 +55,11 @@ func (f *fakeHelper) send(msg any) {
 }
 
 func (f *fakeHelper) run() {
-	f.send(map[string]any{"type": "hello", "helperVersion": "0.1.0"})
+	v := f.helloVersion
+	if v == "" {
+		v = "0.1.0"
+	}
+	f.send(map[string]any{"type": "hello", "helperVersion": v})
 	for {
 		frame, err := ReadMessage(f.from)
 		if err != nil {
@@ -963,4 +969,64 @@ func TestCatchUpReloadKeepsIndividualFailuresOwed(t *testing.T) {
 	if len(h.pendingReload) != 0 {
 		t.Errorf("settled and dropped debts must not linger: %v", h.pendingReload)
 	}
+}
+
+// minHelperVersion is enforced, not just declared: a helper announcing an
+// older (or unparsable) version may misinterpret requests, so the host must
+// refuse to relay Chrome operations to it and say what fixes it.
+func TestHostRefusesAnIncompatibleHelper(t *testing.T) {
+	cases := map[string]string{"too old": "0.0.1", "unparsable": "garbage"}
+	for label, version := range cases {
+		t.Run(label, func(t *testing.T) {
+			seedHostState(t, state.Extension{Dir: "a", Name: "A", ID: idA, Key: keyA})
+			helper := &fakeHelper{helloVersion: version, reloads: make(chan []string, 4)}
+			h, ctx := newTestHost(t, helper)
+
+			// The hello arrives asynchronously; poll (with a deadline)
+			// until the host has recorded it.
+			deadline := time.Now().Add(10 * time.Second)
+			var info *ipc.HostInfo
+			for time.Now().Before(deadline) {
+				if resp := h.handleIPC(ctx, ipc.Request{Cmd: ipc.CmdPing}); resp.Host != nil && resp.Host.HelperVersion != "" {
+					info = resp.Host
+					break
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			if info == nil {
+				t.Fatal("the hello never reached the host")
+			}
+			if info.HelperOK {
+				t.Errorf("helper %q must be reported incompatible", version)
+			}
+
+			resp := h.handleIPC(ctx, ipc.Request{Cmd: ipc.CmdReload, IDs: []string{idA}})
+			if resp.OK || !strings.Contains(resp.Error, "restart Chrome") {
+				t.Errorf("reload should be refused with the fix named, got %+v", resp)
+			}
+			select {
+			case ids := <-helper.reloads:
+				t.Errorf("nothing may be sent to an incompatible helper, got %v", ids)
+			default:
+			}
+		})
+	}
+
+	// And a supported helper keeps everything flowing.
+	t.Run("compatible", func(t *testing.T) {
+		seedHostState(t, state.Extension{Dir: "a", Name: "A", ID: idA, Key: keyA})
+		helper := &fakeHelper{reloads: make(chan []string, 4)}
+		h, ctx := newTestHost(t, helper)
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			if resp := h.handleIPC(ctx, ipc.Request{Cmd: ipc.CmdPing}); resp.Host != nil && resp.Host.HelperVersion != "" {
+				if !resp.Host.HelperOK {
+					t.Fatalf("a current helper must be compatible: %+v", resp.Host)
+				}
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Fatal("the hello never reached the host")
+	})
 }

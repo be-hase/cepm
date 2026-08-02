@@ -59,6 +59,11 @@ type HostInfo struct {
 	StartedAt     time.Time `json:"startedAt"`
 	LastPong      time.Time `json:"lastPong"` // last keep-alive reply from the helper
 	HelperVersion string    `json:"helperVersion,omitempty"`
+	// MinHelperVersion is the oldest helper this host drives; when the
+	// connected helper is older (or its version is unparsable), HelperOK is
+	// false and the host refuses to relay Chrome operations to it.
+	MinHelperVersion string `json:"minHelperVersion,omitempty"`
+	HelperOK         bool   `json:"helperOk"`
 }
 
 type ReloadResult struct {

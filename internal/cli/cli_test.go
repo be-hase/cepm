@@ -64,6 +64,9 @@ type fakeHost struct {
 	failReloads        bool
 	dropReloadResults  bool
 	reloadNotInstalled bool
+	// Helper-compat presentation for doctor tests.
+	helperVersion string
+	helperTooOld  bool
 }
 
 func startFakeHost(t *testing.T, loaded ...string) *fakeHost {
@@ -154,7 +157,11 @@ func (h *fakeHost) handle(_ context.Context, req ipc.Request) ipc.Response {
 		}
 		return ipc.Response{OK: true, Results: results}
 	case ipc.CmdPing:
-		return ipc.Response{OK: true, Host: &ipc.HostInfo{Version: "test", Leader: true}}
+		return ipc.Response{OK: true, Host: &ipc.HostInfo{
+			Version: "test", Leader: true,
+			HelperVersion: h.helperVersion, MinHelperVersion: "0.1.0",
+			HelperOK: !h.helperTooOld,
+		}}
 	}
 	return ipc.Response{Error: "unknown command"}
 }

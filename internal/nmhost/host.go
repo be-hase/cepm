@@ -17,6 +17,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"golang.org/x/mod/semver"
+
 	"github.com/be-hase/cepm/internal/config"
 	"github.com/be-hase/cepm/internal/helperext"
 	"github.com/be-hase/cepm/internal/ipc"
@@ -67,6 +69,10 @@ type Host struct {
 	lastPong        atomic.Int64 // unix nano
 	helperRefreshed atomic.Bool  // helper file refresh attempted (once per process)
 	caughtUp        atomic.Bool  // startup catch-up reload done (once per process)
+	// helperTooOld gates every Chrome operation: an incompatible helper may
+	// misinterpret requests, so refusing loudly beats acting wrongly. Set
+	// from the hello; the refreshed files fix it on the next Chrome start.
+	helperTooOld atomic.Bool
 
 	// afterReloadAuthorized runs between authorizing a socket reload and
 	// acting on it. Test-only: it is the seam a test needs to land a state
@@ -314,7 +320,19 @@ func (h *Host) readLoop(ctx context.Context) error {
 			var msg helloMsg
 			if err := json.Unmarshal(frame, &msg); err == nil {
 				h.helperVersion.Store(msg.HelperVersion)
-				h.log.Info("helper connected", "helperVersion", msg.HelperVersion)
+				// Enforce, not just declare: an unparsable version is
+				// treated as too old — fail closed, the refreshed files
+				// repair it on the next Chrome start either way.
+				tooOld := !semver.IsValid("v"+msg.HelperVersion) ||
+					semver.Compare("v"+msg.HelperVersion, "v"+minHelperVersion) < 0
+				h.helperTooOld.Store(tooOld)
+				if tooOld {
+					h.log.Error("helper is older than this host supports; Chrome operations are paused",
+						"helperVersion", msg.HelperVersion, "minHelperVersion", minHelperVersion,
+						"fix", "restart Chrome to load the refreshed helper")
+				} else {
+					h.log.Info("helper connected", "helperVersion", msg.HelperVersion)
+				}
 			}
 			// Everything here is off the read loop: sending can block for
 			// seconds if the writer is wedged, and the follow-ups round-trip
@@ -399,10 +417,25 @@ func (h *Host) nextRequestID() string {
 	return fmt.Sprintf("%d-%d", os.Getpid(), h.reqSeq.Add(1))
 }
 
+// helperGate refuses to relay Chrome operations to a helper this host does
+// not support: it may misinterpret the request, and a clear refusal with the
+// fix named beats acting wrongly or timing out in silence.
+func (h *Host) helperGate() error {
+	if !h.helperTooOld.Load() {
+		return nil
+	}
+	hv, _ := h.helperVersion.Load().(string)
+	return fmt.Errorf("the connected cepm helper (v%s) is older than this host supports (v%s); restart Chrome to load the refreshed helper",
+		hv, minHelperVersion)
+}
+
 // Reload asks the helper to reload the given extension IDs. The deadline
 // grows with the batch size so that reloading many extensions is not
 // misreported as an unresponsive helper.
 func (h *Host) Reload(ctx context.Context, ids []string) ([]ipc.ReloadResult, error) {
+	if err := h.helperGate(); err != nil {
+		return nil, err
+	}
 	id := h.nextRequestID()
 	ctx, cancel := context.WithTimeout(ctx, requestTimeout+time.Duration(len(ids))*perExtensionTimeout)
 	defer cancel()
@@ -419,6 +452,9 @@ func (h *Host) Reload(ctx context.Context, ids []string) ([]ipc.ReloadResult, er
 
 // ListChrome asks the helper for Chrome's unpacked extensions.
 func (h *Host) ListChrome(ctx context.Context) ([]ipc.ChromeExt, error) {
+	if err := h.helperGate(); err != nil {
+		return nil, err
+	}
 	id := h.nextRequestID()
 	raw, err := h.request(ctx, id, listReq{Type: typeList, RequestID: id})
 	if err != nil {
@@ -440,6 +476,9 @@ func (h *Host) ListChrome(ctx context.Context) ([]ipc.ChromeExt, error) {
 // confirmation dialog, so this can never remove anything silently. Waiting is
 // bounded by the user's decision, hence the longer timeout.
 func (h *Host) Uninstall(ctx context.Context, extID string) (status string, err error) {
+	if err := h.helperGate(); err != nil {
+		return "", err
+	}
 	id := h.nextRequestID()
 	ctx, cancel := context.WithTimeout(ctx, uninstallTimeout)
 	defer cancel()
@@ -704,10 +743,12 @@ func (h *Host) handleIPC(ctx context.Context, req ipc.Request) (resp ipc.Respons
 	switch req.Cmd {
 	case ipc.CmdPing:
 		info := &ipc.HostInfo{
-			Version:   h.version,
-			PID:       os.Getpid(),
-			Leader:    h.leader.Load(),
-			StartedAt: h.startedAt,
+			Version:          h.version,
+			PID:              os.Getpid(),
+			Leader:           h.leader.Load(),
+			StartedAt:        h.startedAt,
+			MinHelperVersion: minHelperVersion,
+			HelperOK:         !h.helperTooOld.Load(),
 		}
 		if hv, ok := h.helperVersion.Load().(string); ok {
 			info.HelperVersion = hv

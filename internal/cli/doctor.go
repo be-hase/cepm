@@ -130,11 +130,18 @@ func runDiagnostics(ctx context.Context) []diagnostic {
 			"Chrome may not be running, or the helper extension is not loaded/enabled (chrome://extensions). Updates still apply on next Chrome launch.")
 	} else {
 		add("host process", "ok",
-			fmt.Sprintf("connected (pid %d, leader=%t, up %s)",
-				info.PID, info.Leader, time.Since(info.StartedAt).Round(time.Second)), "")
+			fmt.Sprintf("v%s connected (pid %d, leader=%t, up %s)",
+				info.Version, info.PID, info.Leader, time.Since(info.StartedAt).Round(time.Second)), "")
 		switch {
 		case info.HelperVersion == "":
 			add("helper ⇄ host", "warn", "helper has not said hello yet", "check chrome://extensions for the cepm helper")
+		case !info.HelperOK:
+			// The host refuses to drive an incompatible helper, so nothing
+			// works until Chrome reloads the refreshed files.
+			add("helper ⇄ host", "fail",
+				fmt.Sprintf("helper v%s is older than this host supports (v%s); Chrome operations are paused",
+					info.HelperVersion, info.MinHelperVersion),
+				"restart Chrome to load the refreshed helper")
 		case info.LastPong.IsZero():
 			// Keep-alives start one interval after the connection, so this is
 			// normal right after Chrome launches.
