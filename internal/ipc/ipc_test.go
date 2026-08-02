@@ -312,12 +312,16 @@ func TestOperationsSurviveALeaderHandoffAfterTheHandshake(t *testing.T) {
 	})
 
 	// The successor: a host from before the protocol field, which would
-	// carry out anything it is handed.
+	// carry out anything it is handed. Its startup error reaches the test —
+	// a successor that never listened would make "the old host received
+	// nothing" true for the wrong reason, and pass even under the mutation.
 	var mu sync.Mutex
 	var oldHostSaw []string
+	successorErr := make(chan error, 1)
 	go func() {
 		<-currentCtx.Done()
-		old, err := Listen(sock) // replaces the socket, like a new leader
+		old, err := listenSuccessor(sock) // replaces the socket, like a new leader
+		successorErr <- err
 		if err != nil {
 			close(handedOver)
 			return
@@ -336,6 +340,9 @@ func TestOperationsSurviveALeaderHandoffAfterTheHandshake(t *testing.T) {
 	// happen is the old host executing the command.
 	_, _ = Reload(context.Background(), []string{"aaa"})
 	<-handedOver
+	if err := <-successorErr; err != nil {
+		t.Fatalf("the successor host never took the socket, so this test proves nothing: %v", err)
+	}
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -347,6 +354,36 @@ func TestOperationsSurviveALeaderHandoffAfterTheHandshake(t *testing.T) {
 }
 
 // A standalone ping must not leave the connection (or a goroutine) behind.
+// listenSuccessor is Listen, with a seam so a test can prove its own oracle:
+// injecting a startup failure must make the handoff test fail rather than
+// quietly conclude that nothing reached the old host.
+var listenSuccessor = Listen
+
+// The handoff test must not pass because the successor never started. Inject
+// that failure and the test itself has to fail.
+func TestHandoffTestFailsIfTheSuccessorCannotListen(t *testing.T) {
+	orig := listenSuccessor
+	listenSuccessor = func(string) (net.Listener, error) {
+		return nil, errors.New("injected listen failure")
+	}
+	defer func() { listenSuccessor = orig }()
+
+	fake := &testing.T{}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		TestOperationsSurviveALeaderHandoffAfterTheHandshake(fake)
+	}()
+	select {
+	case <-done:
+	case <-time.After(60 * time.Second):
+		t.Fatal("the handoff test did not finish")
+	}
+	if !fake.Failed() {
+		t.Error("the handoff test must fail when the successor cannot listen")
+	}
+}
+
 func TestPingClosesItsConnection(t *testing.T) {
 	startTestServer(t, func(ctx context.Context, req Request) Response {
 		return Response{OK: true, Host: &HostInfo{Protocol: ProtocolVersion}}

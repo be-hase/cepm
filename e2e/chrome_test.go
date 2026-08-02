@@ -394,7 +394,9 @@ func TestResolveChromeFailsRatherThanSkips(t *testing.T) {
 }
 
 // Two runs repairing the same incomplete cache entry must both succeed: the
-// loser of the rename race wants exactly what the winner produced.
+// loser of the rename race wants exactly what the winner produced. Both are
+// held at the promotion point — where the collision actually happens —
+// before either is allowed to move its tree into place.
 func TestConcurrentRepairOfAnIncompleteCacheBothSucceed(t *testing.T) {
 	cs := newChromeServer(t, "100.0.0", filepath.Join("chrome-testplat", "chrome"))
 	cacheDir := t.TempDir()
@@ -406,23 +408,39 @@ func TestConcurrentRepairOfAnIncompleteCacheBothSucceed(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	start := make(chan struct{})
+	const runners = 2
+	atPromotion := make(chan struct{}, runners)
+	release := make(chan struct{})
+	beforePromote = func() {
+		atPromotion <- struct{}{}
+		<-release
+	}
+	t.Cleanup(func() { beforePromote = nil })
+
 	type result struct {
 		bin string
 		err error
 	}
-	results := make(chan result, 2)
-	for i := 0; i < 2; i++ {
+	results := make(chan result, runners)
+	for i := 0; i < runners; i++ {
 		go func() {
 			f := &chromeFetcher{versionsURL: cs.URL + "/versions.json", cacheDir: cacheDir,
 				platform: "testplat", binRel: filepath.Join("chrome-testplat", "chrome")}
-			<-start // both enter the repair together
 			bin, _, err := f.ensure(quietf)
 			results <- result{bin, err}
 		}()
 	}
-	close(start)
-	for i := 0; i < 2; i++ {
+	// Both must be holding a verified tree before either promotes it.
+	for i := 0; i < runners; i++ {
+		select {
+		case <-atPromotion:
+		case <-time.After(30 * time.Second):
+			t.Fatal("a repair never reached the promotion point")
+		}
+	}
+	close(release)
+
+	for i := 0; i < runners; i++ {
 		select {
 		case res := <-results:
 			if res.err != nil {

@@ -228,6 +228,12 @@ func (f *chromeFetcher) lookupDownload() (version, url string, err error) {
 	return "", "", fmt.Errorf("platform %s not in CfT downloads", f.platform)
 }
 
+// beforePromote runs just before a verified staging tree is moved into the
+// cache. Test-only seam (nil in production): promotion is where two runs
+// repairing the same entry actually collide, and a test that only starts
+// them together may never reach that collision.
+var beforePromote func()
+
 // download extracts into a staging directory and moves it into place only
 // once the expected binary is there: an interrupted unzip used to leave a
 // partial tree that the next run happily accepted as a cache hit.
@@ -266,6 +272,9 @@ func (f *chromeFetcher) download(url, dest string) error {
 	}
 	if !fileExists(filepath.Join(tree, f.binRel)) {
 		return fmt.Errorf("archive from %s has no %s", url, f.binRel)
+	}
+	if beforePromote != nil {
+		beforePromote()
 	}
 	// Another run may have finished the same version first; its tree is as
 	// good as ours, so treat losing the race as success. A *partial* tree
