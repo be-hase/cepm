@@ -115,3 +115,51 @@ func TestEnableRoutesVanishedExtensionBackToTheCeremony(t *testing.T) {
 		t.Errorf("the vanished extension should re-enter the load ceremony:\n%s", out)
 	}
 }
+
+// enable means "start using this": recording the intent in cepm's state but
+// leaving Chrome running old code — or with the extension switched off — is
+// not done, and a script must be able to tell. The state stays enabled
+// either way; what is unfinished is Chrome's side.
+func TestEnableReportsUnconfirmedReloads(t *testing.T) {
+	cases := map[string]func(h *fakeHost){
+		"host unreachable after listing": func(h *fakeHost) { h.reloadHostError = "helper not connected" },
+		"per-id error":                   func(h *fakeHost) { h.failReloads = true },
+		"missing answer":                 func(h *fakeHost) { h.dropReloadResults = true },
+		"disabled in Chrome": func(h *fakeHost) {
+			h.reloadStatusByID = map[string]string{idA: ipc.StatusSkippedDisabled}
+		},
+	}
+	for label, setup := range cases {
+		t.Run(label, func(t *testing.T) {
+			h := startFakeHost(t, idA)
+			setup(h)
+			seedRepo(t, "tools", state.Extension{Dir: "ext", Name: "Ext", ID: idA, Key: keyA, Disabled: true})
+
+			out, err := run(t, "", "enable", "tools/ext")
+			if err == nil {
+				t.Errorf("%s must not exit 0:\n%s", label, out)
+			}
+			if !strings.Contains(out, "cepm reload") {
+				t.Errorf("the recovery advice should name cepm reload:\n%s", out)
+			}
+			// The intent is recorded regardless: re-running enable would
+			// change nothing, so rolling it back would only confuse.
+			st, lerr := state.Load()
+			if lerr != nil {
+				t.Fatal(lerr)
+			}
+			if e := st.Repos["tools"].FindExtension("ext"); e == nil || !e.Enabled() {
+				t.Errorf("the extension should stay enabled in cepm, got %+v", e)
+			}
+		})
+	}
+
+	// A reload that actually happened exits zero.
+	t.Run("reloaded", func(t *testing.T) {
+		startFakeHost(t, idA)
+		seedRepo(t, "tools", state.Extension{Dir: "ext", Name: "Ext", ID: idA, Key: keyA, Disabled: true})
+		if out, err := run(t, "", "enable", "tools/ext"); err != nil {
+			t.Errorf("a confirmed enable must exit zero: %v\n%s", err, out)
+		}
+	})
+}

@@ -100,6 +100,7 @@ one candidate exists).`,
 			listCtx, cancel := context.WithTimeout(cmd.Context(), 3*time.Second)
 			loaded, lerr := ipc.ListChrome(listCtx)
 			cancel()
+			var unconfirmed int
 			if lerr == nil {
 				byID := map[string]loadTarget{}
 				loadedSet := map[string]bool{}
@@ -123,10 +124,28 @@ one candidate exists).`,
 					for _, id := range outcome.NotInstalledIDs {
 						rest = append(rest, byID[id])
 					}
+					// Everything else short of an actual reload leaves the
+					// extension registered but running old code (or switched
+					// off) in Chrome — "enable" has not finished.
+					if outcome.HostUnreachable {
+						unconfirmed = len(items)
+					} else {
+						unconfirmed = outcome.Failed + outcome.Skipped
+					}
 				}
 				targets = rest
 			}
 			runLoadCeremony(cmd.Context(), cmd, targets)
+			if unconfirmed > 0 {
+				// The state stays enabled on purpose: the user's intent was
+				// recorded and re-running enable would change nothing. What
+				// is unfinished is Chrome's side.
+				fmt.Fprintf(out, "\n%d extension(s) are enabled in cepm but not confirmed live in Chrome.\n", unconfirmed)
+				fmt.Fprintf(out, "  Retry with: cepm reload %s\n", term.Quote(args[0]))
+				fmt.Fprintf(out, "  If Chrome shows them turned off, switch them on in chrome://extensions;\n")
+				fmt.Fprintf(out, "  restarting Chrome also applies what is on disk.\n")
+				return fmt.Errorf("%d extension(s) could not be confirmed live in Chrome (see above)", unconfirmed)
+			}
 			return nil
 		},
 	}
