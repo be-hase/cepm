@@ -435,3 +435,56 @@ func TestPingClosesItsConnection(t *testing.T) {
 	}
 	t.Errorf("goroutines grew from %d to %d across 20 pings", before, runtime.NumGoroutine())
 }
+
+// The CLI must never give up while the host is still working to contract:
+// its default patience has to exceed the host's own budget for the same
+// request, whatever the batch size.
+func TestClientDeadlineExceedsTheHostBudget(t *testing.T) {
+	for _, n := range []int{0, 1, 7, 20, 100} {
+		ids := make([]string, n)
+		req := Request{Cmd: CmdReload, IDs: ids}
+		client, host := ClientDeadline(req), ReloadBudget(n)
+		if client <= host {
+			t.Errorf("reload of %d: client waits %v, host may take %v", n, client, host)
+		}
+	}
+	if got, want := ClientDeadline(Request{Cmd: CmdUninstall}), UninstallBudget; got <= want {
+		t.Errorf("uninstall: client waits %v, host may take %v", got, want)
+	}
+	for _, cmd := range []string{CmdPing, CmdListChrome} {
+		got := ClientDeadline(Request{Cmd: cmd})
+		if got <= RequestBudget {
+			t.Errorf("%s: client waits %v, host may take %v", cmd, got, RequestBudget)
+		}
+		if got > 2*time.Minute {
+			t.Errorf("%s should not wait unbounded, got %v", cmd, got)
+		}
+	}
+}
+
+// A caller that set its own deadline knows something this package does not,
+// so the default must not extend it. Proved against a server that never
+// answers: the call has to return by the caller's deadline, not the
+// command's much longer default.
+func TestCallerDeadlineIsNotOverridden(t *testing.T) {
+	block := make(chan struct{})
+	t.Cleanup(func() { close(block) })
+	startTestServer(t, func(ctx context.Context, req Request) Response {
+		if req.Cmd == CmdPing {
+			return Response{OK: true, Host: &HostInfo{Protocol: ProtocolVersion}}
+		}
+		<-block // never answers the operation
+		return Response{OK: true}
+	})
+
+	ids := make([]string, 20) // default would be ReloadBudget(20)+slack ≈ 85s
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	if _, err := Reload(ctx, ids); err == nil {
+		t.Fatal("the call should have failed at the caller's deadline")
+	}
+	if elapsed := time.Since(start); elapsed > 30*time.Second {
+		t.Errorf("the caller's deadline was ignored: took %v", elapsed)
+	}
+}

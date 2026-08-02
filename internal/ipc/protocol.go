@@ -12,6 +12,45 @@ import "time"
 // whenever the request/response shapes change meaning.
 const ProtocolVersion = 1
 
+// The host's budget for a request and the CLI's patience for the answer are
+// one contract seen from two sides, so it lives here — the package both
+// import — instead of being restated in each and drifting apart. It did:
+// the CLI gave up after a flat 30s while the host was entitled to 10s plus
+// 3s per extension, so a reload of seven extensions could time out on the
+// CLI while the host was still working to contract.
+const (
+	// RequestBudget is the host's allowance for a request with no per-item
+	// work; reloads add PerExtensionBudget per extension so a large
+	// installation is not mistaken for an unresponsive helper.
+	RequestBudget      = 10 * time.Second
+	PerExtensionBudget = 3 * time.Second
+	// UninstallBudget is long because the helper waits for the user to
+	// answer Chrome's confirmation dialog.
+	UninstallBudget = 2 * time.Minute
+	// clientSlack is what the CLI allows itself on top of the host's
+	// budget: the protocol handshake, the dial retry, and transport.
+	clientSlack = 15 * time.Second
+)
+
+// ReloadBudget is how long the host may spend reloading n extensions.
+func ReloadBudget(n int) time.Duration {
+	return RequestBudget + time.Duration(n)*PerExtensionBudget
+}
+
+// ClientDeadline is how long the CLI waits for req's answer when its caller
+// set no deadline of its own. Always longer than the host's own budget for
+// the same request, so a host working to contract is never cut off.
+func ClientDeadline(req Request) time.Duration {
+	switch req.Cmd {
+	case CmdReload:
+		return ReloadBudget(len(req.IDs)) + clientSlack
+	case CmdUninstall:
+		return UninstallBudget + clientSlack
+	default:
+		return RequestBudget + clientSlack
+	}
+}
+
 // Commands.
 const (
 	CmdPing       = "ping"
@@ -62,7 +101,6 @@ type Response struct {
 	Status     string         `json:"status,omitempty"` // for CmdUninstall
 }
 
-// HostInfo describes the running native host (ping response).
 // Helper compatibility verdicts, as reported in HostInfo.HelperCompat. A
 // string, not a bool, deliberately: a HostInfo from a host that predates the
 // field decodes to "", which readers must treat as "this host does not
@@ -73,6 +111,7 @@ const (
 	HelperCompatTooOld  = "too_old"
 )
 
+// HostInfo describes the running native host (ping response).
 type HostInfo struct {
 	Version       string    `json:"version"`
 	PID           int       `json:"pid"`

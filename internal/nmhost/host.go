@@ -29,17 +29,9 @@ import (
 )
 
 const (
-	pingInterval = 25 * time.Second // keeps the helper's service worker alive
-	// requestTimeout is the budget for a request with no per-item work;
-	// reloads add perExtensionTimeout for each extension so that a large
-	// installation does not time out while the helper is still working.
-	requestTimeout      = 10 * time.Second
-	perExtensionTimeout = 3 * time.Second
-	sendTimeout         = 5 * time.Second
-	shutdownGrace       = 5 * time.Second
-	// uninstallTimeout is long because the helper waits for the user to
-	// answer Chrome's confirmation dialog.
-	uninstallTimeout = 2 * time.Minute
+	pingInterval  = 25 * time.Second // keeps the helper's service worker alive
+	sendTimeout   = 5 * time.Second
+	shutdownGrace = 5 * time.Second
 	// minHelperVersion is the oldest helper this host can talk to; bump it
 	// together with protocol changes.
 	minHelperVersion = "0.1.0"
@@ -432,7 +424,7 @@ func (h *Host) requestCtx(ctx context.Context, requestID string, msg any) (json.
 
 // request is requestCtx with the default short timeout.
 func (h *Host) request(ctx context.Context, requestID string, msg any) (json.RawMessage, error) {
-	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
+	ctx, cancel := context.WithTimeout(ctx, ipc.RequestBudget)
 	defer cancel()
 	return h.requestCtx(ctx, requestID, msg)
 }
@@ -468,7 +460,7 @@ func (h *Host) Reload(ctx context.Context, ids []string) ([]ipc.ReloadResult, er
 		return nil, err
 	}
 	id := h.nextRequestID()
-	ctx, cancel := context.WithTimeout(ctx, requestTimeout+time.Duration(len(ids))*perExtensionTimeout)
+	ctx, cancel := context.WithTimeout(ctx, ipc.ReloadBudget(len(ids)))
 	defer cancel()
 	raw, err := h.requestCtx(ctx, id, reloadReq{Type: typeReload, RequestID: id, ExtensionIDs: ids})
 	if err != nil {
@@ -511,7 +503,7 @@ func (h *Host) Uninstall(ctx context.Context, extID string) (status string, err 
 		return "", err
 	}
 	id := h.nextRequestID()
-	ctx, cancel := context.WithTimeout(ctx, uninstallTimeout)
+	ctx, cancel := context.WithTimeout(ctx, ipc.UninstallBudget)
 	defer cancel()
 	raw, err := h.requestCtx(ctx, id, uninstallReq{Type: typeUninstall, RequestID: id, ExtensionID: extID})
 	if err != nil {

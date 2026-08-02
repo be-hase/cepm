@@ -25,7 +25,7 @@ const dialRetry = 3 * time.Second
 
 // Call sends one request to the native host and returns its response.
 func Call(ctx context.Context, req Request) (*Response, error) {
-	conn, r, err := dialHost(ctx, req.Cmd)
+	conn, r, err := dialHost(ctx, req)
 	if err != nil {
 		return nil, err
 	}
@@ -33,8 +33,10 @@ func Call(ctx context.Context, req Request) (*Response, error) {
 	return exchange(conn, r, req)
 }
 
-// dialHost opens a connection to the host with the deadline ctx implies.
-func dialHost(ctx context.Context, cmd string) (net.Conn, *bufio.Reader, error) {
+// dialHost opens a connection to the host with the deadline ctx implies, or
+// the one this command's contract implies when the caller set none.
+func dialHost(ctx context.Context, req Request) (net.Conn, *bufio.Reader, error) {
+	cmd := req.Cmd
 	sock, err := paths.SocketPath()
 	if err != nil {
 		return nil, nil, err
@@ -45,10 +47,11 @@ func dialHost(ctx context.Context, cmd string) (net.Conn, *bufio.Reader, error) 
 		slog.Debug("host not reachable", "socket", sock, "err", err)
 		return nil, nil, err
 	}
+	// A caller's own deadline wins: it knows something this does not.
 	if deadline, ok := ctx.Deadline(); ok {
 		_ = conn.SetDeadline(deadline)
 	} else {
-		_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
+		_ = conn.SetDeadline(time.Now().Add(ClientDeadline(req)))
 	}
 	return conn, bufio.NewReader(conn), nil
 }
@@ -130,7 +133,7 @@ var ErrProtocolMismatch = errors.New("the running cepm host is a different versi
 // answered the ping is the peer that gets the command — or the connection
 // dies with it and nothing is executed.
 func call(ctx context.Context, req Request) (*Response, error) {
-	conn, r, err := dialHost(ctx, req.Cmd)
+	conn, r, err := dialHost(ctx, req)
 	if err != nil {
 		return nil, err
 	}
