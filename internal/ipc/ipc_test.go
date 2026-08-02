@@ -4,11 +4,13 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -54,6 +56,9 @@ func TestPingRoundTrip(t *testing.T) {
 
 func TestReloadRoundTrip(t *testing.T) {
 	startTestServer(t, func(ctx context.Context, req Request) Response {
+		if req.Cmd == CmdPing {
+			return Response{OK: true, Host: &HostInfo{Protocol: ProtocolVersion}}
+		}
 		results := make([]ReloadResult, len(req.IDs))
 		for i, id := range req.IDs {
 			results[i] = ReloadResult{ID: id, Status: StatusReloaded}
@@ -71,6 +76,9 @@ func TestReloadRoundTrip(t *testing.T) {
 
 func TestHostErrorSurfaces(t *testing.T) {
 	startTestServer(t, func(ctx context.Context, req Request) Response {
+		if req.Cmd == CmdPing {
+			return Response{OK: true, Host: &HostInfo{Protocol: ProtocolVersion}}
+		}
 		return Response{Error: "helper not connected"}
 	})
 	if _, err := Reload(context.Background(), []string{"aaa"}); err == nil {
@@ -151,7 +159,7 @@ func TestABlockedRequestDoesNotBlockOtherConnections(t *testing.T) {
 			<-release
 			return Response{OK: true, Status: StatusUninstalled}
 		}
-		return Response{OK: true, Host: &HostInfo{Version: "test"}}
+		return Response{OK: true, Host: &HostInfo{Version: "test", Protocol: ProtocolVersion}}
 	})
 
 	uninstallDone := make(chan error, 1)
@@ -188,5 +196,77 @@ func TestDialFailsFastWhenNoHost(t *testing.T) {
 	cancel() // canceled context → no retry loop
 	if _, err := Ping(ctx); err == nil {
 		t.Error("expected ErrHostNotRunning")
+	}
+}
+
+// A host old enough to predate the protocol field ignores it as unknown
+// JSON and would carry out whatever it is sent, so the refusal has to
+// happen on this side: the operation must never leave the CLI. Ping is
+// exempt — it is how the mismatch is discovered at all.
+func TestOperationsAreRefusedAgainstAMismatchedHost(t *testing.T) {
+	for label, hostProtocol := range map[string]int{
+		"pre-protocol host": 0,
+		"future host":       ProtocolVersion + 1,
+	} {
+		t.Run(label, func(t *testing.T) {
+			var mu sync.Mutex
+			var seen []string
+			startTestServer(t, func(ctx context.Context, req Request) Response {
+				mu.Lock()
+				seen = append(seen, req.Cmd)
+				mu.Unlock()
+				if req.Cmd == CmdPing {
+					return Response{OK: true, Host: &HostInfo{Version: "old", Protocol: hostProtocol}}
+				}
+				// What an old host does: acts, having ignored the field.
+				return Response{OK: true, Results: []ReloadResult{{ID: "aaa", Status: StatusReloaded}},
+					Extensions: []ChromeExt{{ID: "aaa"}}, Status: StatusUninstalled}
+			})
+
+			if _, err := Reload(context.Background(), []string{"aaa"}); !errors.Is(err, ErrProtocolMismatch) {
+				t.Errorf("reload should be refused as a protocol mismatch, got %v", err)
+			}
+			if _, err := ListChrome(context.Background()); !errors.Is(err, ErrProtocolMismatch) {
+				t.Errorf("list should be refused as a protocol mismatch, got %v", err)
+			}
+			if _, err := Uninstall(context.Background(), "aaa"); !errors.Is(err, ErrProtocolMismatch) {
+				t.Errorf("uninstall should be refused as a protocol mismatch, got %v", err)
+			}
+
+			mu.Lock()
+			defer mu.Unlock()
+			for _, cmd := range seen {
+				if cmd != CmdPing {
+					t.Errorf("no operation may reach a mismatched host, but %q was sent (all: %v)", cmd, seen)
+				}
+			}
+			if len(seen) == 0 {
+				t.Error("the preflight ping should still have been sent")
+			}
+		})
+	}
+}
+
+// A matching host receives the operation exactly once (the preflight ping
+// must not turn into a second operation or a retry).
+func TestMatchingProtocolSendsTheOperationOnce(t *testing.T) {
+	var mu sync.Mutex
+	var operations int
+	startTestServer(t, func(ctx context.Context, req Request) Response {
+		if req.Cmd == CmdPing {
+			return Response{OK: true, Host: &HostInfo{Protocol: ProtocolVersion}}
+		}
+		mu.Lock()
+		operations++
+		mu.Unlock()
+		return Response{OK: true, Results: []ReloadResult{{ID: "aaa", Status: StatusReloaded}}}
+	})
+	if _, err := Reload(context.Background(), []string{"aaa"}); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if operations != 1 {
+		t.Errorf("the operation should be sent exactly once, got %d", operations)
 	}
 }

@@ -100,9 +100,37 @@ func Ping(ctx context.Context) (*HostInfo, error) {
 	return resp.Host, nil
 }
 
+// ErrProtocolMismatch means the running host is a different cepm generation
+// than this binary. It is checked before every operation, never assumed away.
+var ErrProtocolMismatch = errors.New("the running cepm host is a different version than this cepm; restart Chrome to relaunch the updated host")
+
+// checkProtocol refuses to act against a host of another generation. The
+// gate has to be on this side too: a host old enough to predate the
+// protocol field ignores it as unknown JSON and would carry out whatever it
+// is sent — the request has to not be sent at all. Ping is the one command
+// exempt (it is how the mismatch is discovered, here and in doctor).
+func checkProtocol(ctx context.Context) error {
+	info, err := Ping(ctx)
+	if err != nil {
+		return err
+	}
+	if info == nil || info.Protocol != ProtocolVersion {
+		return ErrProtocolMismatch
+	}
+	return nil
+}
+
+// call is Call preceded by the protocol check, for every command that acts.
+func call(ctx context.Context, req Request) (*Response, error) {
+	if err := checkProtocol(ctx); err != nil {
+		return nil, err
+	}
+	return Call(ctx, req)
+}
+
 // Reload asks the host to reload the given extension IDs via the helper.
 func Reload(ctx context.Context, ids []string) ([]ReloadResult, error) {
-	resp, err := Call(ctx, Request{Cmd: CmdReload, IDs: ids})
+	resp, err := call(ctx, Request{Cmd: CmdReload, IDs: ids})
 	if err != nil {
 		return nil, err
 	}
@@ -111,7 +139,7 @@ func Reload(ctx context.Context, ids []string) ([]ReloadResult, error) {
 
 // ListChrome returns the unpacked extensions Chrome currently has loaded.
 func ListChrome(ctx context.Context) ([]ChromeExt, error) {
-	resp, err := Call(ctx, Request{Cmd: CmdListChrome})
+	resp, err := call(ctx, Request{Cmd: CmdListChrome})
 	if err != nil {
 		return nil, err
 	}
@@ -122,7 +150,7 @@ func ListChrome(ctx context.Context) ([]ChromeExt, error) {
 // shows a native confirmation dialog; the returned status reflects the
 // user's choice. Callers should use a generous ctx deadline.
 func Uninstall(ctx context.Context, id string) (string, error) {
-	resp, err := Call(ctx, Request{Cmd: CmdUninstall, ID: id})
+	resp, err := call(ctx, Request{Cmd: CmdUninstall, ID: id})
 	if err != nil {
 		return "", err
 	}

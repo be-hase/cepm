@@ -295,3 +295,35 @@ func TestDoctorShowsHostVersionVerbatim(t *testing.T) {
 		t.Errorf("a dev version should appear as-is:\n%s", out)
 	}
 }
+
+// A host of another generation refuses every operation, so doctor must fail
+// (exit non-zero), not merely warn: "nothing works" is not a warning.
+func TestDoctorFailsOnAProtocolMismatch(t *testing.T) {
+	h := startFakeHost(t)
+	h.oldHostInfo = true // protocol 0
+
+	out, err := run(t, "", "doctor")
+	if err == nil {
+		t.Errorf("doctor must exit non-zero when the host generation differs:\n%s", out)
+	}
+	var diags []struct {
+		Name   string `json:"name"`
+		Status string `json:"status"`
+	}
+	jsonOut, _ := run(t, "", "doctor", "--json")
+	if uerr := json.Unmarshal([]byte(jsonOut), &diags); uerr != nil {
+		t.Fatalf("doctor --json is not valid JSON: %v", uerr)
+	}
+	found := false
+	for _, d := range diags {
+		if d.Name == "host generation" {
+			found = true
+			if d.Status != "fail" {
+				t.Errorf("host generation status = %q, want fail", d.Status)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("doctor --json has no host generation diagnostic:\n%s", jsonOut)
+	}
+}

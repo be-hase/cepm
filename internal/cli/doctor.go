@@ -138,9 +138,11 @@ func runDiagnostics(ctx context.Context) []diagnostic {
 		if info.Protocol != ipc.ProtocolVersion {
 			// Protocol 0 = a host from before protocol reporting; either
 			// way the running host is a different cepm generation than this
-			// binary, and it refuses (or misunderstands) real commands.
-			add("host generation", "warn",
-				fmt.Sprintf("running host speaks protocol %d, this CLI %d", info.Protocol, ipc.ProtocolVersion),
+			// binary, and every operation is refused until Chrome relaunches
+			// it — a fail, not a warn: nothing works in this state.
+			add("host generation", "fail",
+				fmt.Sprintf("running host speaks protocol %d, this CLI %d — reload, list and uninstall are refused",
+					info.Protocol, ipc.ProtocolVersion),
 				"restart Chrome to relaunch the updated host")
 		}
 		switch {
