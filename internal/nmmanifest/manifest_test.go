@@ -107,7 +107,7 @@ func TestReinstallReplacesTheManifest(t *testing.T) {
 // A failure before the rename must leave the previous, working manifest in
 // place: a half-installed manifest means Chrome cannot launch the host at
 // all, which is strictly worse than an outdated one.
-func TestFailedWriteKeepsTheExistingManifest(t *testing.T) {
+func TestFailedTempCreationKeepsTheExistingManifest(t *testing.T) {
 	fakeHome(t)
 	variant := paths.ChromeVariants[0]
 	if _, err := Install(variant, "/old/cepm-host"); err != nil {
@@ -116,12 +116,54 @@ func TestFailedWriteKeepsTheExistingManifest(t *testing.T) {
 
 	orig := createTemp
 	createTemp = func(dir, pattern string) (*os.File, error) {
-		return nil, fmt.Errorf("injected write failure")
+		return nil, fmt.Errorf("injected temp-creation failure")
 	}
 	defer func() { createTemp = orig }()
 
 	if _, err := Install(variant, "/new/cepm-host"); err == nil {
 		t.Fatal("Install should report the injected failure")
+	}
+	m, _, err := Read(variant)
+	if err != nil {
+		t.Fatalf("the previous manifest should still be readable: %v", err)
+	}
+	if m.Path != "/old/cepm-host" {
+		t.Errorf("the previous manifest should be untouched, got path %q", m.Path)
+	}
+}
+
+// The same guarantee when the temp file exists but writing to it fails —
+// this is the path where a missing error check would rename an empty file
+// over the working manifest. The injected file is opened read-only, so only
+// the Write fails; chmod and close still succeed.
+func TestFailedWriteKeepsTheExistingManifest(t *testing.T) {
+	fakeHome(t)
+	variant := paths.ChromeVariants[0]
+	path, err := Install(variant, "/old/cepm-host")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	orig := createTemp
+	createTemp = func(dir, pattern string) (*os.File, error) {
+		f, err := os.CreateTemp(dir, pattern)
+		if err != nil {
+			return nil, err
+		}
+		name := f.Name()
+		if err := f.Close(); err != nil {
+			return nil, err
+		}
+		return os.OpenFile(name, os.O_RDONLY, 0)
+	}
+	defer func() { createTemp = orig }()
+
+	_, err = Install(variant, "/new/cepm-host")
+	if err == nil {
+		t.Fatal("Install should report the failed write")
+	}
+	if !strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), "re-run cepm setup") {
+		t.Errorf("the error should name the manifest path and the way out, got: %v", err)
 	}
 	m, _, err := Read(variant)
 	if err != nil {
