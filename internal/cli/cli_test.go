@@ -42,10 +42,11 @@ func fixtureKey(seed string) (key, id string) {
 // socket the CLI talks to, so command-level tests exercise the real IPC path
 // (which is where a broken call order shows up).
 type fakeHost struct {
-	mu          sync.Mutex
-	loaded      map[string]bool // extensions Chrome currently has
-	uninstalled []string        // ids the CLI asked to remove
-	reloaded    []string
+	mu               sync.Mutex
+	loaded           map[string]bool // extensions Chrome currently has
+	disabledInChrome map[string]bool // loaded but switched off in chrome://extensions
+	uninstalled      []string        // ids the CLI asked to remove
+	reloaded         []string
 	// reposAtUninstall records how many repositories were still registered
 	// when a removal request arrived, which is what pins the ordering.
 	reposAtUninstall []int
@@ -99,7 +100,8 @@ func (h *fakeHost) handle(_ context.Context, req ipc.Request) ipc.Response {
 		}
 		var exts []ipc.ChromeExt
 		for id := range h.loaded {
-			exts = append(exts, ipc.ChromeExt{ID: id, Name: "Ext " + id, Version: "1.0", Enabled: true})
+			exts = append(exts, ipc.ChromeExt{ID: id, Name: "Ext " + id, Version: "1.0",
+				Enabled: !h.disabledInChrome[id]})
 		}
 		return ipc.Response{OK: true, Extensions: exts}
 	case ipc.CmdUninstall:

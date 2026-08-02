@@ -348,6 +348,18 @@ func checkRepos(ctx context.Context, hostReachable bool) []diagnostic {
 					Hint: fmt.Sprintf("one-time step: Load unpacked %s (or opt out with: cepm disable %s)",
 						term.Quote(filepath.Join(dir, e.Dir)), term.Quote(name+"/"+e.Dir)),
 				})
+			case e.Enabled() && loaded && !ce.Enabled:
+				// Updates respect the Chrome-side switch ("turned off in
+				// Chrome; left as is"), so this is the one state where pulls
+				// happen but reloads never do — without a diagnostic it reads
+				// as "updates don't work".
+				diags = append(diags, diagnostic{
+					Name:   "extension " + e.Name,
+					Status: "warn",
+					Detail: "turned off in chrome://extensions — updates pull but reloads are skipped",
+					Hint: fmt.Sprintf("turn it on in chrome://extensions, or stop managing it with: cepm disable %s",
+						term.Quote(name+"/"+e.Dir)),
+				})
 			case !e.Enabled() && loaded:
 				diags = append(diags, diagnostic{
 					Name:   "extension " + e.Name,
