@@ -17,8 +17,12 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      # The last line of defense before a binary ships: nothing enforces
+      # that the tagged commit is one CI already proved green.
       - name: test
-        run: go test ./...
+        run: go test -race ./...
+      - name: e2e
+        run: make e2e
       - uses: goreleaser/goreleaser-action@v6
         with:
           version: "~> v2"
