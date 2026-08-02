@@ -228,7 +228,14 @@ func updateRepo(ctx context.Context, name string, r *state.Repo, opts Options, t
 	}
 	newTag, moveErr := moveToLatest(ctx, repo, r, &res)
 	if stashID != "" {
-		if err := repo.StashPop(ctx, stashID); err != nil {
+		leftBehind, err := repo.StashPop(ctx, stashID)
+		if leftBehind != "" {
+			res.Warnings = append(res.Warnings, fmt.Sprintf(
+				"your changes were restored, but cepm's auto-stash %s could not be removed safely "+
+					"(another stash was pushed at the same time); drop it yourself once you are sure: "+
+					"git -C %s stash list", leftBehind, term.Quote(dir)))
+		}
+		if err != nil {
 			// The tree now holds conflict markers, so re-scanning it would
 			// misread manifests and unregister extensions. Stop here and let
 			// the user resolve it — naming the entry, since another stash may

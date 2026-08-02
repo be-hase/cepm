@@ -150,7 +150,7 @@ func TestStashPopRestoresOurEntryNotWhateverIsOnTop(t *testing.T) {
 	}
 	gitIn(t, dir, "stash", "push", "-m", "the user's own stash")
 
-	if err := repo.StashPop(ctx, stashID); err != nil {
+	if _, err := repo.StashPop(ctx, stashID); err != nil {
 		t.Fatalf("popping our own stash: %v", err)
 	}
 
@@ -199,7 +199,7 @@ func TestStashPopStillRestoresADroppedEntry(t *testing.T) {
 	}
 	gitIn(t, dir, "stash", "drop")
 
-	if err := repo.StashPop(ctx, stashID); err != nil {
+	if _, err := repo.StashPop(ctx, stashID); err != nil {
 		t.Fatalf("a dropped entry should still be restorable by id: %v", err)
 	}
 	b, err := os.ReadFile(filepath.Join(dir, "f"))
@@ -250,7 +250,7 @@ func TestStashPopIgnoresAStashPushedAfterResolution(t *testing.T) {
 	}
 	gitIn(t, dir, "stash", "push", "-m", "user two")
 
-	if err := repo.StashPop(ctx, stashID); err != nil {
+	if _, err := repo.StashPop(ctx, stashID); err != nil {
 		t.Fatalf("popping our own stash after the shift: %v", err)
 	}
 
@@ -320,7 +320,7 @@ func TestStashPushIdentifiesItsOwnEntry(t *testing.T) {
 	}
 
 	// And restoring it leaves the user's stash untouched.
-	if err := repo.StashPop(ctx, stashID); err != nil {
+	if _, err := repo.StashPop(ctx, stashID); err != nil {
 		t.Fatalf("StashPop: %v", err)
 	}
 	if b, _ := os.ReadFile(filepath.Join(dir, "ours")); string(b) != "cepm\n" {
@@ -331,5 +331,74 @@ func TestStashPushIdentifiesItsOwnEntry(t *testing.T) {
 	}
 	if list := gitIn(t, dir, "stash", "list"); !strings.Contains(list, "the user's own stash") {
 		t.Errorf("the user's stash must survive:\n%s", list)
+	}
+}
+
+// git has no drop-by-id, so the position verified a moment ago can be a
+// different entry by the time the drop runs. Nothing of the user's may be
+// lost to that: whatever went by mistake is put back, and cepm says its own
+// entry is still there rather than reporting a clean finish.
+func TestStashDropNeverLosesAUserStash(t *testing.T) {
+	dir := t.TempDir()
+	gitIn(t, dir, "init", "--initial-branch=main")
+	for _, f := range []string{"ours", "one", "two"} {
+		if err := os.WriteFile(filepath.Join(dir, f), []byte("committed\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gitIn(t, dir, "add", "-A")
+	gitIn(t, dir, "commit", "-m", "base")
+
+	repo := Repo{Dir: dir}
+	ctx := context.Background()
+	if err := os.WriteFile(filepath.Join(dir, "ours"), []byte("cepm\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stashID, err := repo.StashPush(ctx)
+	if err != nil || stashID == "" {
+		t.Fatalf("StashPush: %q %v", stashID, err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "one"), []byte("user one\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitIn(t, dir, "stash", "push", "-m", "user one")
+
+	// Land a second user stash after the position has been verified and
+	// before the drop: the verified stash@{n} now names user one.
+	beforeStashDrop = func() {
+		beforeStashDrop = nil
+		if err := os.WriteFile(filepath.Join(dir, "two"), []byte("user two\n"), 0o644); err != nil {
+			t.Error(err)
+			return
+		}
+		// Only their own file: a bare push would sweep up the changes
+		// cepm has just restored, which is a fixture artefact, not the
+		// race under test.
+		gitIn(t, dir, "stash", "push", "-m", "user two", "--", "two")
+	}
+	t.Cleanup(func() { beforeStashDrop = nil })
+
+	leftBehind, err := repo.StashPop(ctx, stashID)
+	if err != nil {
+		t.Fatalf("StashPop: %v", err)
+	}
+	if leftBehind == "" {
+		t.Error("cepm's entry could not be dropped safely; that has to be reported, not swallowed")
+	}
+
+	list := gitIn(t, dir, "stash", "list")
+	for _, msg := range []string{"user one", "user two"} {
+		if !strings.Contains(list, msg) {
+			t.Errorf("the user's stash %q was lost, list is:\n%s", msg, list)
+		}
+	}
+	if b, _ := os.ReadFile(filepath.Join(dir, "ours")); string(b) != "cepm\n" {
+		t.Errorf("cepm's change was not restored: %q", b)
+	}
+	// And the user's stashes stayed stashes: neither was applied.
+	for _, f := range []string{"one", "two"} {
+		if b, _ := os.ReadFile(filepath.Join(dir, f)); string(b) != "committed\n" {
+			t.Errorf("a user stash was applied to the working tree: %s = %q", f, b)
+		}
 	}
 }
