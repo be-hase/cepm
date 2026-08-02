@@ -176,9 +176,10 @@ func TestStashPopRestoresOurEntryNotWhateverIsOnTop(t *testing.T) {
 	}
 }
 
-// A stash that has disappeared (dropped by hand between push and pop) is
-// named in the error rather than silently taking someone else's entry.
-func TestStashPopRefusesWhenOurEntryIsGone(t *testing.T) {
+// A stash entry dropped by hand between push and pop can still be restored:
+// the commit outlives the list, and giving the user their work back is the
+// point — silently taking whatever else is on the stack is not.
+func TestStashPopStillRestoresADroppedEntry(t *testing.T) {
 	dir := t.TempDir()
 	gitIn(t, dir, "init", "--initial-branch=main")
 	if err := os.WriteFile(filepath.Join(dir, "f"), []byte("committed\n"), 0o644); err != nil {
@@ -198,11 +199,137 @@ func TestStashPopRefusesWhenOurEntryIsGone(t *testing.T) {
 	}
 	gitIn(t, dir, "stash", "drop")
 
-	err = repo.StashPop(ctx, stashID)
-	if err == nil {
-		t.Fatal("popping a vanished stash must fail")
+	if err := repo.StashPop(ctx, stashID); err != nil {
+		t.Fatalf("a dropped entry should still be restorable by id: %v", err)
 	}
-	if !strings.Contains(err.Error(), stashID) {
-		t.Errorf("the error should name the missing entry: %v", err)
+	b, err := os.ReadFile(filepath.Join(dir, "f"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b) != "edited\n" {
+		t.Errorf("the change was not restored, file is %q", b)
+	}
+}
+
+// The reviewer's reproduction: a stash pushed after cepm resolved its own
+// entry's position, but before the pop. Applying by commit id makes the
+// position irrelevant, so the interloper is neither applied nor dropped.
+func TestStashPopIgnoresAStashPushedAfterResolution(t *testing.T) {
+	dir := t.TempDir()
+	gitIn(t, dir, "init", "--initial-branch=main")
+	for _, f := range []string{"ours", "one", "two"} {
+		if err := os.WriteFile(filepath.Join(dir, f), []byte("committed\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gitIn(t, dir, "add", "-A")
+	gitIn(t, dir, "commit", "-m", "base")
+
+	repo := Repo{Dir: dir}
+	ctx := context.Background()
+	if err := os.WriteFile(filepath.Join(dir, "ours"), []byte("cepm stashed this\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stashID, err := repo.StashPush(ctx)
+	if err != nil || stashID == "" {
+		t.Fatalf("StashPush: %q %v", stashID, err)
+	}
+
+	// One user stash, then cepm resolves its position, then a second user
+	// stash shifts everything down again.
+	if err := os.WriteFile(filepath.Join(dir, "one"), []byte("user one\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitIn(t, dir, "stash", "push", "-m", "user one")
+	ref, err := repo.StashRef(ctx, stashID)
+	if err != nil || ref == "" {
+		t.Fatalf("StashRef: %q %v", ref, err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "two"), []byte("user two\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitIn(t, dir, "stash", "push", "-m", "user two")
+
+	if err := repo.StashPop(ctx, stashID); err != nil {
+		t.Fatalf("popping our own stash after the shift: %v", err)
+	}
+
+	ours, err := os.ReadFile(filepath.Join(dir, "ours"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(ours) != "cepm stashed this\n" {
+		t.Errorf("cepm's change was not restored, file is %q", ours)
+	}
+	for _, f := range []string{"one", "two"} {
+		b, err := os.ReadFile(filepath.Join(dir, f))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(b) != "committed\n" {
+			t.Errorf("a user stash was applied to the working tree: %s = %q", f, b)
+		}
+	}
+	list := gitIn(t, dir, "stash", "list")
+	for _, msg := range []string{"user one", "user two"} {
+		if !strings.Contains(list, msg) {
+			t.Errorf("the user's stash %q must survive, list is:\n%s", msg, list)
+		}
+	}
+	if strings.Contains(list, "cepm auto-stash") {
+		t.Errorf("cepm's own stash should be gone, list is:\n%s", list)
+	}
+}
+
+// A user stash pushed between cepm's own push and its look must not be
+// adopted as cepm's: the entry is found by the nonce in its message, not by
+// whatever sits on top afterwards. The seam is the only way to land inside
+// that gap deterministically.
+func TestStashPushIdentifiesItsOwnEntry(t *testing.T) {
+	dir := t.TempDir()
+	gitIn(t, dir, "init", "--initial-branch=main")
+	for _, f := range []string{"ours", "theirs"} {
+		if err := os.WriteFile(filepath.Join(dir, f), []byte("committed\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gitIn(t, dir, "add", "-A")
+	gitIn(t, dir, "commit", "-m", "base")
+
+	repo := Repo{Dir: dir}
+	ctx := context.Background()
+	if err := os.WriteFile(filepath.Join(dir, "ours"), []byte("cepm\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	afterStashPush = func() {
+		afterStashPush = nil // once: the user stashes right after we do
+		if err := os.WriteFile(filepath.Join(dir, "theirs"), []byte("user\n"), 0o644); err != nil {
+			t.Error(err)
+			return
+		}
+		gitIn(t, dir, "stash", "push", "-m", "the user's own stash")
+	}
+	t.Cleanup(func() { afterStashPush = nil })
+
+	stashID, err := repo.StashPush(ctx)
+	if err != nil || stashID == "" {
+		t.Fatalf("StashPush: %q %v", stashID, err)
+	}
+	if subject := gitIn(t, dir, "show", "-s", "--format=%s", stashID); !strings.Contains(subject, "cepm auto-stash") {
+		t.Fatalf("the recorded id names %q, not cepm's own entry", subject)
+	}
+
+	// And restoring it leaves the user's stash untouched.
+	if err := repo.StashPop(ctx, stashID); err != nil {
+		t.Fatalf("StashPop: %v", err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(dir, "ours")); string(b) != "cepm\n" {
+		t.Errorf("cepm's change was not restored: %q", b)
+	}
+	if b, _ := os.ReadFile(filepath.Join(dir, "theirs")); string(b) != "committed\n" {
+		t.Errorf("the user's stash was applied: %q", b)
+	}
+	if list := gitIn(t, dir, "stash", "list"); !strings.Contains(list, "the user's own stash") {
+		t.Errorf("the user's stash must survive:\n%s", list)
 	}
 }

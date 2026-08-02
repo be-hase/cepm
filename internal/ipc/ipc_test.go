@@ -16,7 +16,10 @@ import (
 	"time"
 )
 
-func startTestServer(t *testing.T, h Handler) {
+// startTestServer runs a server for the test and returns a function that
+// stops it and waits for Serve to return — a test that swaps a package
+// variable the server reads must know when the last reader is gone.
+func startTestServer(t *testing.T, h Handler) (stop func()) {
 	t.Helper()
 	// Unix socket paths are length-limited (~104 bytes on macOS); use a short
 	// tmp dir instead of t.TempDir().
@@ -36,7 +39,12 @@ func startTestServer(t *testing.T, h Handler) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	go Serve(ctx, l, h)
+	done := make(chan struct{})
+	go func() { defer close(done); Serve(ctx, l, h) }()
+	var once sync.Once
+	stop = func() { once.Do(func() { cancel(); <-done }) }
+	t.Cleanup(stop)
+	return stop
 }
 
 func TestPingRoundTrip(t *testing.T) {
@@ -468,7 +476,6 @@ func TestClientDeadlineExceedsTheHostBudget(t *testing.T) {
 // command's much longer default.
 func TestCallerDeadlineIsNotOverridden(t *testing.T) {
 	block := make(chan struct{})
-	t.Cleanup(func() { close(block) })
 	startTestServer(t, func(ctx context.Context, req Request) Response {
 		if req.Cmd == CmdPing {
 			return Response{OK: true, Host: &HostInfo{Protocol: ProtocolVersion}}
@@ -476,6 +483,9 @@ func TestCallerDeadlineIsNotOverridden(t *testing.T) {
 		<-block // never answers the operation
 		return Response{OK: true}
 	})
+	// Registered after the server, so it runs before the stop that waits
+	// for in-flight handlers: otherwise the two wait for each other.
+	t.Cleanup(func() { close(block) })
 
 	ids := make([]string, 20) // default would be ReloadBudget(20)+slack ≈ 85s
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
@@ -486,5 +496,53 @@ func TestCallerDeadlineIsNotOverridden(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > 30*time.Second {
 		t.Errorf("the caller's deadline was ignored: took %v", elapsed)
+	}
+}
+
+// The server must give a command the same budget the client waits for and
+// the host works to. It used to cut every connection at a flat five
+// minutes, which a reload of ~100 extensions outgrows.
+func TestServerDeadlineFollowsTheRequest(t *testing.T) {
+	seen := make(chan Request, 4)
+	orig := serverDeadlineFor
+	serverDeadlineFor = func(req Request) time.Duration {
+		seen <- req
+		return orig(req)
+	}
+	stop := startTestServer(t, func(ctx context.Context, req Request) Response {
+		if req.Cmd == CmdPing {
+			return Response{OK: true, Host: &HostInfo{Protocol: ProtocolVersion}}
+		}
+		return Response{OK: true, Results: []ReloadResult{}}
+	})
+	ids := make([]string, 100)
+	if _, err := Reload(context.Background(), ids); err != nil {
+		t.Fatal(err)
+	}
+	// Restore only once the server that reads it has stopped.
+	stop()
+	serverDeadlineFor = orig
+
+	var reload *Request
+	for len(seen) > 0 {
+		req := <-seen
+		if req.Cmd == CmdReload {
+			r := req
+			reload = &r
+		}
+	}
+	if reload == nil {
+		t.Fatal("the server never computed a deadline for the reload")
+	}
+	if len(reload.IDs) != 100 {
+		t.Fatalf("the deadline was computed from %d ids, not the request's 100", len(reload.IDs))
+	}
+	// The invariant that matters: longer than the host's own budget for
+	// the same work — which a fixed five minutes is not.
+	if got, host := orig(*reload), ReloadBudget(100); got <= host {
+		t.Errorf("server allows %v, host may take %v", got, host)
+	}
+	if ReloadBudget(100) <= 5*time.Minute {
+		t.Skip("the old fixed 5m would still have sufficed for 100; raise the case")
 	}
 }

@@ -64,11 +64,16 @@ func Serve(ctx context.Context, l net.Listener, h Handler) {
 	}
 }
 
+// serverDeadlineFor is how long a connection may stay open for one command,
+// a variable so a test can observe that the deadline really is per-request
+// rather than a constant the budget can outgrow.
+var serverDeadlineFor = ClientDeadline
+
 func serveConn(ctx context.Context, conn net.Conn, h Handler) {
 	defer conn.Close()
-	// Generous: an uninstall request waits for the user to answer Chrome's
-	// confirmation dialog.
-	_ = conn.SetDeadline(time.Now().Add(5 * time.Minute))
+	// A floor for reading the request itself; extended per command below,
+	// because a large reload is entitled to more than any fixed number.
+	_ = conn.SetDeadline(time.Now().Add(RequestBudget + clientSlack))
 	r := bufio.NewReader(conn)
 	// A connection carries at most a protocol handshake (a ping) and then
 	// one command: the client needs both to reach the same host process, or
@@ -84,6 +89,10 @@ func serveConn(ctx context.Context, conn net.Conn, h Handler) {
 		if err := json.Unmarshal(line, &req); err != nil {
 			resp = Response{Error: "invalid request: " + err.Error()}
 		} else {
+			// The same budget the client waits for and the host works to:
+			// a fixed five minutes cut off a large reload the host was
+			// still entitled to be running.
+			_ = conn.SetDeadline(time.Now().Add(serverDeadlineFor(req)))
 			resp = h(ctx, req)
 		}
 		enc, err := json.Marshal(resp)

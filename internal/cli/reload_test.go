@@ -122,9 +122,12 @@ func TestEnableRoutesVanishedExtensionBackToTheCeremony(t *testing.T) {
 // either way; what is unfinished is Chrome's side.
 func TestEnableReportsUnconfirmedReloads(t *testing.T) {
 	cases := map[string]func(h *fakeHost){
-		"host unreachable after listing": func(h *fakeHost) { h.reloadHostError = "helper not connected" },
-		"per-id error":                   func(h *fakeHost) { h.failReloads = true },
-		"missing answer":                 func(h *fakeHost) { h.dropReloadResults = true },
+		// Genuinely gone, not merely answering with an error: this is the
+		// branch that reads HostUnreachable rather than Failed.
+		"host vanished after listing": func(h *fakeHost) { h.onList = func() { h.stopListener() } },
+		"host error":                  func(h *fakeHost) { h.reloadHostError = "helper not connected" },
+		"per-id error":                func(h *fakeHost) { h.failReloads = true },
+		"missing answer":              func(h *fakeHost) { h.dropReloadResults = true },
 		"disabled in Chrome": func(h *fakeHost) {
 			h.reloadStatusByID = map[string]string{idA: ipc.StatusSkippedDisabled}
 		},

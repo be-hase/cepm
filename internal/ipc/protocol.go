@@ -120,9 +120,9 @@ type HostInfo struct {
 	StartedAt     time.Time `json:"startedAt"`
 	LastPong      time.Time `json:"lastPong"` // last keep-alive reply from the helper
 	HelperVersion string    `json:"helperVersion,omitempty"`
-	// MinHelperVersion is the oldest helper this host drives; when the
-	// connected helper is older (or its version is unparsable), HelperCompat
-	// is HelperCompatTooOld and the host refuses to relay Chrome operations.
+	// MinHelperVersion is displayed information only: compatibility is
+	// decided by HelperProtocol, which the running helper code announces,
+	// not by the version string in the manifest beside it.
 	MinHelperVersion string `json:"minHelperVersion,omitempty"`
 	HelperCompat     string `json:"helperCompat,omitempty"`
 	// HelperProtocol is the wire generation the running helper announced,

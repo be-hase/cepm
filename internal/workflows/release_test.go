@@ -124,3 +124,51 @@ func TestReleaseJobDependencies(t *testing.T) {
 		t.Error("the workflow default permission must be contents: read")
 	}
 }
+
+func readRepoFile(t *testing.T, rel ...string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(append([]string{"..", ".."}, rel...)...))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+// The gates only hold if CI actually runs them. Build-tagged code is
+// invisible to an untagged vet or staticcheck, and the e2e harness has
+// concurrency of its own — a data race hid there before — so the tagged
+// checks and the race-enabled e2e are pinned here rather than trusted to
+// survive an edit.
+func TestCIRunsTheCheckedGates(t *testing.T) {
+	ci := readRepoFile(t, ".github", "workflows", "ci.yml")
+	for _, want := range []string{
+		"go vet ./...",
+		"go vet -tags e2e ./...",
+		"go tool staticcheck ./...",
+		"go tool staticcheck -tags e2e ./...",
+		"go test -race ./...",
+		"make e2e",
+	} {
+		if !strings.Contains(ci, want) {
+			t.Errorf("ci.yml no longer runs %q", want)
+		}
+	}
+
+	// And make e2e is what CI invokes, so the race detector has to live in
+	// the target itself.
+	mk := readRepoFile(t, "Makefile")
+	i := strings.Index(mk, "\ne2e:")
+	if i < 0 {
+		t.Fatal("the Makefile no longer has an e2e target")
+	}
+	target := mk[i:]
+	if end := strings.Index(target[1:], "\n\n"); end >= 0 {
+		target = target[:end+1]
+	}
+	if !strings.Contains(target, "-race") {
+		t.Errorf("make e2e must run the harness under -race, got:%s", target)
+	}
+	if !strings.Contains(target, "-tags e2e") {
+		t.Errorf("make e2e must build with the e2e tag, got:%s", target)
+	}
+}

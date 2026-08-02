@@ -6,6 +6,8 @@ package gitx
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"net/url"
@@ -197,24 +199,57 @@ func (r Repo) ChangedFiles(ctx context.Context, from, to string) ([]string, erro
 // to save it ("No local changes to save") and still exits 0. Popping in that
 // case would drop an unrelated stash entry belonging to the user.
 //
-// The id is what StashPop restores by: stash positions shift, and the entry
-// cepm pushed is not necessarily the top one by the time it pops.
+// The entry is tagged with a nonce and found by it, not by reading the top
+// of the stash afterwards: the user can push their own stash between our
+// push and our look, and we would then adopt theirs as ours.
 func (r Repo) StashPush(ctx context.Context) (stashID string, err error) {
-	before, err := r.stashTop(ctx)
+	nonce, err := stashNonce()
 	if err != nil {
 		return "", err
 	}
-	if _, err := run(ctx, r.Dir, "stash", "push", "--include-untracked", "--message", "cepm auto-stash"); err != nil {
+	message := "cepm auto-stash " + nonce
+	if _, err := run(ctx, r.Dir, "stash", "push", "--include-untracked", "--message", message); err != nil {
 		return "", err
 	}
-	after, err := r.stashTop(ctx)
+	if afterStashPush != nil {
+		afterStashPush()
+	}
+	id, _, err := r.findStash(ctx, nonce)
 	if err != nil {
 		return "", err
 	}
-	if after == "" || after == before {
-		return "", nil
+	return id, nil
+}
+
+// afterStashPush runs between creating the auto-stash and identifying it.
+// Test-only seam (nil in production): that gap is where a user's own "git
+// stash" can land, and nothing else can open it deterministically.
+var afterStashPush func()
+
+// stashNonce is what makes one auto-stash distinguishable from every other
+// entry, including a previous cepm run's.
+func stashNonce() (string, error) {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", fmt.Errorf("generate stash nonce: %w", err)
 	}
-	return after, nil
+	return hex.EncodeToString(b[:]), nil
+}
+
+// findStash locates the entry carrying nonce, returning its commit id and
+// current reference. Both are empty when it is not in the list.
+func (r Repo) findStash(ctx context.Context, nonce string) (id, ref string, err error) {
+	out, err := run(ctx, r.Dir, "stash", "list", "--format=%H %gd %gs")
+	if err != nil {
+		return "", "", err
+	}
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.SplitN(strings.TrimSpace(line), " ", 3)
+		if len(fields) == 3 && strings.Contains(fields[2], nonce) {
+			return fields[0], fields[1], nil
+		}
+	}
+	return "", "", nil
 }
 
 // StashRef returns the stash reference (stash@{n}) currently holding the
@@ -233,30 +268,49 @@ func (r Repo) StashRef(ctx context.Context, stashID string) (string, error) {
 	return "", nil
 }
 
-// stashTop returns the commit id of refs/stash, or "" when there is none.
-func (r Repo) stashTop(ctx context.Context) (string, error) {
-	out, err := run(ctx, r.Dir, "rev-parse", "-q", "--verify", "refs/stash")
-	if err != nil {
-		// No stash exists: rev-parse --verify exits non-zero, which is not a
-		// failure for us.
-		return "", nil
+// StashPop restores the entry StashPush created — never "the top one". The
+// user (or another tool) can push a stash in the clone while cepm is
+// pulling, and popping blind would apply their work, delete their entry, and
+// leave cepm's own changes sitting in the stash.
+//
+// Applying is done by commit id, which no concurrent push can move. Only
+// dropping needs a position, and git offers no way to drop by id: the
+// position is re-resolved and re-verified immediately before, and if it
+// cannot be confirmed the entry is left in place rather than risking
+// someone else's. On conflict git keeps the entry; callers should surface
+// the error to the user.
+func (r Repo) StashPop(ctx context.Context, stashID string) error {
+	// By commit id, with no position resolved first: there is then no
+	// window in which a concurrent push can redirect what gets applied.
+	// The id keeps working even if the entry was dropped meanwhile — the
+	// commit outlives the list, and restoring the user's work is the point.
+	if _, err := run(ctx, r.Dir, "stash", "apply", stashID); err != nil {
+		return fmt.Errorf("restoring the auto-stash %s: %w", stashID, err)
 	}
-	return out, nil
+	// Only the drop needs a position, and git offers no drop-by-id: the
+	// position is re-resolved and re-verified immediately before. If that
+	// cannot be confirmed the entry stays — leaving our own stash behind
+	// beats dropping a stranger's.
+	if err := r.dropStash(ctx, stashID); err != nil {
+		slog.Debug("auto-stash applied but not dropped", "stash", stashID, "err", err)
+	}
+	return nil
 }
 
-// StashPop restores the entry StashPush created, by id — never "the top
-// one". The user (or another tool) can push a stash in the clone while cepm
-// is pulling, and popping blind would apply their work, delete their entry,
-// and leave cepm's own changes sitting in the stash. On conflict git keeps
-// the entry; callers should surface the error to the user.
-func (r Repo) StashPop(ctx context.Context, stashID string) error {
+// dropStash removes the entry with the given id, verifying the position it
+// resolves to still holds that id in the same breath.
+func (r Repo) dropStash(ctx context.Context, stashID string) error {
 	ref, err := r.StashRef(ctx, stashID)
+	if err != nil || ref == "" {
+		return fmt.Errorf("auto-stash %s not found to drop", stashID)
+	}
+	at, err := run(ctx, r.Dir, "rev-parse", ref)
 	if err != nil {
 		return err
 	}
-	if ref == "" {
-		return fmt.Errorf("the auto-stash %s is no longer in the stash list", stashID)
+	if at != stashID {
+		return fmt.Errorf("auto-stash %s moved while dropping it", stashID)
 	}
-	_, err = run(ctx, r.Dir, "stash", "pop", ref)
+	_, err = run(ctx, r.Dir, "stash", "drop", ref)
 	return err
 }

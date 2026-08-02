@@ -57,6 +57,10 @@ type fakeHost struct {
 	// is while its "remove from Chrome too?" prompt is being prepared, i.e.
 	// the window in which another cepm can change the state.
 	onList func()
+	// stopListener shuts the socket down; set by startFakeHost so a test
+	// can make the host genuinely vanish (not merely answer with an error)
+	// between one command and the next.
+	stopListener func()
 	// Reload failure modes, for exit-code tests: a host-level error, per-id
 	// error results, an empty result set (every item unanswered), or
 	// not_installed answers.
@@ -101,6 +105,8 @@ func startFakeHost(t *testing.T, loaded ...string) *fakeHost {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(func() { cancel(); l.Close() })
+	var once sync.Once
+	h.stopListener = func() { once.Do(func() { cancel(); l.Close() }) }
 	go ipc.Serve(ctx, l, h.handle)
 	return h
 }
