@@ -1061,3 +1061,93 @@ func TestMaybeRefreshHelperRepairsCorruptedFiles(t *testing.T) {
 		t.Error("the refresh should repair corrupted helper files")
 	}
 }
+
+// Owed reloads are independent of the config: with auto=false (or a broken
+// file) the scheduler pauses updates, but the debt the helper still owes —
+// a failed catch-up, an earlier tick — must be retried on every wake.
+func TestSchedulerFlushesDebtWhileUpdatesArePaused(t *testing.T) {
+	seedHostState(t, state.Extension{Dir: "a", Name: "A", ID: idA, Key: keyA})
+	if err := os.WriteFile(filepath.Join(os.Getenv("CEPM_HOME"), "config.toml"),
+		[]byte("[update]\nauto = false\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	helper := &fakeHelper{reloads: make(chan []string, 4)}
+	h, ctx := newTestHost(t, helper)
+
+	tick := make(chan time.Time)
+	delays := make(chan time.Duration, 64)
+	h.schedulerWait = func(d time.Duration) <-chan time.Time {
+		delays <- d
+		return tick
+	}
+	done := make(chan struct{})
+	go func() { h.runScheduler(ctx); close(done) }()
+	select {
+	case <-delays: // bootstrap wait requested
+	case <-time.After(10 * time.Second):
+		t.Fatal("the scheduler never started waiting")
+	}
+
+	h.addPendingReloads([]string{idA})
+	select {
+	case tick <- time.Now():
+	case <-time.After(10 * time.Second):
+		t.Fatal("the scheduler never woke")
+	}
+	select {
+	case ids := <-helper.reloads:
+		if len(ids) != 1 || ids[0] != idA {
+			t.Errorf("the paused scheduler should still flush the owed id, got %v", ids)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the owed reload was not flushed while updates were paused")
+	}
+}
+
+// A flush snapshots its debt before talking to Chrome; a debt added for the
+// same id while that attempt is in flight is a newer promise, and the old
+// attempt's success must not erase it.
+func TestFlushDoesNotSettleADebtAddedMidFlight(t *testing.T) {
+	seedHostState(t, state.Extension{Dir: "a", Name: "A", ID: idA, Key: keyA})
+	helper := &fakeHelper{
+		reloads:    make(chan []string, 4),
+		holdReload: make(chan struct{}),
+		reloadSeen: make(chan struct{}, 1),
+	}
+	h, ctx := newTestHost(t, helper)
+
+	h.addPendingReloads([]string{idA})
+	flushDone := make(chan struct{})
+	go func() { h.flushPendingReloads(ctx); close(flushDone) }()
+	select {
+	case <-helper.reloadSeen: // the attempt is in flight, answer held
+	case <-time.After(10 * time.Second):
+		t.Fatal("the flush never reached the helper")
+	}
+
+	h.addPendingReloads([]string{idA}) // a newer promise for the same id
+	close(helper.holdReload)           // old attempt answers "reloaded"
+	select {
+	case <-flushDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the flush never finished")
+	}
+
+	h.pendingReloadMu.Lock()
+	_, stillOwed := h.pendingReload[idA]
+	h.pendingReloadMu.Unlock()
+	if !stillOwed {
+		t.Fatal("the old attempt's success erased the newer debt")
+	}
+	// And the newer debt is actually delivered on the next flush.
+	<-helper.reloads // drain the first request's record
+	h.flushPendingReloads(ctx)
+	select {
+	case ids := <-helper.reloads:
+		if len(ids) != 1 || ids[0] != idA {
+			t.Errorf("the newer debt should be retried, got %v", ids)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the newer debt was never retried")
+	}
+}

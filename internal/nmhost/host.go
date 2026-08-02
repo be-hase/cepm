@@ -90,10 +90,14 @@ type Host struct {
 	// pendingReload holds ids whose reload is owed to Chrome: the update
 	// already checked out their new code, but the reload has not been
 	// confirmed. The set survives failed attempts and is retried on every
-	// scheduler tick — without it, one transient helper error would leave
+	// scheduler wake — without it, one transient helper error would leave
 	// the user running old code until the next commit or Chrome restart.
-	pendingReloadMu sync.Mutex
-	pendingReload   map[string]bool
+	// The value is the generation the debt was recorded in: a flush may
+	// only settle the generation it snapshotted, so a success from an old
+	// attempt cannot erase a debt added while that attempt was in flight.
+	pendingReloadMu  sync.Mutex
+	pendingReload    map[string]uint64
+	pendingReloadGen uint64
 }
 
 // safego runs fn on its own goroutine, logging a panic to the host log
@@ -123,10 +127,11 @@ func (h *Host) addPendingReloads(ids []string) {
 	h.pendingReloadMu.Lock()
 	defer h.pendingReloadMu.Unlock()
 	if h.pendingReload == nil {
-		h.pendingReload = map[string]bool{}
+		h.pendingReload = map[string]uint64{}
 	}
+	h.pendingReloadGen++
 	for _, id := range ids {
-		h.pendingReload[id] = true
+		h.pendingReload[id] = h.pendingReloadGen
 	}
 }
 
@@ -136,8 +141,10 @@ func (h *Host) addPendingReloads(ids []string) {
 // keep it owed for the next attempt.
 func (h *Host) flushPendingReloads(ctx context.Context) {
 	h.pendingReloadMu.Lock()
+	snapshot := make(map[string]uint64, len(h.pendingReload))
 	ids := make([]string, 0, len(h.pendingReload))
-	for id := range h.pendingReload {
+	for id, gen := range h.pendingReload {
+		snapshot[id] = gen
 		ids = append(ids, id)
 	}
 	h.pendingReloadMu.Unlock()
@@ -146,6 +153,19 @@ func (h *Host) flushPendingReloads(ctx context.Context) {
 	}
 	sort.Strings(ids)
 
+	// A settle may only clear the generation this flush snapshotted: a new
+	// debt for the same id, added while the attempt was in flight, is a
+	// promise this attempt's result says nothing about.
+	settleSnapshotted := func(settled []string) {
+		h.pendingReloadMu.Lock()
+		defer h.pendingReloadMu.Unlock()
+		for _, id := range settled {
+			if h.pendingReload[id] == snapshot[id] {
+				delete(h.pendingReload, id)
+			}
+		}
+	}
+
 	// The debt was recorded at update time; the user may have disabled or
 	// uninstalled since, so what is still owed is decided under the lock,
 	// together with the send. When the state cannot be read nothing is sent
@@ -153,33 +173,27 @@ func (h *Host) flushPendingReloads(ctx context.Context) {
 	results, unwanted, err := h.reloadEnabled(ctx, ids)
 	if len(unwanted) > 0 {
 		h.log.Info("dropping owed reloads no longer wanted", "ids", unwanted)
-		h.pendingReloadMu.Lock()
-		for _, id := range unwanted {
-			delete(h.pendingReload, id)
-		}
-		h.pendingReloadMu.Unlock()
+		settleSnapshotted(unwanted)
 	}
 	if err != nil {
 		h.log.Error("reload failed; keeping it for the next tick", "err", err, "ids", ids)
 		return
 	}
-	settled := map[string]bool{}
+	var settled []string
 	for _, r := range results {
 		h.log.Info("reload", "id", r.ID, "status", r.Status, "err", r.Error)
 		switch r.Status {
 		case ipc.StatusReloaded, ipc.StatusNotInstalled, ipc.StatusSkippedDisabled,
 			ipc.StatusSkippedSelf, ipc.StatusSkippedNotUnpacked:
-			settled[r.ID] = true
+			settled = append(settled, r.ID)
 		}
 	}
+	settleSnapshotted(settled)
 	h.pendingReloadMu.Lock()
-	for id := range settled {
-		delete(h.pendingReload, id)
-	}
 	remaining := len(h.pendingReload)
 	h.pendingReloadMu.Unlock()
 	if remaining > 0 {
-		h.log.Warn("reloads still owed; retrying on the next tick", "count", remaining)
+		h.log.Warn("reloads still owed; retrying on the next wake", "count", remaining)
 	}
 }
 
@@ -855,6 +869,10 @@ func (h *Host) runScheduler(ctx context.Context) {
 			return
 		case <-wait(delay):
 		}
+		// Owed reloads are independent of the config: a broken file or
+		// auto=false pauses *updates*, not the debt the helper still owes
+		// from catch-up or earlier ticks.
+		h.flushPendingReloads(ctx)
 		cfg, err := config.Load()
 		if err != nil {
 			pause("err:"+err.Error(), func() {
