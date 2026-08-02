@@ -227,10 +227,21 @@ func checkNMManifests() []diagnostic {
 		foundIn = append(foundIn, variant)
 		// allowed_origins is the authorization boundary for an extension that
 		// can disable any other one, so require it to name exactly the cepm
-		// helper — an extra entry would be someone else's grant.
+		// helper — an extra entry would be someone else's grant. name and
+		// type are what Chrome matches and launches by: wrong values mean
+		// the helper's connectNative simply never reaches the host, with no
+		// error anywhere else to say why.
 		wantOrigin := "chrome-extension://" + helperext.ExtensionID() + "/"
 		originOK := len(m.AllowedOrigins) == 1 && m.AllowedOrigins[0] == wantOrigin
 		switch {
+		case m.Name != helperext.HostName:
+			diags = append(diags, diagnostic{Name: name, Status: "fail",
+				Detail: fmt.Sprintf("manifest name is %q, want %q — Chrome will not match it to the helper", m.Name, helperext.HostName),
+				Hint:   "run: cepm setup"})
+		case m.Type != "stdio":
+			diags = append(diags, diagnostic{Name: name, Status: "fail",
+				Detail: fmt.Sprintf(`manifest type is %q, want "stdio" — Chrome will refuse to launch the host`, m.Type),
+				Hint:   "run: cepm setup"})
 		case !originOK:
 			diags = append(diags, diagnostic{Name: name, Status: "fail",
 				Detail: fmt.Sprintf("allowed_origins should list only the cepm helper, but is %v", m.AllowedOrigins),
