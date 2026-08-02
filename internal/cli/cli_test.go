@@ -1278,3 +1278,20 @@ func TestInstallSurvivesAConcurrentReset(t *testing.T) {
 		t.Errorf("the installed state must be valid: %v", err)
 	}
 }
+
+// An unparsable URL (a stray %-escape) cannot be split into safe and secret
+// parts; every display path must drop it entirely rather than echo the
+// token it may carry.
+func TestInstallErrorsDoNotLeakCredentialsFromUnparsableURLs(t *testing.T) {
+	startFakeHost(t)
+	out, err := run(t, "", "install", "https://user:TOKEN@example.com/%ZZ/repo.git?access_token=QSECRET")
+	if err == nil {
+		t.Fatal("install should fail here")
+	}
+	combined := out + err.Error()
+	for _, secret := range []string{"TOKEN", "QSECRET"} {
+		if strings.Contains(combined, secret) {
+			t.Errorf("install leaked %s:\n%s", secret, combined)
+		}
+	}
+}

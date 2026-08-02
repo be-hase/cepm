@@ -36,6 +36,13 @@ func TestRedactURL(t *testing.T) {
 			"fetch https://h/a?x=SECRET and https://u:p@h/b failed",
 			"fetch https://h/a?*** and https://***@h/b failed",
 		},
+		// Unparsable (a stray %-escape): cannot be split into safe and
+		// secret parts, so the whole URL is replaced — fail closed.
+		{"https://user:TOKEN@example.com/%ZZ?access_token=SECRET", "***"},
+		{
+			"clone https://user:TOKEN@h/%ZZ failed; see https://h/docs",
+			"clone *** failed; see https://h/docs",
+		},
 	}
 	for _, tt := range tests {
 		if got := RedactURL(tt.in); got != tt.want {

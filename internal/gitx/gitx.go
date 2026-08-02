@@ -37,7 +37,11 @@ func RedactURL(s string) string {
 	return urlRe.ReplaceAllStringFunc(s, func(raw string) string {
 		u, err := url.Parse(raw)
 		if err != nil {
-			return raw // unparsable: shown as found, no worse than before
+			// Fail closed: an unparsable URL (a stray %-escape is enough)
+			// cannot be split into safe and secret parts, and its userinfo
+			// or query may carry a token — losing the diagnosis beats
+			// printing it.
+			return "***"
 		}
 		hadUser := u.User != nil
 		u.User = nil
