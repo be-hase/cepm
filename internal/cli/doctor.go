@@ -242,6 +242,19 @@ func checkNMManifests() []diagnostic {
 			diags = append(diags, diagnostic{Name: name, Status: "fail",
 				Detail: fmt.Sprintf(`manifest type is %q, want "stdio" — Chrome will refuse to launch the host`, m.Type),
 				Hint:   "run: cepm setup"})
+		case strings.TrimSpace(m.Description) == "":
+			// Chrome requires the field to exist; its wording is not checked.
+			diags = append(diags, diagnostic{Name: name, Status: "fail",
+				Detail: "manifest description is empty — Chrome rejects the manifest without one",
+				Hint:   "run: cepm setup"})
+		case m.Path == "":
+			diags = append(diags, diagnostic{Name: name, Status: "fail",
+				Detail: "manifest has no path — Chrome has nothing to launch",
+				Hint:   "run: cepm setup"})
+		case !filepath.IsAbs(m.Path):
+			diags = append(diags, diagnostic{Name: name, Status: "fail",
+				Detail: fmt.Sprintf("manifest path %q is not absolute — Chrome requires one on macOS/Linux", m.Path),
+				Hint:   "run: cepm setup"})
 		case !originOK:
 			diags = append(diags, diagnostic{Name: name, Status: "fail",
 				Detail: fmt.Sprintf("allowed_origins should list only the cepm helper, but is %v", m.AllowedOrigins),

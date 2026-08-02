@@ -79,6 +79,14 @@ func TestDoctorFlagsEveryBrokenNMManifestField(t *testing.T) {
 		{"origins", func(m *nmmanifest.HostManifest) {
 			m.AllowedOrigins = append(m.AllowedOrigins, "chrome-extension://aaaabbbbccccddddeeeeffffgggghhhh/")
 		}, "allowed_origins should list only"},
+		{"description", func(m *nmmanifest.HostManifest) { m.Description = "  " },
+			"description is empty"},
+		{"empty path", func(m *nmmanifest.HostManifest) { m.Path = "" },
+			"has no path"},
+		{"relative path", func(m *nmmanifest.HostManifest) { m.Path = "bin/cepm-host" },
+			"is not absolute"},
+		{"wrong absolute path", func(m *nmmanifest.HostManifest) { m.Path = "/somewhere/else/cepm-host" },
+			"instead of the launcher"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.label, func(t *testing.T) {
