@@ -47,23 +47,36 @@ func Safe(s string) string {
 	return b.String()
 }
 
+// contPrefix marks every continuation line SafeLines emits. cepm never
+// starts a line of its own with it, so a newline inside remote-controlled
+// text cannot fake a fresh cepm line ("✔ reloaded ...", "Error: ..."):
+// whatever follows the newline is visibly quoted material.
+const contPrefix = "  | "
+
 // SafeLines is Safe applied per line: real newlines (and a CR ending a CRLF
 // pair) survive, so a multi-line git or SSH message stays readable, while
-// every other control character is escaped. The newline a hostile remote can
-// forge with this buys it a blank-looking line inside an error paragraph —
-// not a repainted terminal, which is what Safe exists to prevent. Applying it
-// to already-escaped text changes nothing, so layered callers are fine.
+// every other control character is escaped. Each continuation line gets
+// contPrefix — see there for why — and keeps it if it already has one, which
+// is also what makes applying SafeLines twice change nothing, so layered
+// callers are fine.
 func SafeLines(s string) string {
 	lines := strings.Split(s, "\n")
 	for i, line := range lines {
-		lines[i] = Safe(strings.TrimSuffix(line, "\r"))
+		line = Safe(strings.TrimSuffix(line, "\r"))
+		if i > 0 && !strings.HasPrefix(line, contPrefix) {
+			line = contPrefix + line
+		}
+		lines[i] = line
 	}
 	return strings.Join(lines, "\n")
 }
 
-// isBidi reports whether r can reorder how a line is displayed.
+// isBidi reports whether r can reorder how a line is displayed: the full
+// Unicode Bidi_Control set (ALM, LRM/RLM, the embedding/override block, and
+// the isolate block).
 func isBidi(r rune) bool {
-	return (r >= 0x200E && r <= 0x200F) || (r >= 0x202A && r <= 0x202E) || (r >= 0x2066 && r <= 0x2069)
+	return r == 0x061C ||
+		(r >= 0x200E && r <= 0x200F) || (r >= 0x202A && r <= 0x202E) || (r >= 0x2066 && r <= 0x2069)
 }
 
 // Strip removes every character Safe would have to escape, for values cepm

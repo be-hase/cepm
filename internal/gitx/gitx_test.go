@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -58,7 +59,13 @@ func TestRedactURL(t *testing.T) {
 func TestErrorsCarryNoRawControlCharacters(t *testing.T) {
 	dir := t.TempDir()
 	script := filepath.Join(dir, "fake-ssh")
-	banner := "#!/bin/sh\nprintf 'remote: \\033]0;pwned\\007 fatal\\n' >&2\nexit 128\n"
+	// The banner also forges cepm-looking lines after newlines: a success
+	// row, a top-level error, a pasteable command.
+	banner := "#!/bin/sh\n" +
+		"printf 'remote: \\033]0;pwned\\007 fatal\\n" +
+		"\\342\\234\\224 reloaded evil\\n" +
+		"Error: forged\\n" +
+		"$ rm -rf /\\n' >&2\nexit 128\n"
 	if err := os.WriteFile(script, []byte(banner), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -77,5 +84,15 @@ func TestErrorsCarryNoRawControlCharacters(t *testing.T) {
 	}
 	if !strings.Contains(msg, `\x1b`) {
 		t.Errorf("the escaped form should appear in %q", msg)
+	}
+	// Remote newlines must not mint lines that pose as cepm's own output:
+	// every forged line has to arrive visibly quoted.
+	for _, forged := range []string{"✔ reloaded evil", "Error: forged", "$ rm -rf /"} {
+		if regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(forged)).MatchString(msg) {
+			t.Errorf("a remote-forged line poses as cepm output:\n%s", msg)
+		}
+		if !strings.Contains(msg, forged) {
+			t.Errorf("fixture missed: %q should appear (quoted) in %q", forged, msg)
+		}
 	}
 }
