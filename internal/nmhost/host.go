@@ -628,14 +628,15 @@ func (h *Host) catchUpReload(ctx context.Context) {
 	if len(ids) == 0 {
 		return
 	}
-	// Re-decided under the lock: this list was read without it.
-	results, _, err := h.reloadEnabled(ctx, ids)
-	if err != nil {
-		h.log.Warn("catch-up reload failed; will retry on the next helper connect", "err", err)
-		return
-	}
-	done = true
-	h.log.Info("catch-up reload done", "extensions", len(results))
+	// Owed like any other reload, not fired once: flushPendingReloads
+	// settles an id only on a final answer and keeps transport errors,
+	// missing answers and per-id failures for the next scheduler tick.
+	// Before this, one individually failed catch-up reload was written off
+	// on transport success and the extension ran stale code all session.
+	done = true // registered: from here the debt set owns the retries
+	h.addPendingReloads(ids)
+	h.flushPendingReloads(ctx)
+	h.log.Info("catch-up reload flushed", "extensions", len(ids))
 }
 
 // runLeaderDuties keeps trying to become the leader; once it wins the lock it

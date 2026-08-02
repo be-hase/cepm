@@ -909,3 +909,58 @@ func TestSchedulerDefaultsAndCancel(t *testing.T) {
 		t.Fatal("the scheduler did not stop on cancel")
 	}
 }
+
+// A catch-up reload that fails for one extension — a per-id error status or
+// a missing answer, not a transport error — must stay owed and be retried
+// on the next tick: it used to be written off on transport success, leaving
+// that extension running stale code for the whole session.
+func TestCatchUpReloadKeepsIndividualFailuresOwed(t *testing.T) {
+	seedHostState(t,
+		state.Extension{Dir: "a", Name: "A", ID: idA, Key: keyA},
+		state.Extension{Dir: "b", Name: "B", ID: idB, Key: keyB},
+	)
+	helper := &fakeHelper{reloads: make(chan []string, 4)}
+	h, ctx := newTestHost(t, helper)
+
+	// The helper answers every reload with a per-id error.
+	helper.failReloads.Store(true)
+	h.caughtUp.Store(false)
+	h.catchUpReload(ctx)
+	select {
+	case <-helper.reloads:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the catch-up reload never reached the helper")
+	}
+	h.pendingReloadMu.Lock()
+	owed := len(h.pendingReload)
+	h.pendingReloadMu.Unlock()
+	if owed != 2 {
+		t.Fatalf("individually failed catch-up reloads must stay owed, got %d owed", owed)
+	}
+
+	// The user disables A before the retry; only B may be retried, and a
+	// healthy helper settles it.
+	st, err := state.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.Repos["testrepo"].Extensions[0].Disabled = true
+	if err := st.Save(); err != nil {
+		t.Fatal(err)
+	}
+	helper.failReloads.Store(false)
+	h.flushPendingReloads(ctx) // the next scheduler tick does exactly this
+	select {
+	case ids := <-helper.reloads:
+		if len(ids) != 1 || ids[0] != idB {
+			t.Errorf("the retry should carry only the still-enabled id, got %v", ids)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the owed catch-up reload was never retried")
+	}
+	h.pendingReloadMu.Lock()
+	defer h.pendingReloadMu.Unlock()
+	if len(h.pendingReload) != 0 {
+		t.Errorf("settled and dropped debts must not linger: %v", h.pendingReload)
+	}
+}
