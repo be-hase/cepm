@@ -12,10 +12,13 @@ import (
 
 // cdpReadTimeout bounds every wait for a CDP response. A service-worker
 // target can be destroyed between attach and evaluate — the helper's own
-// reload (setEnabled off/on) does exactly that mid-poll — and Chrome never
-// answers the in-flight command of a dead session: without a deadline the
-// suite hangs to the 20-minute panic instead of the poll loop retrying.
-const cdpReadTimeout = 10 * time.Second
+// reload (setEnabled off/on) does exactly that mid-poll, and after it the
+// target list can still name the dead worker — and Chrome never answers the
+// in-flight command of a dead session. Without a deadline the suite hangs
+// to the 20-minute panic; with a long one, a poll window is spent on a few
+// dead sessions instead of many fresh attempts, so keep it short.
+// A variable only so the framing test can shrink it.
+var cdpReadTimeoutForTest = 5 * time.Second
 
 // cdpPipe is a minimal Chrome DevTools Protocol client over
 // --remote-debugging-pipe (fd 3 = commands to Chrome, fd 4 = responses,
@@ -25,10 +28,14 @@ const cdpReadTimeout = 10 * time.Second
 // --load-extension would not do: command-line extensions cannot be disabled,
 // which would defeat the setEnabled-based reload under test.
 type cdpPipe struct {
-	w   *os.File
-	r   *bufio.Reader
-	rf  *os.File
-	seq int
+	w  *os.File
+	r  *bufio.Reader
+	rf *os.File
+	// partial holds the bytes of a frame that a read deadline interrupted.
+	// Without it a timeout would drop them, and every later read would
+	// start mid-frame — one timeout would corrupt the stream for good.
+	partial []byte
+	seq     int
 }
 
 // newCDPPipe returns the two files to pass as ExtraFiles (fd 3 and 4) and
@@ -74,11 +81,11 @@ func (c *cdpPipe) callSession(sessionID, method string, params any) (json.RawMes
 	}
 	// The deadline is cleared on return: a response that arrives after a
 	// timeout is skipped by the id check on the next call, not misread.
-	if err := c.rf.SetReadDeadline(time.Now().Add(cdpReadTimeout)); err == nil {
+	if err := c.rf.SetReadDeadline(time.Now().Add(cdpReadTimeoutForTest)); err == nil {
 		defer c.rf.SetReadDeadline(time.Time{})
 	}
 	for {
-		raw, err := c.r.ReadBytes(0)
+		raw, err := c.readFrame()
 		if err != nil {
 			return nil, fmt.Errorf("read CDP response to %s: %w", method, err)
 		}
@@ -100,6 +107,21 @@ func (c *cdpPipe) callSession(sessionID, method string, params any) (json.RawMes
 		}
 		return resp.Result, nil
 	}
+}
+
+// readFrame returns one null-terminated frame, carrying any bytes a read
+// deadline interrupted over to the next call: bufio hands back what it read
+// before the error, and dropping that would leave every later read starting
+// mid-frame.
+func (c *cdpPipe) readFrame() ([]byte, error) {
+	chunk, err := c.r.ReadBytes(0)
+	c.partial = append(c.partial, chunk...)
+	if err != nil {
+		return nil, err
+	}
+	frame := c.partial
+	c.partial = nil
+	return frame, nil
 }
 
 // loadUnpacked installs an unpacked extension from dir and returns its ID.

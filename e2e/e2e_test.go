@@ -162,7 +162,11 @@ func TestE2E(t *testing.T) {
 	}
 	chrome, cdp = launchChrome(t, chromeBin, profile, helperDir, extDir)
 	waitPing(t, 90*time.Second)
-	waitBuild(t, cdp, extID, "BUILD-4", 60*time.Second)
+	// Longer than the other waits: this one covers a Chrome start, the
+	// host's catch-up reload, and the service worker being woken again
+	// afterwards — on a loaded CI runner that chain is slow, and each
+	// attempt against a not-yet-restarted worker costs a CDP timeout.
+	waitBuild(t, cdp, extID, "BUILD-4", 150*time.Second)
 	if got := waitVersion(t, extID, "1.2.0", 30*time.Second); got != "1.2.0" {
 		t.Errorf("a Chrome restart should apply the manifest version too (got %q)", got)
 	}

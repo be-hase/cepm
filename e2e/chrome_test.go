@@ -4,14 +4,17 @@ package e2e
 
 import (
 	"archive/zip"
+	"bufio"
 	"bytes"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // chromeServer serves CfT metadata and a zip whose contents the test picks,
@@ -248,4 +251,65 @@ func TestChromeFetcherReportsFailuresAsErrors(t *testing.T) {
 			t.Error("offline with an empty cache must be an error")
 		}
 	})
+}
+
+// A read deadline can expire in the middle of a CDP frame. The bytes read
+// so far must be carried over: dropping them leaves every later read
+// starting mid-frame, which turns one timeout into a permanently corrupt
+// stream (observed as an entire poll window of failures in CI).
+func TestCDPPipeSurvivesATimeoutMidFrame(t *testing.T) {
+	chromeRead, ourWrite, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer chromeRead.Close()
+	defer ourWrite.Close()
+	ourRead, chromeWrite, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ourRead.Close()
+	defer chromeWrite.Close()
+	c := &cdpPipe{w: ourWrite, r: bufio.NewReader(ourRead), rf: ourRead}
+
+	orig := cdpReadTimeoutForTest
+	cdpReadTimeoutForTest = 300 * time.Millisecond
+	defer func() { cdpReadTimeoutForTest = orig }()
+
+	// A peer that stops mid-frame: the sleep is the stimulus under test (a
+	// stalled Chrome), not a synchronization device — the assertions below
+	// wait on channels.
+	timedOut := make(chan struct{})
+	written := make(chan struct{})
+	go func() {
+		defer close(written)
+		io.ReadAll(io.LimitReader(chromeRead, 1)) // consume part of the command
+		chromeWrite.Write([]byte(`{"id":1,"result":{"half`))
+		<-timedOut
+		chromeWrite.Write(append([]byte(`":"there"}}`), 0))
+		chromeWrite.Write(append([]byte(`{"id":2,"result":{"ok":true}}`), 0))
+	}()
+
+	if _, err := c.call("First", nil); err == nil {
+		t.Fatal("the interrupted call should time out")
+	}
+	// The bytes read before the deadline must be held, not dropped: the
+	// recovery below can otherwise succeed by luck (a discarded prefix that
+	// happens to end at a delimiter parses as garbage and is skipped).
+	if len(c.partial) == 0 {
+		t.Error("the interrupted frame's bytes were dropped")
+	}
+	close(timedOut)
+	<-written
+
+	// The second call must still parse: if the partial frame had been
+	// dropped, the reader would now be mid-JSON and never recover.
+	cdpReadTimeoutForTest = 10 * time.Second
+	res, err := c.call("Second", nil)
+	if err != nil {
+		t.Fatalf("the stream did not survive the timeout: %v", err)
+	}
+	if !strings.Contains(string(res), `"ok":true`) {
+		t.Errorf("unexpected result after recovery: %s", res)
+	}
 }
