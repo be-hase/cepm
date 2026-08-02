@@ -14,8 +14,11 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
+
+	"github.com/gofrs/flock"
 )
 
 // chromeServer serves CfT metadata and a zip whose contents the test picks,
@@ -92,11 +95,11 @@ func quietf(string, ...any) {}
 // version sitting in the cache used to be reused forever, which defeats the
 // point of testing against whatever Chrome currently ships.
 func TestChromeFetcherPrefersTheCurrentVersion(t *testing.T) {
-	cs := newChromeServer(t, "100.0.0", filepath.Join("chrome-testplat", "chrome"))
+	cs := newChromeServer(t, "100.0.5000.1", filepath.Join("chrome-testplat", "chrome"))
 	f := newFetcher(t, cs)
 
 	// A stale cache entry that looks complete.
-	stale := filepath.Join(f.cacheDir, "99.0.0", "chrome-testplat")
+	stale := filepath.Join(f.cacheDir, "99.0.4000.2", "chrome-testplat")
 	if err := os.MkdirAll(stale, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -108,10 +111,10 @@ func TestChromeFetcherPrefersTheCurrentVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if version != "100.0.0" {
-		t.Errorf("version = %q, want the metadata's 100.0.0", version)
+	if version != "100.0.5000.1" {
+		t.Errorf("version = %q, want the metadata's 100.0.5000.1", version)
 	}
-	if !strings.Contains(bin, "100.0.0") {
+	if !strings.Contains(bin, "100.0.5000.1") {
 		t.Errorf("binary %q is not from the current version", bin)
 	}
 
@@ -129,7 +132,7 @@ func TestChromeFetcherPrefersTheCurrentVersion(t *testing.T) {
 // entry behind: the staging tree is discarded, so the next run retries
 // instead of treating the debris as a hit.
 func TestChromeFetcherLeavesNoCacheAfterABadArchive(t *testing.T) {
-	cs := newChromeServer(t, "100.0.0", "chrome-testplat/not-the-binary")
+	cs := newChromeServer(t, "100.0.5000.1", "chrome-testplat/not-the-binary")
 	f := newFetcher(t, cs)
 
 	if _, _, err := f.ensure(quietf); err == nil {
@@ -148,7 +151,7 @@ func TestChromeFetcherLeavesNoCacheAfterABadArchive(t *testing.T) {
 	// The next run, with a good archive, succeeds — the failure was not
 	// cached as a version.
 	cs.setZipEntry(filepath.Join("chrome-testplat", "chrome"))
-	if _, version, err := f.ensure(quietf); err != nil || version != "100.0.0" {
+	if _, version, err := f.ensure(quietf); err != nil || version != "100.0.5000.1" {
 		t.Fatalf("retry after a bad archive: version=%q err=%v", version, err)
 	}
 }
@@ -156,7 +159,7 @@ func TestChromeFetcherLeavesNoCacheAfterABadArchive(t *testing.T) {
 // Offline with a complete cache is still usable — the suite would otherwise
 // be unrunnable on a plane — but the fallback is explicit, not silent.
 func TestChromeFetcherFallsBackToCacheWhenOffline(t *testing.T) {
-	cs := newChromeServer(t, "100.0.0", filepath.Join("chrome-testplat", "chrome"))
+	cs := newChromeServer(t, "100.0.5000.1", filepath.Join("chrome-testplat", "chrome"))
 	f := newFetcher(t, cs)
 	if _, _, err := f.ensure(quietf); err != nil {
 		t.Fatal(err)
@@ -170,7 +173,7 @@ func TestChromeFetcherFallsBackToCacheWhenOffline(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a complete cache should still be usable offline: %v", err)
 	}
-	if version != "100.0.0" || !fileExists(bin) {
+	if version != "100.0.5000.1" || !fileExists(bin) {
 		t.Errorf("unexpected offline result: version=%q bin=%q", version, bin)
 	}
 	if !strings.Contains(logged.String(), "falling back to cached") {
@@ -189,11 +192,11 @@ func TestChromeFetcherFallsBackToCacheWhenOffline(t *testing.T) {
 // interrupted older run; the fetcher must be able to replace it, or every
 // future run fails against something nothing repairs.
 func TestChromeFetcherRepairsAnIncompleteCurrentVersion(t *testing.T) {
-	cs := newChromeServer(t, "100.0.0", filepath.Join("chrome-testplat", "chrome"))
+	cs := newChromeServer(t, "100.0.5000.1", filepath.Join("chrome-testplat", "chrome"))
 	f := newFetcher(t, cs)
 
 	// A directory named like the current version, but with no binary.
-	partial := filepath.Join(f.cacheDir, "100.0.0", "chrome-testplat")
+	partial := filepath.Join(f.cacheDir, "100.0.5000.1", "chrome-testplat")
 	if err := os.MkdirAll(partial, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -205,7 +208,7 @@ func TestChromeFetcherRepairsAnIncompleteCurrentVersion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("an incomplete current-version cache must be repaired: %v", err)
 	}
-	if version != "100.0.0" || !fileExists(bin) {
+	if version != "100.0.5000.1" || !fileExists(bin) {
 		t.Errorf("unexpected result: version=%q bin=%q", version, bin)
 	}
 }
@@ -240,10 +243,10 @@ func TestOfflineFallbackPicksTheNumericallyNewestCache(t *testing.T) {
 // what ensureChrome turns into t.Fatalf.
 func TestChromeFetcherReportsFailuresAsErrors(t *testing.T) {
 	t.Run("http error", func(t *testing.T) {
-		cs := newChromeServer(t, "100.0.0", filepath.Join("chrome-testplat", "chrome"))
+		cs := newChromeServer(t, "100.0.5000.1", filepath.Join("chrome-testplat", "chrome"))
 		cs.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if strings.HasSuffix(r.URL.Path, ".json") {
-				fmt.Fprintf(w, `{"channels":{"Stable":{"version":"100.0.0","downloads":{"chrome":[
+				fmt.Fprintf(w, `{"channels":{"Stable":{"version":"100.0.5000.1","downloads":{"chrome":[
 					{"platform":"testplat","url":%q}]}}}}`, cs.URL+"/chrome.zip")
 				return
 			}
@@ -256,7 +259,7 @@ func TestChromeFetcherReportsFailuresAsErrors(t *testing.T) {
 	})
 
 	t.Run("missing binary", func(t *testing.T) {
-		cs := newChromeServer(t, "100.0.0", "chrome-testplat/not-the-binary")
+		cs := newChromeServer(t, "100.0.5000.1", "chrome-testplat/not-the-binary")
 		f := newFetcher(t, cs)
 		if _, _, err := f.ensure(quietf); err == nil {
 			t.Error("an archive without the expected binary must be an error")
@@ -264,7 +267,7 @@ func TestChromeFetcherReportsFailuresAsErrors(t *testing.T) {
 	})
 
 	t.Run("offline with no cache", func(t *testing.T) {
-		cs := newChromeServer(t, "100.0.0", filepath.Join("chrome-testplat", "chrome"))
+		cs := newChromeServer(t, "100.0.5000.1", filepath.Join("chrome-testplat", "chrome"))
 		f := newFetcher(t, cs)
 		cs.Close()
 		if _, _, err := f.ensure(quietf); err == nil {
@@ -361,18 +364,18 @@ func TestResolveChromeFailsRatherThanSkips(t *testing.T) {
 
 	cases := map[string]func(t *testing.T) (cacheDir, metadataURL string){
 		"http error": func(t *testing.T) (string, string) {
-			cs := newChromeServer(t, "100.0.0", filepath.Join("chrome-testplat", "chrome"))
+			cs := newChromeServer(t, "100.0.5000.1", filepath.Join("chrome-testplat", "chrome"))
 			cs.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, "boom", http.StatusInternalServerError)
 			})
 			return t.TempDir(), cs.URL + "/versions.json"
 		},
 		"bad archive": func(t *testing.T) (string, string) {
-			cs := newChromeServer(t, "100.0.0", "wrong/place")
+			cs := newChromeServer(t, "100.0.5000.1", "wrong/place")
 			return t.TempDir(), cs.URL + "/versions.json"
 		},
 		"offline without cache": func(t *testing.T) (string, string) {
-			cs := newChromeServer(t, "100.0.0", filepath.Join("chrome-testplat", "chrome"))
+			cs := newChromeServer(t, "100.0.5000.1", filepath.Join("chrome-testplat", "chrome"))
 			url := cs.URL + "/versions.json"
 			cs.Close()
 			return t.TempDir(), url
@@ -398,7 +401,7 @@ func TestResolveChromeFailsRatherThanSkips(t *testing.T) {
 // winner produced. Both are gathered at the promotion stage, each holding a
 // verified tree, before either is allowed to install it.
 func TestConcurrentRepairOfAnIncompleteCacheBothSucceed(t *testing.T) {
-	cs := newChromeServer(t, "100.0.0", filepath.Join("chrome-testplat", "chrome"))
+	cs := newChromeServer(t, "100.0.5000.1", filepath.Join("chrome-testplat", "chrome"))
 	cacheDir := t.TempDir()
 	writeIncompleteCache(t, cacheDir)
 
@@ -444,68 +447,132 @@ func TestConcurrentRepairOfAnIncompleteCacheBothSucceed(t *testing.T) {
 			t.Fatal("a concurrent repair never finished")
 		}
 	}
-	if !fileExists(filepath.Join(cacheDir, "100.0.0", "chrome-testplat", "chrome")) {
+	if !fileExists(filepath.Join(cacheDir, "100.0.5000.1", "chrome-testplat", "chrome")) {
 		t.Error("the cache entry should be complete afterwards")
 	}
 }
 
-// The guarantee behind that: promotion is mutually exclusive. While one run
-// holds the promotion lock, another must not be inside it — that overlap is
-// what let a run move aside a tree the other had just installed and then
-// return a path with no binary in it.
-func TestPromotionIsSerialized(t *testing.T) {
-	cs := newChromeServer(t, "100.0.0", filepath.Join("chrome-testplat", "chrome"))
+// The guarantee behind that: promotion is mutually exclusive, and a run
+// that finds a finished tree leaves it alone. Both are proved without
+// waiting on the clock — the lock is asked directly whether it is held, and
+// the winner's tree is identified by inode.
+func TestPromotionIsSerializedAndPreservesTheWinner(t *testing.T) {
+	cs := newChromeServer(t, "100.0.5000.1", filepath.Join("chrome-testplat", "chrome"))
 	cacheDir := t.TempDir()
 	writeIncompleteCache(t, cacheDir)
+	dest := filepath.Join(cacheDir, "100.0.5000.1")
+	probe := flock.New(filepath.Join(cacheDir, ".promote.lock"))
 
-	firstInside := make(chan struct{})
-	releaseFirst := make(chan struct{})
+	inside := make(chan struct{})
+	release := make(chan struct{})
 	firstDone := make(chan error, 1)
 	go func() {
 		f := newRepairFetcher(cs, cacheDir)
 		f.insidePromoteLock = func() {
-			close(firstInside)
-			<-releaseFirst
+			close(inside)
+			<-release
 		}
 		_, _, err := f.ensure(quietf)
 		firstDone <- err
 	}()
 	select {
-	case <-firstInside:
+	case <-inside:
 	case <-time.After(30 * time.Second):
 		t.Fatal("the first repair never entered the promotion lock")
 	}
 
-	secondInside := make(chan struct{})
-	secondDone := make(chan error, 1)
-	go func() {
-		f := newRepairFetcher(cs, cacheDir)
-		f.insidePromoteLock = func() { close(secondInside) }
-		_, _, err := f.ensure(quietf)
-		secondDone <- err
-	}()
-
-	// It must block: the wait is bounded, and entering within it is the
-	// failure — a passing run pays this once.
-	select {
-	case <-secondInside:
-		t.Fatal("two repairs were inside the promotion lock at once")
-	case <-time.After(500 * time.Millisecond):
+	// Held, asked directly: no interval to be wrong about.
+	if got, err := probe.TryLock(); err != nil {
+		t.Fatalf("probing the promotion lock: %v", err)
+	} else if got {
+		t.Error("the promotion lock was free while a repair was inside it")
+		probe.Unlock()
 	}
 
-	close(releaseFirst)
-	for _, done := range []chan error{firstDone, secondDone} {
-		select {
-		case err := <-done:
-			if err != nil {
-				t.Errorf("a serialized repair failed: %v", err)
+	close(release)
+	if err := <-firstDone; err != nil {
+		t.Fatalf("the first repair failed: %v", err)
+	}
+	if got, err := probe.TryLock(); err != nil {
+		t.Fatalf("probing the promotion lock: %v", err)
+	} else if !got {
+		t.Error("the promotion lock was still held after the repair finished")
+	} else {
+		probe.Unlock()
+	}
+
+	// The winner's tree must survive a later run untouched: a second repair
+	// finds it complete and returns without reinstalling it. Inode, not
+	// mtime — the replacement would be a rename, not a write.
+	winner := statIno(t, filepath.Join(dest, "chrome-testplat", "chrome"))
+	second := newRepairFetcher(cs, cacheDir)
+	if _, _, err := second.ensure(quietf); err != nil {
+		t.Fatalf("the second repair failed: %v", err)
+	}
+	if after := statIno(t, filepath.Join(dest, "chrome-testplat", "chrome")); after != winner {
+		t.Error("the second run replaced a tree that was already complete")
+	}
+}
+
+func statIno(t *testing.T, path string) uint64 {
+	t.Helper()
+	st, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sys, ok := st.Sys().(*syscall.Stat_t)
+	if !ok {
+		t.Skip("inode identity unavailable on this platform")
+	}
+	return uint64(sys.Ino)
+}
+
+// A version from metadata names a directory that promotion deletes to make
+// room, so anything path-shaped must be refused before it is ever joined to
+// the cache path — and nothing outside the cache may be touched.
+func TestMetadataVersionCannotEscapeTheCache(t *testing.T) {
+	for _, version := range []string{
+		"..", "../victim", "1/../../victim", "/abs/victim", "151..71",
+		"151.0.7922", "not-a-version", "151.0.7922.71\n", "", ".",
+	} {
+		t.Run(version, func(t *testing.T) {
+			root := t.TempDir()
+			cacheDir := filepath.Join(root, "cache")
+			if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+				t.Fatal(err)
 			}
-		case <-time.After(30 * time.Second):
-			t.Fatal("a serialized repair never finished")
-		}
+			// Sentinels beside and above the cache: both must survive.
+			outside := filepath.Join(root, "victim")
+			if err := os.MkdirAll(outside, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			sentinel := filepath.Join(outside, "keep")
+			if err := os.WriteFile(sentinel, []byte("keep"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			cs := newChromeServer(t, version, filepath.Join("chrome-testplat", "chrome"))
+			f := newRepairFetcher(cs, cacheDir)
+			if _, _, err := f.ensure(quietf); err == nil {
+				t.Errorf("version %q must be refused", version)
+			}
+			if cs.downloadCount() != 0 {
+				t.Errorf("a refused version must not download anything (%d downloads)", cs.downloadCount())
+			}
+			if !fileExists(sentinel) {
+				t.Error("a refused version reached outside the cache directory")
+			}
+			if _, err := os.Stat(root); err != nil {
+				t.Errorf("the cache's parent was damaged: %v", err)
+			}
+		})
 	}
-	if !fileExists(filepath.Join(cacheDir, "100.0.0", "chrome-testplat", "chrome")) {
-		t.Error("the cache entry should be complete afterwards")
+
+	// And the real shape still works.
+	cs := newChromeServer(t, "151.0.7922.71", filepath.Join("chrome-testplat", "chrome"))
+	f := newRepairFetcher(cs, t.TempDir())
+	if _, version, err := f.ensure(quietf); err != nil || version != "151.0.7922.71" {
+		t.Fatalf("a real version must be accepted: version=%q err=%v", version, err)
 	}
 }
 
@@ -513,7 +580,7 @@ func TestPromotionIsSerialized(t *testing.T) {
 // a directory named after the current version, with no binary in it.
 func writeIncompleteCache(t *testing.T, cacheDir string) {
 	t.Helper()
-	partial := filepath.Join(cacheDir, "100.0.0", "chrome-testplat")
+	partial := filepath.Join(cacheDir, "100.0.5000.1", "chrome-testplat")
 	if err := os.MkdirAll(partial, 0o755); err != nil {
 		t.Fatal(err)
 	}

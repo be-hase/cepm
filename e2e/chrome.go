@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -178,6 +179,13 @@ func compareChromeVersions(a, b string) int {
 	return 0
 }
 
+// chromeVersionRe is the Chrome for Testing version shape: four numeric
+// components, and nothing that could be read as a path. The version names a
+// cache directory that promote() deletes to make room, so a metadata value
+// like ".." or "../../somewhere" would put that deletion outside the cache.
+// Validated at the source, before it can reach a path at all.
+var chromeVersionRe = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$`)
+
 func fileExists(path string) bool {
 	st, err := os.Stat(path)
 	return err == nil && !st.IsDir()
@@ -228,10 +236,11 @@ func (f *chromeFetcher) lookupDownload() (version, url string, err error) {
 	}
 	for _, d := range payload.Channels.Stable.Downloads.Chrome {
 		if d.Platform == f.platform {
-			if payload.Channels.Stable.Version == "" {
-				return "", "", fmt.Errorf("CfT metadata has no stable version")
+			v := payload.Channels.Stable.Version
+			if !chromeVersionRe.MatchString(v) {
+				return "", "", fmt.Errorf("CfT metadata has an unusable stable version %q", v)
 			}
-			return payload.Channels.Stable.Version, d.URL, nil
+			return v, d.URL, nil
 		}
 	}
 	return "", "", fmt.Errorf("platform %s not in CfT downloads", f.platform)
@@ -302,7 +311,12 @@ func (f *chromeFetcher) promote(tree, dest string) error {
 		return nil
 	}
 	// Anything else at dest is debris from an interrupted run — the lock is
-	// what makes that safe to say.
+	// what makes that safe to say. Belt and braces before a recursive
+	// delete: dest must be a direct child of the cache directory, so a
+	// version that slipped validation still cannot aim this outside.
+	if filepath.Dir(dest) != filepath.Clean(f.cacheDir) || filepath.Clean(dest) == filepath.Clean(f.cacheDir) {
+		return fmt.Errorf("refusing to clear %s: not a cache entry under %s", dest, f.cacheDir)
+	}
 	if err := os.RemoveAll(dest); err != nil {
 		return err
 	}
