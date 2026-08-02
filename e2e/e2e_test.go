@@ -14,6 +14,8 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -572,13 +574,28 @@ func chromeArgs(profile string) []string {
 	return append(args, "about:blank")
 }
 
+// stoppedChromes marks commands stopChrome has already handled: scenarios
+// stop their Chrome mid-test and launchChrome's cleanup stops it again at
+// the end — by which time the kernel may have reused the negative PID for
+// someone else's process group, so the second signal must never be sent.
+var stoppedChromes sync.Map // *exec.Cmd → struct{}
+
+// killGroup is a variable so the idempotency test can count signals without
+// aiming a stray SIGKILL at a recycled process group.
+var killGroup = func(pid int) { _ = syscall.Kill(-pid, syscall.SIGKILL) }
+
 func stopChrome(t *testing.T, cmd *exec.Cmd) {
 	t.Helper()
 	if cmd.Process == nil {
 		return
 	}
-	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-	_, _ = cmd.Process.Wait()
+	if _, already := stoppedChromes.LoadOrStore(cmd, struct{}{}); already {
+		return
+	}
+	killGroup(cmd.Process.Pid)
+	// cmd.Wait (not Process.Wait) records the exit state on the Cmd; the
+	// error itself is the expected "signal: killed".
+	_ = cmd.Wait()
 	// The host exits on stdin EOF, and its death is observable as the
 	// control socket no longer answering — wait for that fact, not for a
 	// guessed delay; a loaded machine just iterates longer.
@@ -643,4 +660,36 @@ func waitFor(t *testing.T, what string, timeout time.Duration, cond func() bool)
 		time.Sleep(time.Second)
 	}
 	t.Fatalf("timed out waiting for %s", what)
+}
+
+// stopChrome is called both by scenarios and by launchChrome's cleanup; the
+// second call must be a no-op, or the kill goes to a negative PID that can
+// belong to a freshly started, unrelated process group by then. The stand-in
+// child is our own (its group holds only itself), so nothing outside the
+// test is ever at risk.
+func TestStopChromeSignalsOnlyOnce(t *testing.T) {
+	t.Setenv("CEPM_HOME", t.TempDir()) // socket poll: nothing serving, returns at once
+
+	cmd := exec.Command("sleep", "60")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+
+	var kills atomic.Int32
+	orig := killGroup
+	killGroup = func(pid int) {
+		kills.Add(1)
+		orig(pid)
+	}
+	t.Cleanup(func() { killGroup = orig })
+
+	stopChrome(t, cmd)
+	stopChrome(t, cmd)
+	if got := kills.Load(); got != 1 {
+		t.Errorf("stopChrome signalled %d times, want exactly once", got)
+	}
+	if cmd.ProcessState == nil {
+		t.Error("the exit state should be recorded on the Cmd")
+	}
 }
