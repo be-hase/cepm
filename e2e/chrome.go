@@ -11,6 +11,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -25,6 +27,11 @@ const versionsURL = "https://googlechromelabs.github.io/chrome-for-testing/last-
 // ships is the early warning this suite exists to give. What is pinned is
 // the integrity of the cache — the version actually asked for, and only
 // completely-extracted trees.
+//
+// Trust model: two Google-operated HTTPS origins, the metadata on
+// googlechromelabs.github.io and the archive on storage.googleapis.com,
+// with TLS as the boundary. Chrome for Testing publishes no per-artifact
+// digest to check the download against.
 type chromeFetcher struct {
 	versionsURL string
 	cacheDir    string
@@ -38,9 +45,17 @@ type chromeFetcher struct {
 func ensureChrome(t *testing.T) string {
 	t.Helper()
 	if bin := os.Getenv("CEPM_E2E_CHROME"); bin != "" {
-		t.Logf("using Chrome from CEPM_E2E_CHROME: %s", bin)
+		// Prove it runs: a stale path in the environment would otherwise
+		// surface much later as an unexplained scenario failure.
+		out, err := exec.Command(bin, "--version").CombinedOutput()
+		if err != nil {
+			t.Fatalf("CEPM_E2E_CHROME=%s is not usable: %v\n%s", bin, err, out)
+		}
+		t.Logf("using Chrome from CEPM_E2E_CHROME: %s (%s)", bin, strings.TrimSpace(string(out)))
 		return bin
 	}
+	// The only skip in this file: no Chrome for Testing exists for the
+	// platform, so there is nothing to test rather than something broken.
 	platform, binRel, err := cftPlatform()
 	if err != nil {
 		t.Skipf("chrome for testing unavailable: %v", err)
@@ -55,9 +70,12 @@ func ensureChrome(t *testing.T) string {
 		platform:    platform,
 		binRel:      binRel,
 	}
+	// Fatal, not Skip: a failed download, a bad archive or a missing binary
+	// is a broken run. Skipping them made CI green while the real-Chrome
+	// scenarios never executed.
 	bin, version, err := f.ensure(t.Logf)
 	if err != nil {
-		t.Skipf("cannot obtain Chrome for Testing (offline?): %v", err)
+		t.Fatalf("cannot obtain Chrome for Testing: %v", err)
 	}
 	t.Logf("using Chrome for Testing %s (%s): %s", version, platform, bin)
 	return bin
@@ -92,20 +110,46 @@ func (f *chromeFetcher) ensure(logf func(string, ...any)) (bin, version string, 
 	return b, version, nil
 }
 
-// newestCached returns a usable cached binary, preferring the lexically
-// greatest version directory (CfT versions sort usefully that way).
+// newestCached returns the newest usable cached binary. Chrome versions are
+// four numeric components, so they must be compared numerically: by string
+// order "151.0.7922.9" would beat "151.0.7922.71".
 func (f *chromeFetcher) newestCached() (bin, version string) {
 	entries, err := os.ReadDir(f.cacheDir)
 	if err != nil {
 		return "", ""
 	}
-	for i := len(entries) - 1; i >= 0; i-- {
-		b := filepath.Join(f.cacheDir, entries[i].Name(), f.binRel)
-		if fileExists(b) {
-			return b, entries[i].Name()
+	for _, e := range entries {
+		b := filepath.Join(f.cacheDir, e.Name(), f.binRel)
+		if !fileExists(b) {
+			continue
+		}
+		if version == "" || compareChromeVersions(e.Name(), version) > 0 {
+			bin, version = b, e.Name()
 		}
 	}
-	return "", ""
+	return bin, version
+}
+
+// compareChromeVersions orders dotted numeric versions, treating a
+// non-numeric component as lowest so a stray directory never wins.
+func compareChromeVersions(a, b string) int {
+	as, bs := strings.Split(a, "."), strings.Split(b, ".")
+	for i := 0; i < len(as) || i < len(bs); i++ {
+		var an, bn int
+		if i < len(as) {
+			an, _ = strconv.Atoi(as[i])
+		}
+		if i < len(bs) {
+			bn, _ = strconv.Atoi(bs[i])
+		}
+		if an != bn {
+			if an > bn {
+				return 1
+			}
+			return -1
+		}
+	}
+	return 0
 }
 
 func fileExists(path string) bool {
@@ -207,12 +251,23 @@ func (f *chromeFetcher) download(url, dest string) error {
 		return fmt.Errorf("archive from %s has no %s", url, f.binRel)
 	}
 	// Another run may have finished the same version first; its tree is as
-	// good as ours, so treat losing the race as success.
+	// good as ours, so treat losing the race as success. A *partial* tree
+	// at dest (an older cepm interrupted mid-unzip) has no such claim: move
+	// it aside so this complete one can take its place, rather than failing
+	// every future run against debris nothing repairs.
 	if err := os.Rename(tree, dest); err != nil {
 		if fileExists(filepath.Join(dest, f.binRel)) {
 			return nil
 		}
-		return err
+		quarantine, qerr := os.MkdirTemp(f.cacheDir, ".broken-*")
+		if qerr != nil {
+			return err
+		}
+		defer os.RemoveAll(quarantine)
+		if mErr := os.Rename(dest, filepath.Join(quarantine, "old")); mErr != nil && !os.IsNotExist(mErr) {
+			return err
+		}
+		return os.Rename(tree, dest)
 	}
 	return nil
 }

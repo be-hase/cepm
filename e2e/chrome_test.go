@@ -161,3 +161,91 @@ func TestChromeFetcherFallsBackToCacheWhenOffline(t *testing.T) {
 		t.Error("offline with an empty cache must fail")
 	}
 }
+
+// An incomplete cache directory for the *current* version is debris from an
+// interrupted older run; the fetcher must be able to replace it, or every
+// future run fails against something nothing repairs.
+func TestChromeFetcherRepairsAnIncompleteCurrentVersion(t *testing.T) {
+	cs := newChromeServer(t, "100.0.0", filepath.Join("chrome-testplat", "chrome"))
+	f := newFetcher(t, cs)
+
+	// A directory named like the current version, but with no binary.
+	partial := filepath.Join(f.cacheDir, "100.0.0", "chrome-testplat")
+	if err := os.MkdirAll(partial, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(partial, "half-extracted"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	bin, version, err := f.ensure(quietf)
+	if err != nil {
+		t.Fatalf("an incomplete current-version cache must be repaired: %v", err)
+	}
+	if version != "100.0.0" || !fileExists(bin) {
+		t.Errorf("unexpected result: version=%q bin=%q", version, bin)
+	}
+}
+
+// Chrome versions are four numeric components: "…7922.9" is older than
+// "…7922.71", which string ordering gets backwards.
+func TestOfflineFallbackPicksTheNumericallyNewestCache(t *testing.T) {
+	cs := newChromeServer(t, "151.0.7922.71", filepath.Join("chrome-testplat", "chrome"))
+	f := newFetcher(t, cs)
+	for _, v := range []string{"151.0.7922.9", "151.0.7922.71"} {
+		dir := filepath.Join(f.cacheDir, v, "chrome-testplat")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "chrome"), []byte(v), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cs.Close() // offline
+
+	_, version, err := f.ensure(quietf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if version != "151.0.7922.71" {
+		t.Errorf("offline fallback chose %q, want the numerically newest 151.0.7922.71", version)
+	}
+}
+
+// Every fetch failure must be a failure, not a skip: skipping made CI green
+// while the real-Chrome scenarios never ran. ensure returning an error is
+// what ensureChrome turns into t.Fatalf.
+func TestChromeFetcherReportsFailuresAsErrors(t *testing.T) {
+	t.Run("http error", func(t *testing.T) {
+		cs := newChromeServer(t, "100.0.0", filepath.Join("chrome-testplat", "chrome"))
+		cs.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if strings.HasSuffix(r.URL.Path, ".json") {
+				fmt.Fprintf(w, `{"channels":{"Stable":{"version":"100.0.0","downloads":{"chrome":[
+					{"platform":"testplat","url":%q}]}}}}`, cs.URL+"/chrome.zip")
+				return
+			}
+			http.Error(w, "boom", http.StatusInternalServerError)
+		})
+		f := newFetcher(t, cs)
+		if _, _, err := f.ensure(quietf); err == nil {
+			t.Error("an HTTP 500 on the archive must be an error")
+		}
+	})
+
+	t.Run("missing binary", func(t *testing.T) {
+		cs := newChromeServer(t, "100.0.0", "chrome-testplat/not-the-binary")
+		f := newFetcher(t, cs)
+		if _, _, err := f.ensure(quietf); err == nil {
+			t.Error("an archive without the expected binary must be an error")
+		}
+	})
+
+	t.Run("offline with no cache", func(t *testing.T) {
+		cs := newChromeServer(t, "100.0.0", filepath.Join("chrome-testplat", "chrome"))
+		f := newFetcher(t, cs)
+		cs.Close()
+		if _, _, err := f.ensure(quietf); err == nil {
+			t.Error("offline with an empty cache must be an error")
+		}
+	})
+}
