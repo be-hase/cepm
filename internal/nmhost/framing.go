@@ -21,9 +21,10 @@ const (
 func ReadMessage(r io.Reader) ([]byte, error) {
 	var lenBuf [4]byte
 	if _, err := io.ReadFull(r, lenBuf[:]); err != nil {
-		if err == io.ErrUnexpectedEOF {
-			return nil, io.EOF
-		}
+		// io.ReadFull already reports the two cases apart: io.EOF for a
+		// close between frames (Chrome quit — the clean shutdown), and
+		// ErrUnexpectedEOF for a stream cut inside the prefix, which is a
+		// real failure and must not be mistaken for a clean exit.
 		return nil, err
 	}
 	n := binary.NativeEndian.Uint32(lenBuf[:])

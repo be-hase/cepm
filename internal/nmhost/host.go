@@ -10,6 +10,7 @@ import (
 	"math/rand/v2"
 	"net"
 	"os"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"sync"
@@ -48,6 +49,10 @@ const (
 type Host struct {
 	version string
 	log     *slog.Logger
+	// cancel ends the host; safego calls it when an essential goroutine
+	// dies of a panic, so the process exits visibly instead of lingering
+	// half-alive (writer gone, socket dead) with no symptom but silence.
+	cancel context.CancelFunc
 
 	in  io.Reader
 	out chan []byte // frames to Chrome, serialized by the writer goroutine
@@ -76,6 +81,28 @@ type Host struct {
 	// the user running old code until the next commit or Chrome restart.
 	pendingReloadMu sync.Mutex
 	pendingReload   map[string]bool
+}
+
+// safego runs fn on its own goroutine, logging a panic to the host log
+// before deciding what dies with it. Chrome discards the host's stderr, so
+// an unrecovered panic in any goroutine is an undiagnosable crash loop —
+// exactly what the file logger exists to prevent; every goroutine this
+// package spawns goes through here. An essential goroutine (writer, reader,
+// leader duties) is one the host cannot serve without: losing it shuts the
+// host down cleanly so Chrome can start a fresh one, instead of leaving a
+// process that answers nothing.
+func (h *Host) safego(name string, essential bool, fn func()) {
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				h.log.Error("panic", "in", name, "recover", fmt.Sprint(r), "stack", string(debug.Stack()))
+				if essential && h.cancel != nil {
+					h.cancel()
+				}
+			}
+		}()
+		fn()
+	}()
 }
 
 // addPendingReloads records ids whose reload is owed.
@@ -192,10 +219,11 @@ func RunIO(ctx context.Context, version string, in io.Reader, outW io.Writer) er
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	h.cancel = cancel
 
 	var wg sync.WaitGroup
 	wg.Add(1)
-	go func() { // writer: the only goroutine touching stdout
+	h.safego("writer", true, func() { // the only goroutine touching stdout
 		defer wg.Done()
 		for {
 			select {
@@ -209,9 +237,9 @@ func RunIO(ctx context.Context, version string, in io.Reader, outW io.Writer) er
 				}
 			}
 		}
-	}()
+	})
 	wg.Add(1)
-	go func() { // pinger: keeps the MV3 service worker awake
+	h.safego("pinger", true, func() { // keeps the MV3 service worker awake
 		defer wg.Done()
 		t := time.NewTicker(pingInterval)
 		defer t.Stop()
@@ -227,18 +255,18 @@ func RunIO(ctx context.Context, version string, in io.Reader, outW io.Writer) er
 				}
 			}
 		}
-	}()
+	})
 	wg.Add(1)
-	go func() { // leadership: periodic updates + CLI socket, one process at a time
+	h.safego("leader duties", true, func() { // periodic updates + CLI socket, one process at a time
 		defer wg.Done()
 		h.runLeaderDuties(ctx)
-	}()
+	})
 
 	// The reader blocks in a read that cannot be canceled, so it runs on its
 	// own goroutine: if the writer dies (Chrome closed stdout) we must exit
 	// rather than linger as a process that holds nothing and answers nothing.
 	readErr := make(chan error, 1)
-	go func() { readErr <- h.readLoop(ctx) }()
+	h.safego("reader", true, func() { readErr <- h.readLoop(ctx) })
 
 	select {
 	case err = <-readErr: // stdin EOF: Chrome is gone
@@ -286,7 +314,7 @@ func (h *Host) readLoop(ctx context.Context) error {
 			// freshly-installed binary (Chrome launches whatever the launcher
 			// resolves), so it may carry newer helper files than the ones
 			// Chrome just loaded.
-			go func() {
+			h.safego("hello follow-up", false, func() {
 				ack := helloAckMsg{Type: typeHelloAck, HostVersion: h.version, MinHelperVersion: minHelperVersion}
 				if err := h.send(ctx, ack); err != nil {
 					h.log.Error("hello ack not sent", "err", err)
@@ -294,7 +322,7 @@ func (h *Host) readLoop(ctx context.Context) error {
 				}
 				h.maybeRefreshHelper(ctx)
 				h.catchUpReload(ctx)
-			}()
+			})
 		case typePong:
 			h.lastPong.Store(time.Now().UnixNano())
 		case typeReloadResult, typeListResult, typeUninstallResult:
@@ -562,9 +590,20 @@ func authorize(ids []string, allowed func(*state.State) map[string]bool) ([]stri
 // scripts in particular survive a restart), so without this the user would
 // silently keep running stale code until the next update.
 func (h *Host) catchUpReload(ctx context.Context) {
-	if h.caughtUp.Load() {
+	// Claim-then-release rather than check-then-act: two hellos land close
+	// together whenever the service worker restarts, and both passing a
+	// plain Load check would reload every enabled extension twice.
+	if !h.caughtUp.CompareAndSwap(false, true) {
 		return
 	}
+	done := false
+	defer func() {
+		if !done {
+			// A later hello (the service worker restarts often) retries,
+			// rather than silently running stale code all session.
+			h.caughtUp.Store(false)
+		}
+	}()
 	st, err := state.LoadValid()
 	if err != nil {
 		h.log.Error("catch-up reload: load state", "err", err)
@@ -584,12 +623,10 @@ func (h *Host) catchUpReload(ctx context.Context) {
 	// Re-decided under the lock: this list was read without it.
 	results, _, err := h.reloadEnabled(ctx, ids)
 	if err != nil {
-		// Leave the flag unset: a later hello (the service worker restarts
-		// often) retries, rather than silently running stale code all session.
 		h.log.Warn("catch-up reload failed; will retry on the next helper connect", "err", err)
 		return
 	}
-	h.caughtUp.Store(true)
+	done = true
 	h.log.Info("catch-up reload done", "extensions", len(results))
 }
 
@@ -637,15 +674,24 @@ func (h *Host) runLeaderDuties(ctx context.Context) {
 
 	var wg sync.WaitGroup
 	wg.Add(1)
-	go func() {
+	h.safego("ipc server", true, func() {
 		defer wg.Done()
 		ipc.Serve(ctx, l, h.handleIPC)
-	}()
+	})
 	h.runScheduler(ctx)
 	wg.Wait()
 }
 
-func (h *Host) handleIPC(ctx context.Context, req ipc.Request) ipc.Response {
+func (h *Host) handleIPC(ctx context.Context, req ipc.Request) (resp ipc.Response) {
+	// A request-scoped panic (these paths act on state and Chrome — the
+	// likeliest place for one) answers the one CLI call with an error
+	// instead of killing the host for everyone.
+	defer func() {
+		if r := recover(); r != nil {
+			h.log.Error("panic", "in", "handleIPC", "cmd", req.Cmd, "recover", fmt.Sprint(r), "stack", string(debug.Stack()))
+			resp = ipc.Response{Error: "internal error in the host; see " + logHint()}
+		}
+	}()
 	switch req.Cmd {
 	case ipc.CmdPing:
 		info := &ipc.HostInfo{
@@ -699,6 +745,15 @@ func (h *Host) handleIPC(ctx context.Context, req ipc.Request) ipc.Response {
 	default:
 		return ipc.Response{Error: fmt.Sprintf("unknown command %q", req.Cmd)}
 	}
+}
+
+// logHint names the host log file for error messages: the person reading
+// them is stuck and needs the path, not a description of it.
+func logHint() string {
+	if p, err := paths.HostLogFile(); err == nil {
+		return p
+	}
+	return "the host log"
 }
 
 // runScheduler performs periodic pulls while Chrome is running. The first run

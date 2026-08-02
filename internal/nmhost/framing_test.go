@@ -46,3 +46,15 @@ func TestReadMessageTruncated(t *testing.T) {
 		t.Error("expected error for truncated frame")
 	}
 }
+
+// A stream cut inside the 4-byte length prefix is a failed connection, not
+// Chrome closing the port between frames: reporting it as io.EOF would make
+// the host exit claiming a clean shutdown.
+func TestReadMessageTruncatedPrefixIsNotCleanEOF(t *testing.T) {
+	for n := 1; n <= 3; n++ {
+		_, err := ReadMessage(bytes.NewReader(make([]byte, n)))
+		if err == nil || err == io.EOF {
+			t.Errorf("%d-byte prefix: got %v, want a non-EOF error", n, err)
+		}
+	}
+}

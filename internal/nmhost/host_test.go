@@ -795,3 +795,65 @@ func TestReloadReportsStateChangeDistinctlyFromChromeDisabled(t *testing.T) {
 	default:
 	}
 }
+
+// A panic while handling one CLI request must answer that request with an
+// error, not kill the host for every other caller: these paths act on state
+// and Chrome, which is exactly where a panic is most likely to live.
+func TestHandleIPCRecoversFromAPanic(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "cepm-host")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	t.Setenv("CEPM_HOME", dir)
+	st := state.New()
+	st.Repos["testrepo"] = &state.Repo{
+		URL: "u", Track: state.TrackBranch, Branch: "main", Head: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		Extensions: []state.Extension{{Dir: "a", Name: "A", ID: idA, Key: keyA}},
+	}
+	if err := st.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	h := &Host{
+		version:   "test",
+		log:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		out:       make(chan []byte, 16),
+		pending:   map[string]chan json.RawMessage{},
+		startedAt: time.Now(),
+	}
+	h.afterReloadAuthorized = func() { panic("kaboom") }
+
+	resp := h.handleIPC(context.Background(), ipc.Request{Cmd: ipc.CmdReload, IDs: []string{idA}})
+	if resp.OK || resp.Error == "" {
+		t.Errorf("a panicking request should answer with an error, got %+v", resp)
+	}
+	if resp := h.handleIPC(context.Background(), ipc.Request{Cmd: ipc.CmdPing}); !resp.OK {
+		t.Errorf("the host should keep serving after a recovered panic, got %+v", resp)
+	}
+}
+
+// Chrome discards the host's stderr, so a panic must land in the log and
+// then take down only what cannot run without the goroutine that died: an
+// essential one shuts the host down cleanly, a request-scoped one does not.
+func TestSafegoShutsDownOnEssentialPanicOnly(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	h := &Host{log: slog.New(slog.NewTextHandler(io.Discard, nil)), cancel: cancel}
+
+	ran := make(chan struct{})
+	h.safego("non-essential", false, func() { defer close(ran); panic("boom") })
+	<-ran
+	select {
+	case <-ctx.Done():
+		t.Fatal("a non-essential panic must not shut the host down")
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	h.safego("essential", true, func() { panic("boom") })
+	select {
+	case <-ctx.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("an essential panic must shut the host down")
+	}
+}
