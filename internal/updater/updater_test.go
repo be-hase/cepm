@@ -972,3 +972,48 @@ func TestUpdateDoesNotAdvancePastAFailedScan(t *testing.T) {
 		t.Errorf("the change from the unscanned commit must be delivered now, got %+v", r)
 	}
 }
+
+// A stash cepm leaves behind is only acceptable if the user is told: the
+// warning has to name the commit and how to look at it, or the entry is
+// just clutter nobody knows to clean up.
+func TestUpdateWarnsAboutTheAutoStashItLeaves(t *testing.T) {
+	author := setupRepo(t, "mytools")
+	writeFile(t, filepath.Join(author, "ext", "alpha", "background.js"), "v2")
+	git(t, author, "add", "-A")
+	git(t, author, "commit", "-m", "v2")
+	git(t, author, "push", "origin", "main")
+
+	dir, err := RepoDir("mytools")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(dir, "README.md"), "local edit")
+
+	results, err := Update(context.Background(), nil, Options{StashDirty: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if results[0].Err != nil {
+		t.Fatalf("update: %v", results[0].Err)
+	}
+	// The edit is back...
+	b, err := os.ReadFile(filepath.Join(dir, "README.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b) != "local edit" {
+		t.Errorf("the local edit was not restored: %q", b)
+	}
+	// ...and the entry left behind is named.
+	warning := strings.Join(results[0].Warnings, "\n")
+	if !strings.Contains(warning, "auto-stash") || !strings.Contains(warning, "stash list") {
+		t.Errorf("the leftover auto-stash must be reported with a way to inspect it:\n%s", warning)
+	}
+	stashes := git(t, dir, "stash", "list", "--format=%H")
+	if stashes == "" {
+		t.Fatal("fixture: an auto-stash should still be listed")
+	}
+	if !strings.Contains(warning, strings.Split(stashes, "\n")[0]) {
+		t.Errorf("the warning should name the commit that is still listed:\n%s\nstashes:\n%s", warning, stashes)
+	}
+}

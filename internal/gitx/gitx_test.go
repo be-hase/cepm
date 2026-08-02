@@ -171,9 +171,8 @@ func TestStashPopRestoresOurEntryNotWhateverIsOnTop(t *testing.T) {
 	if list := gitIn(t, dir, "stash", "list"); !strings.Contains(list, "the user's own stash") {
 		t.Errorf("the user's stash must still be there, list is:\n%s", list)
 	}
-	if strings.Contains(gitIn(t, dir, "stash", "list"), "cepm auto-stash") {
-		t.Error("cepm's own stash should be gone after a successful pop")
-	}
+	// cepm's own entry stays by design (see StashPop); what matters here
+	// is that the user's did too, and that theirs was not applied.
 }
 
 // A stash entry dropped by hand between push and pop can still be restored:
@@ -276,9 +275,7 @@ func TestStashPopIgnoresAStashPushedAfterResolution(t *testing.T) {
 			t.Errorf("the user's stash %q must survive, list is:\n%s", msg, list)
 		}
 	}
-	if strings.Contains(list, "cepm auto-stash") {
-		t.Errorf("cepm's own stash should be gone, list is:\n%s", list)
-	}
+	// cepm's own entry stays by design; the user's must be untouched.
 }
 
 // A user stash pushed between cepm's own push and its look must not be
@@ -334,14 +331,16 @@ func TestStashPushIdentifiesItsOwnEntry(t *testing.T) {
 	}
 }
 
-// git has no drop-by-id, so the position verified a moment ago can be a
-// different entry by the time the drop runs. Nothing of the user's may be
-// lost to that: whatever went by mistake is put back, and cepm says its own
-// entry is still there rather than reporting a clean finish.
-func TestStashDropNeverLosesAUserStash(t *testing.T) {
+// cepm never removes a stash entry. git can only drop one by position, and
+// a push landing between resolving that position and using it makes the drop
+// take someone else's — and compensating afterwards leaves a window where
+// their work exists nowhere but cepm's memory. So no user stash can be lost
+// here, whatever anyone else is doing at the same time, and cepm's own entry
+// is reported rather than quietly left.
+func TestStashPopNeverRemovesAnyStash(t *testing.T) {
 	dir := t.TempDir()
 	gitIn(t, dir, "init", "--initial-branch=main")
-	for _, f := range []string{"ours", "one", "two"} {
+	for _, f := range []string{"ours", "one"} {
 		if err := os.WriteFile(filepath.Join(dir, f), []byte("committed\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -361,44 +360,57 @@ func TestStashDropNeverLosesAUserStash(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "one"), []byte("user one\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	gitIn(t, dir, "stash", "push", "-m", "user one")
+	gitIn(t, dir, "stash", "push", "-m", "user one", "--", "one")
 
-	// Land a second user stash after the position has been verified and
-	// before the drop: the verified stash@{n} now names user one.
-	beforeStashDrop = func() {
-		beforeStashDrop = nil
-		if err := os.WriteFile(filepath.Join(dir, "two"), []byte("user two\n"), 0o644); err != nil {
-			t.Error(err)
-			return
-		}
-		// Only their own file: a bare push would sweep up the changes
-		// cepm has just restored, which is a fixture artefact, not the
-		// race under test.
-		gitIn(t, dir, "stash", "push", "-m", "user two", "--", "two")
+	before := gitIn(t, dir, "stash", "list", "--format=%H")
+	leftBehind, err := repo.StashPop(ctx, stashID)
+	if err != nil {
+		t.Fatalf("StashPop: %v", err)
 	}
-	t.Cleanup(func() { beforeStashDrop = nil })
+	if leftBehind != stashID {
+		t.Errorf("cepm's remaining entry must be reported, got %q", leftBehind)
+	}
+	if after := gitIn(t, dir, "stash", "list", "--format=%H"); after != before {
+		t.Errorf("no stash entry may be removed:\nbefore:\n%s\nafter:\n%s", before, after)
+	}
+	if b, _ := os.ReadFile(filepath.Join(dir, "ours")); string(b) != "cepm\n" {
+		t.Errorf("cepm's change was not restored: %q", b)
+	}
+	if b, _ := os.ReadFile(filepath.Join(dir, "one")); string(b) != "committed\n" {
+		t.Errorf("the user's stash was applied to the working tree: %q", b)
+	}
+}
+
+// An entry the user dropped themselves is not reported as left behind —
+// there is nothing for them to clean up.
+func TestStashPopReportsNothingWhenTheEntryIsGone(t *testing.T) {
+	dir := t.TempDir()
+	gitIn(t, dir, "init", "--initial-branch=main")
+	if err := os.WriteFile(filepath.Join(dir, "f"), []byte("committed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitIn(t, dir, "add", "-A")
+	gitIn(t, dir, "commit", "-m", "base")
+
+	repo := Repo{Dir: dir}
+	ctx := context.Background()
+	if err := os.WriteFile(filepath.Join(dir, "f"), []byte("edited\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stashID, err := repo.StashPush(ctx)
+	if err != nil || stashID == "" {
+		t.Fatalf("StashPush: %q %v", stashID, err)
+	}
+	gitIn(t, dir, "stash", "drop")
 
 	leftBehind, err := repo.StashPop(ctx, stashID)
 	if err != nil {
 		t.Fatalf("StashPop: %v", err)
 	}
-	if leftBehind == "" {
-		t.Error("cepm's entry could not be dropped safely; that has to be reported, not swallowed")
+	if leftBehind != "" {
+		t.Errorf("an entry that is already gone must not be reported as left behind, got %q", leftBehind)
 	}
-
-	list := gitIn(t, dir, "stash", "list")
-	for _, msg := range []string{"user one", "user two"} {
-		if !strings.Contains(list, msg) {
-			t.Errorf("the user's stash %q was lost, list is:\n%s", msg, list)
-		}
-	}
-	if b, _ := os.ReadFile(filepath.Join(dir, "ours")); string(b) != "cepm\n" {
-		t.Errorf("cepm's change was not restored: %q", b)
-	}
-	// And the user's stashes stayed stashes: neither was applied.
-	for _, f := range []string{"one", "two"} {
-		if b, _ := os.ReadFile(filepath.Join(dir, f)); string(b) != "committed\n" {
-			t.Errorf("a user stash was applied to the working tree: %s = %q", f, b)
-		}
+	if b, _ := os.ReadFile(filepath.Join(dir, "f")); string(b) != "edited\n" {
+		t.Errorf("the change was not restored: %q", b)
 	}
 }

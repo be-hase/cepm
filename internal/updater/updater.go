@@ -230,10 +230,15 @@ func updateRepo(ctx context.Context, name string, r *state.Repo, opts Options, t
 	if stashID != "" {
 		leftBehind, err := repo.StashPop(ctx, stashID)
 		if leftBehind != "" {
+			// cepm does not delete it: git can only drop a stash by
+			// position, and doing that can take an entry someone else
+			// pushed in the meantime. A stale line in the list is the
+			// smaller cost, but only if the user is told about it.
 			res.Warnings = append(res.Warnings, fmt.Sprintf(
-				"your changes were restored, but cepm's auto-stash %s could not be removed safely "+
-					"(another stash was pushed at the same time); drop it yourself once you are sure: "+
-					"git -C %s stash list", leftBehind, term.Quote(dir)))
+				"your local changes were restored; cepm's auto-stash %s is still listed "+
+					"(cepm never removes stash entries — git cannot do it safely while you may be "+
+					"stashing too). Remove it when convenient: git -C %s stash list",
+				leftBehind, term.Quote(dir)))
 		}
 		if err != nil {
 			// The tree now holds conflict markers, so re-scanning it would

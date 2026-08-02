@@ -221,11 +221,6 @@ func (r Repo) StashPush(ctx context.Context) (stashID string, err error) {
 	return id, nil
 }
 
-// beforeStashDrop runs after the entry's position has been verified and
-// before it is dropped. Test-only seam (nil in production): git offers no
-// drop-by-id, so this is the gap the recovery above exists for.
-var beforeStashDrop func()
-
 // afterStashPush runs between creating the auto-stash and identifying it.
 // Test-only seam (nil in production): that gap is where a user's own "git
 // stash" can land, and nothing else can open it deterministically.
@@ -292,100 +287,21 @@ func (r Repo) StashPop(ctx context.Context, stashID string) (leftBehind string, 
 	if _, err := run(ctx, r.Dir, "stash", "apply", stashID); err != nil {
 		return "", fmt.Errorf("restoring the auto-stash %s: %w", stashID, err)
 	}
-	if err := r.dropStash(ctx, stashID); err != nil {
-		// The working tree has the changes back, which is what matters.
-		// The entry stays; say so, because a stash nobody mentions is a
-		// stash nobody cleans up.
-		return stashID, nil
-	}
-	return "", nil
-}
 
-// stashEntry is one entry of the stash list: the commit and the message it
-// is listed under, which a restore has to preserve or the user's entry comes
-// back unrecognisable.
-type stashEntry struct {
-	id      string
-	subject string
-}
-
-// stashEntries lists the stash, top first.
-func (r Repo) stashEntries(ctx context.Context) ([]stashEntry, error) {
-	out, err := run(ctx, r.Dir, "stash", "list", "--format=%H %gs")
-	if err != nil {
-		return nil, err
-	}
-	if out == "" {
-		return nil, nil
-	}
-	var entries []stashEntry
-	for _, line := range strings.Split(out, "\n") {
-		id, subject, _ := strings.Cut(strings.TrimSpace(line), " ")
-		entries = append(entries, stashEntry{id: id, subject: subject})
-	}
-	return entries, nil
-}
-
-// dropStash removes the entry with the given id. git has no drop-by-id, so
-// this checks what actually disappeared afterwards: if the position moved
-// under it and someone else's entry went instead, that entry is put back
-// with "git stash store" and the caller is told ours is still there. A
-// user's stash is never left deleted.
-func (r Repo) dropStash(ctx context.Context, stashID string) error {
-	before, err := r.stashEntries(ctx)
-	if err != nil {
-		return err
-	}
+	// And then the entry is deliberately left alone. git can only drop a
+	// stash by position, and a push landing between resolving that position
+	// and using it makes the drop take someone else's entry. Undoing that
+	// afterwards is not a fix: between the wrong drop and its restore the
+	// user's work exists only in cepm's memory, and a failed "stash store"
+	// — or a process that stops right there — loses it for good. Keeping
+	// cepm's own entry costs the user a stale line in "git stash list";
+	// the alternative can cost them work, so this reports it instead.
 	ref, err := r.StashRef(ctx, stashID)
-	if err != nil || ref == "" {
-		return fmt.Errorf("auto-stash %s not found to drop", stashID)
-	}
-	if beforeStashDrop != nil {
-		beforeStashDrop()
-	}
-	if _, err := run(ctx, r.Dir, "stash", "drop", ref); err != nil {
-		return err
-	}
-	after, err := r.stashEntries(ctx)
 	if err != nil {
-		return err
+		return stashID, nil // cannot tell; assume it is still there
 	}
-	gone := removedEntries(before, after)
-	if len(gone) == 1 && gone[0].id == stashID {
-		return nil
+	if ref == "" {
+		return "", nil // already gone; nothing to mention
 	}
-	// Something else went: put every entry back that is not ours, under its
-	// own message, oldest first so the list ends up in its original order.
-	var restoreErr error
-	for i := len(gone) - 1; i >= 0; i-- {
-		if gone[i].id == stashID {
-			continue
-		}
-		if _, err := run(ctx, r.Dir, "stash", "store", "-m",
-			gone[i].subject, gone[i].id); err != nil {
-			restoreErr = err
-		}
-	}
-	if restoreErr != nil {
-		return fmt.Errorf("dropped the wrong stash and could not restore it: %w", restoreErr)
-	}
-	return fmt.Errorf("the stash list moved while dropping %s; it is still there", stashID)
-}
-
-// removedEntries returns the entries present in before and missing from
-// after.
-func removedEntries(before, after []stashEntry) []stashEntry {
-	remaining := map[string]int{}
-	for _, e := range after {
-		remaining[e.id]++
-	}
-	var gone []stashEntry
-	for _, e := range before {
-		if remaining[e.id] > 0 {
-			remaining[e.id]--
-			continue
-		}
-		gone = append(gone, e)
-	}
-	return gone
+	return stashID, nil
 }
