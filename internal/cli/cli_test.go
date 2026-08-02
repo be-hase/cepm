@@ -56,6 +56,10 @@ type fakeHost struct {
 	// onUninstall runs while a removal request is being handled — the moment
 	// the real Chrome would be showing its confirmation dialog.
 	onUninstall func()
+	// onList runs while a list request is being handled — for disable, that
+	// is while its "remove from Chrome too?" prompt is being prepared, i.e.
+	// the window in which another cepm can change the state.
+	onList func()
 }
 
 func startFakeHost(t *testing.T, loaded ...string) *fakeHost {
@@ -94,6 +98,9 @@ func (h *fakeHost) handle(_ context.Context, req ipc.Request) ipc.Response {
 	defer h.mu.Unlock()
 	switch req.Cmd {
 	case ipc.CmdListChrome:
+		if h.onList != nil {
+			h.onList()
+		}
 		var exts []ipc.ChromeExt
 		for id := range h.loaded {
 			exts = append(exts, ipc.ChromeExt{ID: id, Name: "Ext " + id, Version: "1.0", Enabled: true})

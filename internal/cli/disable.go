@@ -26,7 +26,8 @@ remove it from Chrome too (Chrome shows its own confirmation dialog).`,
 		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			repoName, dir := parseExtRef(args[0])
-			// Choose before locking; see the note in cepm enable.
+			// Choose and ask before locking (see the note in cepm enable):
+			// both wait for a human, which the lock must not.
 			st, err := state.Load()
 			if err != nil {
 				return err
@@ -40,9 +41,13 @@ remove it from Chrome too (Chrome shows its own confirmation dialog).`,
 				return err
 			}
 			dirs := make([]string, len(picked))
+			asked := make([]state.Extension, len(picked))
 			for i, e := range picked {
 				dirs[i] = e.Dir
+				asked[i] = *e
 			}
+			before := snapshot(r)
+			approved := askChromeRemoval(cmd, asked)
 
 			var disabled []state.Extension
 			err = updater.WithLock(cmd.Context(), func() error {
@@ -53,6 +58,13 @@ remove it from Chrome too (Chrome shows its own confirmation dialog).`,
 				r, ok := st.Repos[repoName]
 				if !ok {
 					return fmt.Errorf("repository %q is no longer registered", repoName)
+				}
+				if snapshot(r) != before {
+					// Another cepm ran while we were asking: the extensions
+					// we asked about are not the ones registered now. Nothing
+					// has been touched yet, so stopping here really does undo
+					// it.
+					return fmt.Errorf("%q changed while waiting for your answer; nothing was changed — run cepm disable again", repoName)
 				}
 				for _, d := range dirs {
 					e := r.FindExtension(d)
@@ -73,7 +85,38 @@ remove it from Chrome too (Chrome shows its own confirmation dialog).`,
 				names[i] = e.Name
 			}
 			fmt.Fprintf(out, "✔ Disabled: %s\n", strings.Join(names, ", "))
-			offerChromeRemoval(cmd, disabled)
+
+			// Chrome-side removal, one entry at a time, each holding the lock
+			// only for its own dialog (see cleanup for why not the batch) —
+			// and re-decided under it: an enable in another terminal since the
+			// prompt means the extension is wanted again, and removing it then
+			// would override that choice.
+			for _, e := range disabled {
+				if !approved[e.ID] {
+					continue
+				}
+				err := updater.WithLock(cmd.Context(), func() error {
+					st, err := state.Load()
+					if err != nil {
+						return err
+					}
+					r, ok := st.Repos[repoName]
+					if !ok {
+						// Uninstalled meanwhile; that flow owns the Chrome side.
+						return nil
+					}
+					fresh := r.FindExtension(e.Dir)
+					if fresh == nil || fresh.ID != e.ID || !fresh.Disabled {
+						fmt.Fprintf(out, "  %q is wanted again; leaving Chrome alone\n", e.Name)
+						return nil
+					}
+					performChromeRemoval(cmd, []state.Extension{e}, approved)
+					return nil
+				})
+				if err != nil {
+					return err
+				}
+			}
 			return nil
 		},
 	}
@@ -148,13 +191,6 @@ func performChromeRemoval(cmd *cobra.Command, exts []state.Extension, approved m
 		}
 	}
 	return gone
-}
-
-// offerChromeRemoval asks and then acts, for callers that have already
-// committed their state change.
-func offerChromeRemoval(cmd *cobra.Command, exts []state.Extension) map[string]bool {
-	approved := askChromeRemoval(cmd, exts)
-	return performChromeRemoval(cmd, exts, approved)
 }
 
 // uninstallViaChrome triggers Chrome's uninstall confirmation dialog for the

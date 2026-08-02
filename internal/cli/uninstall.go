@@ -12,11 +12,13 @@ import (
 )
 
 // snapshot captures what a decision about a repository was based on, so a
-// change made between reading it and acting can be noticed.
+// change made between reading it and acting can be noticed. The disabled
+// bit is part of it: an enable answered mid-prompt changes what a removal
+// would mean.
 func snapshot(r *state.Repo) string {
 	s := ""
 	for _, e := range r.Extensions {
-		s += e.Dir + "\x00" + e.ID + "\x00"
+		s += e.Dir + "\x00" + e.ID + "\x00" + fmt.Sprint(e.Disabled) + "\x00"
 	}
 	s += "|"
 	for _, st := range r.Stale {
