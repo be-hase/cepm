@@ -52,10 +52,39 @@ func Install(variant, binPath string) (string, error) {
 		return "", err
 	}
 	path := filepath.Join(dir, FileName())
-	if err := os.WriteFile(path, append(data, '\n'), 0o644); err != nil {
-		return "", err
+	if err := writeAtomic(path, append(data, '\n')); err != nil {
+		return "", fmt.Errorf("write native messaging manifest %s: %w (re-run cepm setup)", path, err)
 	}
 	return path, nil
+}
+
+// createTemp is a variable so tests can make a write fail before the rename;
+// provoking that through the filesystem is not reliable.
+var createTemp = os.CreateTemp
+
+// writeAtomic replaces path in one step, so a crash or a failed write during
+// setup cannot leave Chrome reading a truncated manifest — the previous file
+// survives any failure before the rename. Not fsynced, deliberately: unlike
+// state.json a torn-but-complete rewrite here is repaired by re-running cepm
+// setup, and Chrome re-reads the file on every launch anyway.
+func writeAtomic(path string, content []byte) error {
+	tmp, err := createTemp(filepath.Dir(path), ".cepm-nm-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.Write(content); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(0o644); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), path)
 }
 
 // RemoveOthers deletes cepm's manifest from every Chrome variant except
