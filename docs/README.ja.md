@@ -252,7 +252,7 @@ host は Chrome が起動している間だけ存在します。また pull を�
 $ make build   # bin/cepm
 $ make test    # ユニットテストと結合テスト
 $ make e2e     # 実際の Chrome を操作(初回は Chrome for Testing を取得)
-$ make lint    # gofmt + go vet
+$ make lint    # gofmt check + go vet + staticcheck
 ```
 
 `make e2e` は本物です。使い捨てプロファイルで Chrome を起動し、helper と

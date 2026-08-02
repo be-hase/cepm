@@ -249,7 +249,7 @@ after Chrome starts). `~/.cepm/logs/host.log` has the whole story.
 $ make build   # bin/cepm
 $ make test    # unit + integration tests
 $ make e2e     # drives a real Chrome (downloads Chrome for Testing once)
-$ make lint    # gofmt + go vet
+$ make lint    # gofmt check + go vet + staticcheck
 ```
 
 `make e2e` is the real thing: it launches Chrome with a throwaway profile,
