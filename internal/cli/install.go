@@ -128,7 +128,7 @@ func runInstall(cmd *cobra.Command, url string, flags installFlags) error {
 	if resolved, rerr := filepath.EvalSymlinks(stagingParent); rerr == nil {
 		stagingParent = resolved
 	}
-	staging, err := os.MkdirTemp(stagingParent, ".install-")
+	staging, err := makeStagingDir(stagingParent, ".install-")
 	if err != nil {
 		return err
 	}
@@ -373,6 +373,13 @@ func destFree(st *state.State, name, dir string) error {
 	return fmt.Errorf("%s exists but no repository is registered for it — likely an interrupted install; "+
 		"remove it (rm -rf %s) or run cepm reset, then retry", dir, term.Quote(dir))
 }
+
+// makeStagingDir creates the staging directory. Test seam: replacing it is
+// the only way to land a reset in the instant between the directory
+// existing and the code deciding what its path is — the gap that resolving
+// the parent first is there to remove, and that resolving afterwards would
+// only have narrowed.
+var makeStagingDir = os.MkdirTemp
 
 // stagingParentFor picks where an install stages its clone: beside repos/
 // normally, inside it when repos/ lives on another filesystem. See the note

@@ -58,6 +58,64 @@ func symlinkedRepos(t *testing.T) (home, target string) {
 	return home, target
 }
 
+// Resolving the staging path *before* creating the directory is what makes
+// it real from the first moment. Resolving afterwards leaves an instant in
+// which repos/ can stop meaning what it meant: the directory exists on the
+// old side, the resolution then fails on a path that no longer leads there,
+// and the logical path is kept — so the cleanup deletes the wrong place and
+// a staging directory is left behind where nobody looks.
+//
+// That instant is the whole difference between the two orderings, and only
+// a seam can land a reset inside it.
+func TestStagingIsOnARealPathBeforeItExists(t *testing.T) {
+	// Before symlinkedRepos: startFakeHost points CEPM_HOME at a home of
+	// its own, which would otherwise discard the layout under test.
+	startFakeHost(t)
+	home, target := symlinkedRepos(t)
+	prev := sameFilesystem
+	t.Cleanup(func() { sameFilesystem = prev })
+	sameFilesystem = func(string, string) bool { return false } // stage inside repos/
+
+	elsewhere, err := os.MkdirTemp("/tmp", "cepm-elsewhere")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(elsewhere) })
+
+	prevMk := makeStagingDir
+	t.Cleanup(func() { makeStagingDir = prevMk })
+	makeStagingDir = func(dir, pattern string) (string, error) {
+		made, err := prevMk(dir, pattern)
+		if err != nil {
+			return "", err
+		}
+		// The reset lands here: the directory exists, and repos/ stops
+		// meaning what it meant before anyone asks where the directory is.
+		link := filepath.Join(home, "repos")
+		if err := os.Remove(link); err != nil {
+			return "", err
+		}
+		if err := os.Symlink(elsewhere, link); err != nil {
+			return "", err
+		}
+		return made, nil
+	}
+
+	origin := localOrigin(t, `{"manifest_version":3,"name":"Ext","version":"1.0"}`)
+	// Failing is fine — repos/ moved out from under it. Leaking is not.
+	_, _ = run(t, "", "install", origin, "--name", "tools", "--all")
+
+	entries, err := os.ReadDir(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".install-") {
+			t.Errorf("staging left behind where repos/ used to point: %s", filepath.Join(target, e.Name()))
+		}
+	}
+}
+
 // reset moves repos/ into a backup. With repos/ a symlink, resolving it
 // first would move the *target* and leave a dangling link behind — after
 // which EnsureLayout's MkdirAll fails with "file exists" and cepm cannot
