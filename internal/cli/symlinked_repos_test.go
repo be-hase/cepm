@@ -240,6 +240,57 @@ func TestStagingFollowsReposOntoItsOwnFilesystem(t *testing.T) {
 	}
 }
 
+// reset is all or nothing: metadata in the backup with the clones still
+// active is the split state it exists to resolve. The symlink handling sits
+// in the middle of that loop, after state.json has already moved, so its
+// failures have to return into the same rollback rather than out of the
+// function.
+func TestAFailedSymlinkMoveRollsBackLikeAnyOther(t *testing.T) {
+	interactive(t)
+	home, err := os.MkdirTemp("/tmp", "cepm-home")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(home) })
+	t.Setenv("CEPM_HOME", home)
+	target := filepath.Join(filepath.Dir(home), filepath.Base(home)+"-store")
+	if err := os.MkdirAll(filepath.Join(target, "tools"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(target) })
+	if err := os.Symlink(filepath.Join("..", filepath.Base(target)), filepath.Join(home, "repos")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	seedRepo(t, "tools", state.Extension{Dir: "ext", Name: "Ext", ID: idA, Key: keyA})
+	stateFile := filepath.Join(home, "state.json")
+	if _, err := os.Stat(stateFile); err != nil {
+		t.Fatal(err)
+	}
+
+	// Make the symlink's move fail: something already occupies its place in
+	// the backup. state.json moves first, so this lands mid-loop.
+	prev := renameForBackup
+	t.Cleanup(func() { renameForBackup = prev })
+	renameForBackup = func(src, dst string) error {
+		if err := prev(src, dst); err != nil {
+			return err
+		}
+		// The next entry is repos; block the name it is about to take.
+		return os.Symlink("/nowhere", filepath.Join(filepath.Dir(dst), "repos"))
+	}
+
+	out, err := run(t, "yes\n", "reset")
+	if err == nil {
+		t.Fatalf("reset should have failed on the blocked symlink:\n%s", out)
+	}
+	if _, serr := os.Stat(stateFile); serr != nil {
+		t.Errorf("state.json must have been put back, got %v", serr)
+	}
+	if _, lerr := os.Lstat(filepath.Join(home, "repos")); lerr != nil {
+		t.Errorf("repos must still be in place, got %v", lerr)
+	}
+}
+
 // The end-to-end counterpart: the fallback staging really does produce a
 // working install and leaves nothing behind. A second filesystem cannot be
 // conjured in a test, so the decision is forced rather than arranged.

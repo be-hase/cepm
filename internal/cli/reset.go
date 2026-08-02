@@ -21,30 +21,54 @@ import (
 // provoke that through the filesystem.
 var renameForBackup = os.Rename
 
-// absolutizeSymlink rewrites path, when it is a symlink with a relative
-// target, to point at the same place by absolute path — so that moving it
-// somewhere else does not silently change what it means. Anything that is
-// not a relative symlink is left exactly as it is.
-func absolutizeSymlink(path string) error {
-	info, err := os.Lstat(path)
-	if err != nil || info.Mode()&os.ModeSymlink == 0 {
-		return nil // not a symlink, or gone; the move itself will report it
+// moveToBackup moves one entry into the backup directory.
+//
+// A relative symlink cannot simply be renamed: it carries its target with
+// it, and "repos -> ../repo-store" landing in backup-xxx/ still says "../",
+// which now points inside ~/.cepm at nothing. The recovery this command
+// prints — "git -C <backup>/repos/<name> remote get-url" — is exactly what
+// then fails, on the one path a broken state leaves. So the link is
+// recreated at the destination with an absolute target and the original
+// removed. Writing the new link straight into the freshly created backup
+// avoids a temporary name of its own: one left behind by a crash would make
+// every later reset fail on a name that already exists.
+//
+// Every failure here returns to the caller's rollback, which is why the
+// destination is cleaned up before returning rather than left half-made.
+func moveToBackup(src, dst string) error {
+	target, relative, err := relativeSymlink(src)
+	if err != nil {
+		return err
 	}
-	target, err := os.Readlink(path)
-	if err != nil || filepath.IsAbs(target) {
-		return nil
+	if !relative {
+		return renameForBackup(src, dst)
 	}
-	absolute := filepath.Join(filepath.Dir(path), target)
-	// Replace, not edit: symlink targets cannot be rewritten in place.
-	tmp := path + ".cepm-relink"
-	if err := os.Symlink(absolute, tmp); err != nil {
-		return fmt.Errorf("rewrite %s to an absolute target: %w", path, err)
+	if err := os.Symlink(filepath.Join(filepath.Dir(src), target), dst); err != nil {
+		return err
 	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("rewrite %s to an absolute target: %w", path, err)
+	if err := os.Remove(src); err != nil {
+		_ = os.Remove(dst)
+		return err
 	}
 	return nil
+}
+
+// relativeSymlink reports whether path is a symlink whose target is
+// relative, and what that target is. A missing path is not an error here:
+// the move that follows reports it with better context.
+func relativeSymlink(path string) (target string, relative bool, err error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return "", false, nil
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		return "", false, nil
+	}
+	target, err = os.Readlink(path)
+	if err != nil {
+		return "", false, fmt.Errorf("read the symlink %s: %w", path, err)
+	}
+	return target, !filepath.IsAbs(target), nil
 }
 
 // newResetCmd moves the state and the clones out of the way so cepm can
@@ -142,17 +166,7 @@ backup, and the clones stay intact until you remove the backup yourself.`,
 				}
 				for _, src := range sources {
 					dst := filepath.Join(backup, filepath.Base(src))
-					// A symlink carries its target with it, and a relative
-					// one means something different from a directory
-					// deeper down: "repos -> ../repo-store" moved into
-					// backup-xxx/ would point at ~/.cepm/repo-store, which
-					// is nothing. The recovery this command prints —
-					// "git -C <backup>/repos/<name> remote get-url" — then
-					// fails on the one path a broken state leaves.
-					if err := absolutizeSymlink(src); err != nil {
-						return err
-					}
-					if err := renameForBackup(src, dst); err != nil {
+					if err := moveToBackup(src, dst); err != nil {
 						// All or nothing: a half-moved world — metadata in
 						// the backup, clones still active — is exactly the
 						// split state reset exists to resolve.
