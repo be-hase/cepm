@@ -761,11 +761,27 @@ func logHint() string {
 // happens shortly after startup; later runs are spaced by the configured
 // interval with ±10% jitter so a fleet of machines doesn't hit the git server
 // in lockstep.
+// configRetryInterval paces the re-reads of a config.toml that does not
+// parse; a variable so the test does not wait a real minute.
+var configRetryInterval = time.Minute
+
 func (h *Host) runScheduler(ctx context.Context) {
-	cfg, err := config.Load()
-	if err != nil {
-		h.log.Error("load config", "err", err)
-		return
+	// A broken config.toml must not end periodic updates for the whole
+	// Chrome session — the user is likely editing the file right now.
+	// Retry until it parses (cepm doctor points at the same error).
+	var cfg *config.Config
+	for {
+		var err error
+		if cfg, err = config.Load(); err == nil {
+			break
+		}
+		h.log.Error("load config failed; periodic updates paused until it parses",
+			"err", err, "retryIn", configRetryInterval)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(configRetryInterval):
+		}
 	}
 	if !cfg.Update.Auto {
 		h.log.Info("auto update disabled by config")

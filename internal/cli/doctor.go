@@ -14,6 +14,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/be-hase/cepm/internal/config"
 	"github.com/be-hase/cepm/internal/gitx"
 	"github.com/be-hase/cepm/internal/helperext"
 	"github.com/be-hase/cepm/internal/ipc"
@@ -100,6 +101,17 @@ func runDiagnostics(ctx context.Context) []diagnostic {
 		add("cepm home", "fail", dir+" does not exist", "run: cepm setup")
 	} else {
 		add("cepm home", "ok", dir, "")
+	}
+
+	// A broken config.toml pauses the host's periodic updates until it
+	// parses again; without this row, "updates stopped" reads all green.
+	if cfg, err := config.Load(); err != nil {
+		add("config", "fail", oneLine(err.Error()),
+			"fix the file (or delete it to fall back to defaults)")
+	} else if !cfg.Update.Auto {
+		add("config", "ok", "auto update disabled by config", "")
+	} else {
+		add("config", "ok", fmt.Sprintf("auto update every %s", cfg.Update.Interval), "")
 	}
 
 	diags = append(diags, checkHelperFiles()...)

@@ -9,6 +9,8 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -689,5 +691,78 @@ func TestSafegoShutsDownOnEssentialPanicOnly(t *testing.T) {
 	case <-ctx.Done():
 	case <-time.After(5 * time.Second):
 		t.Fatal("an essential panic must shut the host down")
+	}
+}
+
+// syncBuffer is an io.Writer safe to read while the scheduler goroutine
+// writes log lines to it.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
+// A config.toml that does not parse must pause the scheduler, not end it for
+// the whole Chrome session: the user is probably editing the file right now,
+// and before this fix the host never updated again until Chrome restarted.
+func TestSchedulerRecoversWhenTheConfigStartsParsing(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "cepm-host")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	t.Setenv("CEPM_HOME", dir)
+	cfgPath := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(cfgPath, []byte("[update\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := configRetryInterval
+	configRetryInterval = 10 * time.Millisecond
+	t.Cleanup(func() { configRetryInterval = orig })
+
+	var buf syncBuffer
+	h := &Host{log: slog.New(slog.NewTextHandler(&buf, nil))}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	done := make(chan struct{})
+	go func() { h.runScheduler(ctx); close(done) }()
+
+	waitLog := func(substr string) {
+		t.Helper()
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			if strings.Contains(buf.String(), substr) {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Fatalf("log never contained %q:\n%s", substr, buf.String())
+	}
+
+	waitLog("periodic updates paused")
+	// Repaired mid-session (auto off keeps the test free of real updates):
+	// the scheduler must pick it up without a host restart.
+	if err := os.WriteFile(cfgPath, []byte("[update]\nauto = false\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	waitLog("auto update disabled by config")
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the scheduler did not stop on cancel")
 	}
 }

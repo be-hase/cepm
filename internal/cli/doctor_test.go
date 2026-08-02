@@ -109,3 +109,29 @@ func TestDoctorFlagsEveryBrokenNMManifestField(t *testing.T) {
 		}
 	}
 }
+
+// A config.toml that does not parse pauses the host's periodic updates, so
+// doctor — where "updates stopped working" gets diagnosed — must name the
+// parse error instead of reading all green.
+func TestDoctorFlagsABrokenConfig(t *testing.T) {
+	startFakeHost(t)
+	cfgPath := filepath.Join(os.Getenv("CEPM_HOME"), "config.toml")
+	if err := os.WriteFile(cfgPath, []byte("[update\ninterval="), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, _ := run(t, "", "doctor")
+	if !strings.Contains(out, "fix the file") {
+		t.Errorf("doctor should flag the unparsable config:\n%s", out)
+	}
+
+	if err := os.WriteFile(cfgPath, []byte("[update]\nauto = false\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, _ = run(t, "", "doctor")
+	if strings.Contains(out, "fix the file") {
+		t.Errorf("doctor flags a healthy config:\n%s", out)
+	}
+	if !strings.Contains(out, "auto update disabled") {
+		t.Errorf("doctor should report the auto-update state:\n%s", out)
+	}
+}
