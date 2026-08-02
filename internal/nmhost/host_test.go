@@ -21,6 +21,7 @@ import (
 	"github.com/be-hase/cepm/internal/helperext"
 	"github.com/be-hase/cepm/internal/ipc"
 	"github.com/be-hase/cepm/internal/state"
+	"github.com/be-hase/cepm/internal/testgit"
 	"github.com/be-hase/cepm/internal/updater"
 )
 
@@ -1315,12 +1316,29 @@ func TestAutoUpdateLogsRepoWarnings(t *testing.T) {
 func hostGit(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
-	cmd.Env = append(os.Environ(),
-		"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t",
-		"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
+	cmd.Env = testgit.Env()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("git %v: %v\n%s", args, err, out)
 	}
 	return strings.TrimSpace(string(out))
+}
+
+// The real-git tests must not inherit the developer's configuration: a
+// commit.gpgsign, a hooksPath or an injected GIT_CONFIG_KEY_* would fail
+// them for reasons unrelated to cepm. Hostile settings are planted here in
+// every form git accepts, and the scenario has to be indifferent to them.
+func TestGitFixturesIgnoreTheDeveloperConfig(t *testing.T) {
+	hostile := filepath.Join(t.TempDir(), "gitconfig")
+	if err := os.WriteFile(hostile, []byte(
+		"[commit]\n\tgpgsign = true\n[gpg]\n\tprogram = /nonexistent/gpg\n"+
+			"[core]\n\thooksPath = /nonexistent/hooks\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", hostile)
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", "commit.gpgsign")
+	t.Setenv("GIT_CONFIG_VALUE_0", "true")
+
+	TestAutoUpdateLogsRepoWarnings(t)
 }

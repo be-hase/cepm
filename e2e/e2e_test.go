@@ -25,6 +25,7 @@ import (
 	"github.com/be-hase/cepm/internal/ipc"
 	"github.com/be-hase/cepm/internal/nmmanifest"
 	"github.com/be-hase/cepm/internal/paths"
+	"github.com/be-hase/cepm/internal/testgit"
 )
 
 // TestE2E drives a real Chrome (Chrome for Testing, throwaway profile,
@@ -397,10 +398,7 @@ func runCepm(t *testing.T, bin string, args ...string) string {
 func git(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
-	cmd.Env = append(os.Environ(),
-		"GIT_AUTHOR_NAME=e2e", "GIT_AUTHOR_EMAIL=e2e@example.com",
-		"GIT_COMMITTER_NAME=e2e", "GIT_COMMITTER_EMAIL=e2e@example.com",
-	)
+	cmd.Env = testgit.Env()
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git %v: %v\n%s", args, err, out)
 	}

@@ -21,6 +21,7 @@ import (
 	"github.com/be-hase/cepm/internal/nmmanifest"
 	"github.com/be-hase/cepm/internal/paths"
 	"github.com/be-hase/cepm/internal/state"
+	"github.com/be-hase/cepm/internal/testgit"
 	"github.com/be-hase/cepm/internal/updater"
 )
 
@@ -1238,9 +1239,7 @@ func TestInstallCollisionErrorDoesNotEchoTheURL(t *testing.T) {
 func gitCmd(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
-	cmd.Env = append(os.Environ(),
-		"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t",
-		"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
+	cmd.Env = testgit.Env()
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git %v: %v\n%s", args, err, out)
 	}
