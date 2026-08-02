@@ -19,7 +19,7 @@ now (`internal/paths` has the OS-specific pieces).
 ```console
 make build     # -> bin/cepm (embeds VERSION via ldflags)
 make test      # go test ./...
-make lint      # gofmt -l check + go vet
+make lint      # gofmt -l check + go vet + staticcheck
 make e2e       # real Chrome; downloads Chrome for Testing on first run
 ```
 
@@ -124,6 +124,7 @@ name the path or command, and never echo a URL that may carry a token
 - Go 1.25 (mise pins the toolchain). Dependencies: cobra, go-toml/v2, flock,
   `golang.org/x/mod/semver`. git is invoked as a subprocess, deliberately, so
   the user's SSH config and credential helpers just work.
-- `gofmt` clean, `go vet` clean; both are CI gates.
+- `gofmt` clean, `go vet` clean, `staticcheck` clean (a go.mod tool: run it
+  with `go tool staticcheck ./...`); all three are CI gates.
 - Commit messages are English: a one-line summary, then what changed and why.
 - Commit as work progresses rather than one large drop.

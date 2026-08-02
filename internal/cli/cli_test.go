@@ -34,10 +34,6 @@ var (
 	keyZ, idZ = fixtureKey("seed-z")
 )
 
-// idS is a stale/orphan-only id: those are not re-derived, any well-formed
-// id will do.
-var idS = extid.FromPublicKey([]byte("seed-s"))
-
 func fixtureKey(seed string) (key, id string) {
 	return base64.StdEncoding.EncodeToString([]byte(seed)), extid.FromPublicKey([]byte(seed))
 }
@@ -294,9 +290,8 @@ func TestCleanupCountsUniqueIDs(t *testing.T) {
 		t.Fatalf("uninstall: %v\n%s", err, out)
 	}
 	// A second record for the same id, via a repo-level stale entry.
-	st, _ := state.Load()
 	seedRepo(t, "other", state.Extension{Dir: "x", Name: "X", ID: idB, Key: keyB})
-	st, _ = state.Load()
+	st, _ := state.Load()
 	st.Repos["other"].AddStale(state.StaleExtension{ID: idA, Name: "Ext", Reason: "removed"})
 	if err := st.Save(); err != nil {
 		t.Fatal(err)
@@ -835,7 +830,7 @@ func TestControlCharactersInStateCannotForgeOutput(t *testing.T) {
 	startFakeHost(t)
 	writeRawState(t, `{"version":6,"repos":{
       "a":{"url":"u","track":"branch","branch":"main","head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-           "extensions":[{"dir":"ext\nFORGED[2K","name":"A","id":"xxxx","key":"K"}]},
+           "extensions":[{"dir":"ext\nFORGED\u001b[2K","name":"A","id":"xxxx","key":"K"}]},
       "b":{"url":"u","track":"branch","branch":"main","head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
            "extensions":[{"dir":"other","name":"B","id":"xxxx","key":"K"}]}}}`)
 

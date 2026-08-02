@@ -39,11 +39,6 @@ type pingMsg struct {
 	Seq  int64  `json:"seq"`
 }
 
-type pongMsg struct {
-	Type string `json:"type"`
-	Seq  int64  `json:"seq"`
-}
-
 type reloadReq struct {
 	Type         string   `json:"type"`
 	RequestID    string   `json:"requestId"`

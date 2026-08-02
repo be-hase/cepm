@@ -66,7 +66,7 @@ func TestSafeLines(t *testing.T) {
 }
 
 func TestHasControl(t *testing.T) {
-	for _, s := range []string{"a\nb", "\x1b", "a‮b"} {
+	for _, s := range []string{"a\nb", "\x1b", "a\u202eb"} {
 		if !HasControl(s) {
 			t.Errorf("HasControl(%q) = false", s)
 		}

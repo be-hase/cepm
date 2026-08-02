@@ -28,6 +28,7 @@ fmt:
 lint:
 	@test -z "$$(gofmt -l .)" || (echo "gofmt needed:" && gofmt -l . && exit 1)
 	go vet ./...
+	go tool staticcheck ./...
 
 clean:
 	rm -rf bin

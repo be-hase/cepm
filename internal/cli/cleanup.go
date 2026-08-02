@@ -96,6 +96,7 @@ those entries via Chrome's own confirmation dialog.`,
 					loaded, err := ipc.ListChrome(listCtx)
 					cancel()
 					if errors.Is(err, ipc.ErrHostNotRunning) {
+						//lint:ignore ST1005 "Chrome" is a proper noun
 						return errors.New("Chrome is not reachable; start Chrome (with the helper loaded) and retry")
 					}
 					if err != nil {
