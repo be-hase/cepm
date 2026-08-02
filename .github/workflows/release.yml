@@ -13,19 +13,24 @@ jobs:
   semver:
     # GoReleaser derives the version from the tag, and a malformed one fails
     # late and messily — refuse it before spending the verification minutes.
+    # The pattern is strict SemVer 2.0.0 with a v prefix (no leading zeros,
+    # no empty identifiers); internal/workflows pins it against an
+    # accept/reject table.
     runs-on: ubuntu-latest
     steps:
       - name: verify the tag is semver
         env:
           TAG: ${{ github.ref_name }}
         run: |
-          echo "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$' \
-            || { echo "tag $TAG is not semver (vX.Y.Z[-prerelease][+metadata])" >&2; exit 1; }
+          echo "$TAG" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(0|[1-9][0-9]*|[0-9]*[a-zA-Z-][0-9a-zA-Z-]*)(\.(0|[1-9][0-9]*|[0-9]*[a-zA-Z-][0-9a-zA-Z-]*))*)?(\+[0-9a-zA-Z-]+(\.[0-9a-zA-Z-]+)*)?$' \
+            || { echo "tag $TAG is not strict semver (vX.Y.Z[-prerelease][+metadata])" >&2; exit 1; }
 
   # The tagged commit gets the full CI treatment — lint gates, -race tests
   # and the real-Chrome e2e on both OSes. Pushes to main run CI, but nothing
-  # else guarantees the commit a tag points at ever went through it.
+  # else guarantees the commit a tag points at ever went through it. It runs
+  # after the cheap tag check so a malformed tag never spends these minutes.
   verify:
+    needs: semver
     uses: ./.github/workflows/ci.yml
 
   release:
