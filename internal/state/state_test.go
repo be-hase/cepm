@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -282,5 +283,83 @@ func TestValidateAcceptsPathDerivedIDs(t *testing.T) {
 	s.Repos["tools"].Extensions[0].ID = id[1:] + "a" // still well-formed, wrong value
 	if err := s.Validate(); err == nil {
 		t.Error("a well-formed but underivable id must be rejected")
+	}
+}
+
+// Version 6 is the first public baseline: it is what released cepm binaries
+// write, so it must keep loading forever. The fixture is representative —
+// both track modes, enabled/disabled key-pinned extensions, stale and
+// orphan records — and this contract pins that Load and Validate accept it
+// with every field preserved. When Version 7 exists, this same file must
+// keep loading through its migration (see AGENTS.md).
+func TestVersion6BaselineFixtureLoads(t *testing.T) {
+	t.Setenv("CEPM_HOME", t.TempDir())
+	fixture, err := os.ReadFile(filepath.Join("testdata", "state-v6.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	home := os.Getenv("CEPM_HOME")
+	if err := os.WriteFile(filepath.Join(home, "state.json"), fixture, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	st, err := LoadValid()
+	if err != nil {
+		t.Fatalf("the v6 baseline must load and validate: %v", err)
+	}
+	if st.Version != 6 {
+		t.Errorf("version = %d, want 6", st.Version)
+	}
+
+	tools := st.Repos["tools"]
+	if tools == nil {
+		t.Fatal("repo tools missing")
+	}
+	if tools.URL != "https://git.example.com/team/tools.git" || tools.Track != TrackBranch ||
+		tools.Branch != "main" || tools.Head != strings.Repeat("a", 40) {
+		t.Errorf("tools fields not preserved: %+v", tools)
+	}
+	if tools.LastError != "fetch: connection timed out" || tools.LastPull.IsZero() {
+		t.Errorf("tools history not preserved: lastError=%q lastPull=%v", tools.LastError, tools.LastPull)
+	}
+	alpha := tools.FindExtension("ext/alpha")
+	if alpha == nil || alpha.ID != "jnndgchnmfmbidammmghalgbfcogokio" || alpha.Name != "Alpha" || !alpha.Enabled() {
+		t.Errorf("alpha not preserved: %+v", alpha)
+	}
+	beta := tools.FindExtension("ext/beta")
+	if beta == nil || beta.ID != "iidiaccbihdcdlmomgiagchjkapjlmal" || beta.Enabled() {
+		t.Errorf("beta not preserved (must stay disabled): %+v", beta)
+	}
+	if len(tools.Stale) != 1 || tools.Stale[0].ID != "abcdefghijklmnopabcdefghijklmnop" || tools.Stale[0].Reason != "removed" {
+		t.Errorf("stale record not preserved: %+v", tools.Stale)
+	}
+
+	release := st.Repos["release"]
+	if release == nil {
+		t.Fatal("repo release missing")
+	}
+	if release.Track != TrackTag || release.TagPattern != "v*" || release.Tag != "v1.2.0" || !release.Prerelease {
+		t.Errorf("release tag-mode fields not preserved: %+v", release)
+	}
+	if e := release.FindExtension("."); e == nil || e.ID != "bbijpodelfmiddmhfjokfbhghibgbhno" {
+		t.Errorf("root extension not preserved: %+v", e)
+	}
+
+	if len(st.Orphans) != 1 || st.Orphans[0].ID != "ponmlkjihgfedcbaponmlkjihgfedcba" {
+		t.Errorf("orphan not preserved: %+v", st.Orphans)
+	}
+}
+
+// A file written by a newer cepm is refused with upgrade advice, never
+// half-read: the newer schema may mean something this build cannot.
+func TestLoadRefusesANewerStateVersion(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("CEPM_HOME", home)
+	if err := os.WriteFile(filepath.Join(home, "state.json"), []byte(`{"version":7,"repos":{}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Load()
+	if err == nil || !strings.Contains(err.Error(), "newer") {
+		t.Fatalf("a newer state version must be refused with upgrade advice, got: %v", err)
 	}
 }

@@ -258,6 +258,12 @@ func (s *State) sanitizeNames() {
 	}
 }
 
+// Version 6 is the first public baseline: released cepm binaries write it,
+// so from Version 7 on a bump additionally requires migrating version-6
+// files forward and keeping the contract test on testdata/state-v6.json
+// passing (see AGENTS.md). Versions 1–5 were never released and stay
+// unreadable on purpose.
+//
 // Version is the state schema version this build writes and the only one it
 // reads. Every change to what is persisted raises it: a mismatched binary
 // would silently drop fields it does not know on its next write, so Load

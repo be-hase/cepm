@@ -1,0 +1,59 @@
+{
+  "version": 6,
+  "repos": {
+    "tools": {
+      "url": "https://git.example.com/team/tools.git",
+      "track": "branch",
+      "branch": "main",
+      "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "lastPull": "2026-08-01T12:00:00Z",
+      "lastError": "fetch: connection timed out",
+      "extensions": [
+        {
+          "dir": "ext/alpha",
+          "name": "Alpha",
+          "id": "jnndgchnmfmbidammmghalgbfcogokio",
+          "key": "Zml4dHVyZS1hbHBoYQ=="
+        },
+        {
+          "dir": "ext/beta",
+          "name": "Beta",
+          "id": "iidiaccbihdcdlmomgiagchjkapjlmal",
+          "key": "Zml4dHVyZS1iZXRh",
+          "disabled": true
+        }
+      ],
+      "stale": [
+        {
+          "id": "abcdefghijklmnopabcdefghijklmnop",
+          "name": "Old Widget",
+          "reason": "removed"
+        }
+      ]
+    },
+    "release": {
+      "url": "https://git.example.com/team/release.git",
+      "track": "tag",
+      "tagPattern": "v*",
+      "tag": "v1.2.0",
+      "prerelease": true,
+      "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "lastPull": "2026-08-01T12:05:00Z",
+      "extensions": [
+        {
+          "dir": ".",
+          "name": "Release Tool",
+          "id": "bbijpodelfmiddmhfjokfbhghibgbhno",
+          "key": "Zml4dHVyZS1nYW1tYQ=="
+        }
+      ]
+    }
+  },
+  "orphans": [
+    {
+      "id": "ponmlkjihgfedcbaponmlkjihgfedcba",
+      "name": "Uninstalled Tool",
+      "reason": "uninstalled"
+    }
+  ]
+}

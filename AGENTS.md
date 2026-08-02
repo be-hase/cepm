@@ -79,8 +79,11 @@ change".
 integrity check (corruption, half-writes, a moved `~/.cepm`, values that a
 terminal or a command line would misread) — not an authorization boundary
 against the user, who owns the file. Do not describe it as one. Every field
-added to the persisted shape raises `state.Version`; there are no
-migrations, and `Load` refuses any other version.
+added to the persisted shape raises `state.Version`; `Load` refuses any
+other version. Version 6 is the first *public* baseline (1–5 were never
+released and are deliberately unreadable): from Version 7 on, a bump must
+also migrate version-6 files forward and keep the contract test on
+`internal/state/testdata/state-v6.json` passing.
 
 **Nothing untrusted reaches the terminal raw.** Git and SSH stderr, manifest
 names, branch names: `term.Safe` on display, `term.Quote` for anything a
