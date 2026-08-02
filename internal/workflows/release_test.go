@@ -75,6 +75,20 @@ func TestReleaseTagPatternIsStrictSemver(t *testing.T) {
 	}
 }
 
+// The release toolchain must be reproducible: the same tag has to build
+// with the same GoReleaser, so the workflow pins an exact version — a range
+// like "~> v2" resolves to whatever is newest at run time.
+func TestGoReleaserVersionIsPinnedExactly(t *testing.T) {
+	yml := releaseYAML(t)
+	m := regexp.MustCompile(`(?m)^\s+version: (\S+)$`).FindStringSubmatch(yml)
+	if m == nil {
+		t.Fatal("release.yml no longer sets a GoReleaser version")
+	}
+	if !regexp.MustCompile(`^v2\.[0-9]+\.[0-9]+$`).MatchString(m[1]) {
+		t.Errorf("GoReleaser version %q is not an exact v2.x.y pin", m[1])
+	}
+}
+
 // The job graph is load-bearing: verify must wait for the cheap tag check
 // (a malformed tag must not spend two OSes' worth of verification minutes),
 // and release must require both — that ordering is the whole release gate.
