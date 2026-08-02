@@ -25,6 +25,7 @@ package state
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -606,3 +607,15 @@ func (e *NotDurableError) Error() string {
 }
 
 func (e *NotDurableError) Unwrap() error { return e.Err }
+
+// Committed reports whether an error from Save still leaves the new state in
+// effect. A durability failure does: state.json has already been replaced,
+// so every caller that mirrors the state onto the world — moving a clone,
+// reloading Chrome, recording what to reload next — must carry on rather
+// than stop or roll back. Stopping would leave the world describing an older
+// state than the one on disk, which is the inversion Save's atomicity exists
+// to prevent, over a risk only a crash in the next moments could realise.
+func Committed(err error) bool {
+	var notDurable *NotDurableError
+	return err == nil || errors.As(err, &notDurable)
+}

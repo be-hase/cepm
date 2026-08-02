@@ -1085,6 +1085,46 @@ func TestUpdateProcessesARepositoryOncePerRun(t *testing.T) {
 	}
 }
 
+// A save whose flush failed has already replaced state.json: the new heads
+// are live. Throwing the results away would drop the reloads this update
+// owes, and the next run — reading the state that did land — would treat
+// those commits as processed and never offer them again, leaving Chrome on
+// the old code for good.
+func TestUpdateStillReportsItsWorkWhenOnlyTheFlushFailed(t *testing.T) {
+	author := setupRepo(t, "mytools")
+	writeFile(t, filepath.Join(author, "ext", "alpha", "background.js"), "v2")
+	git(t, author, "add", "-A")
+	git(t, author, "commit", "-m", "v2")
+	git(t, author, "push", "origin", "main")
+
+	restore := state.FailDurability()
+	defer restore()
+
+	results, err := Update(context.Background(), nil, Options{})
+	if err != nil {
+		t.Fatalf("a written-but-unflushed state must not fail the update: %v", err)
+	}
+	if len(results) != 1 || results[0].Err != nil {
+		t.Fatalf("unexpected results: %+v", results)
+	}
+	if len(results[0].Changed) != 1 || results[0].Changed[0].Name != "Alpha" {
+		t.Errorf("the reload this update owes must still be reported: %+v", results[0].Changed)
+	}
+	warning := strings.Join(results[0].Warnings, "\n")
+	if !strings.Contains(warning, "not flushed") {
+		t.Errorf("the crash window has to be reported:\n%s", warning)
+	}
+	restore()
+	// And the head really did land, which is why the results had to.
+	st, err := state.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Repos["mytools"].Head == "" {
+		t.Error("fixture: the new head should be on disk")
+	}
+}
+
 // A stash cepm leaves behind is only acceptable if the user is told: the
 // warning has to name the commit and how to look at it, or the entry is
 // just clutter nobody knows to clean up.

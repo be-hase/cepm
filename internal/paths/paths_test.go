@@ -68,6 +68,32 @@ func TestCepmDirIsResolvedBeforeAnyIDIsDerived(t *testing.T) {
 	}
 }
 
+// Resolving the home alone is not enough. repos/ is exactly the directory
+// someone moves to another volume and leaves a symlink behind, and it is the
+// one every path-derived id is built from — Chrome would hash the resolved
+// path, cepm the symlinked one, and Validate would agree with itself forever
+// because it derives ids the same wrong way.
+func TestASymlinkInsideTheHomeIsResolvedToo(t *testing.T) {
+	home := t.TempDir()
+	elsewhere := t.TempDir()
+	realRepos, err := filepath.EvalSymlinks(elsewhere)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CEPM_HOME", home)
+	if err := os.Symlink(elsewhere, filepath.Join(home, "repos")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	got, err := ReposDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != realRepos {
+		t.Errorf("ReposDir() = %q, want the resolved %q", got, realRepos)
+	}
+}
+
 // A clone's id is derived before the clone exists, and stays derivable after
 // the user deletes it, so Canonical resolves as far as the path exists and
 // appends the rest rather than failing.

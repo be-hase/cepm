@@ -90,7 +90,7 @@ those entries via Chrome's own confirmation dialog.`,
 						}
 						st.RemoveOrphan(p.s.ID)
 						revivedIDs = append(revivedIDs, p.s.ID)
-						return st.Save()
+						return saveState(cmd.OutOrStdout(), st)
 					}
 					listCtx, cancel := context.WithTimeout(cmd.Context(), 5*time.Second)
 					loaded, err := ipc.ListChrome(listCtx)
@@ -123,7 +123,7 @@ those entries via Chrome's own confirmation dialog.`,
 						r.RemoveStale(p.s.ID)
 					}
 					st.RemoveOrphan(p.s.ID)
-					return st.Save()
+					return saveState(cmd.OutOrStdout(), st)
 				})
 				if err != nil {
 					return err

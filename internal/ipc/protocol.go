@@ -10,7 +10,14 @@ import "time"
 // at session start can be different builds, and a mismatched pair must fail
 // with "restart Chrome" instead of misunderstanding each other. Bump it
 // whenever the request/response shapes change meaning.
-const ProtocolVersion = 1
+//
+// 2 added the interim "working" line: a connection can now carry several
+// response lines where it used to carry exactly one. Both directions of a
+// mismatch matter — an older CLI would read the first working line as a
+// failed final answer and release the update lock with the dialog still up,
+// and a newer CLI against an older host would silently be back to a fixed
+// two-minute cut-off — so this is a mismatch, not an extension.
+const ProtocolVersion = 2
 
 // The host's budget for a request and the CLI's patience for the answer are
 // one contract seen from two sides, so it lives here — the package both

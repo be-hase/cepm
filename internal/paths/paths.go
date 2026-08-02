@@ -62,12 +62,18 @@ func Canonical(absPath string) (string, error) {
 	}
 }
 
+// sub resolves a path inside the cepm home, symlinks and all. Resolving the
+// home alone is not enough: repos/ is exactly the kind of directory someone
+// points at another volume, and it is the one every path-derived extension
+// id is built from. Chrome would hash the resolved path and cepm the
+// symlinked one, and Validate — deriving the id the same wrong way — would
+// keep agreeing with itself.
 func sub(elem ...string) (string, error) {
 	dir, err := CepmDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(append([]string{dir}, elem...)...), nil
+	return Canonical(filepath.Join(append([]string{dir}, elem...)...))
 }
 
 func ReposDir() (string, error)       { return sub("repos") }

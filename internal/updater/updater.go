@@ -122,6 +122,7 @@ func WithLock(ctx context.Context, fn func() error) error {
 // empty) and records the results in state.json.
 func Update(ctx context.Context, names []string, opts Options) ([]RepoResult, error) {
 	var results []RepoResult
+	var saveWarning string
 	err := WithLock(ctx, func() error {
 		// LoadValid, before the first fetch: a Save at the end would refuse
 		// an invalid state too, but by then the clones' checkouts would
@@ -159,10 +160,25 @@ func Update(ctx context.Context, names []string, opts Options) ([]RepoResult, er
 			}
 			results = append(results, res)
 		}
-		return st.Save()
+		if err := st.Save(); err != nil {
+			if !state.Committed(err) {
+				return err
+			}
+			// The new heads are on disk. Discarding the results would drop
+			// the reloads this update owes, and the next run — reading the
+			// state that did land — would call those commits already
+			// processed and never offer them again.
+			saveWarning = err.Error()
+		}
+		return nil
 	})
 	if err != nil {
 		return nil, err
+	}
+	if saveWarning != "" && len(results) > 0 {
+		// One save covers every repository, so it is reported once, on the
+		// first result, rather than repeated per repo.
+		results[0].Warnings = append(results[0].Warnings, saveWarning)
 	}
 	return results, nil
 }

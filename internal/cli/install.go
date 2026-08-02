@@ -147,16 +147,11 @@ func runInstall(cmd *cobra.Command, url string, flags installFlags) error {
 		if err := st.Validate(); err != nil {
 			return undoRename(fmt.Errorf("cannot install %q: %w", name, err), dir, stagingClone)
 		}
-		if err := st.Save(); err != nil {
-			var notDurable *state.NotDurableError
-			if errors.As(err, &notDurable) {
-				// The registration is on disk. Moving the clone back now
-				// would leave the repository registered with nothing at the
-				// path its ids were derived from — worse than the crash
-				// window being reported.
-				fmt.Fprintf(out, "Warning: %v\n", err)
-				return nil
-			}
+		// saveState keeps a durability-only failure from reaching here: the
+		// registration would already be on disk, and moving the clone back
+		// would leave the repository registered with nothing at the path its
+		// ids were derived from.
+		if err := saveState(out, st); err != nil {
 			// The state on disk did not change, so the filesystem must not
 			// either: put the clone back before reporting.
 			return undoRename(err, dir, stagingClone)

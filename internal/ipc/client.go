@@ -56,6 +56,14 @@ func watchCancel(ctx context.Context, conn net.Conn) (stop func()) {
 	return func() { close(done) }
 }
 
+// restartPatience pushes the read deadline out by another full budget.
+// A variable so a test can observe the restarts happening: the claim is
+// about a deadline, and watching the calls proves it without any test
+// having to wait for one to expire.
+var restartPatience = func(conn net.Conn, patience time.Duration) {
+	_ = conn.SetDeadline(time.Now().Add(patience))
+}
+
 // clientPatience is how long silence from the host is tolerated when the
 // caller set no deadline of its own. A variable so a test can shrink it:
 // the claim it backs is about a deadline, and nothing but a deadline
@@ -127,8 +135,19 @@ func exchange(ctx context.Context, conn net.Conn, r *bufio.Reader, req Request, 
 		if !resp.Working {
 			break
 		}
-		// The host is still on it; start the patience over.
-		_ = conn.SetDeadline(time.Now().Add(patience))
+		// A progress line and a cancellation can land together, and the last
+		// SetDeadline wins: extending here after the watcher moved the
+		// deadline into the past would put the read back to sleep for a
+		// caller who has already left. ctx.Err() is set before the watcher
+		// can run, so checking it here is what orders the two.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		// The host is still on it; start the patience over — but never past
+		// a deadline the caller set, which bounds the whole operation.
+		if _, bounded := ctx.Deadline(); !bounded {
+			restartPatience(conn, patience)
+		}
 	}
 	if !resp.OK {
 		return &resp, fmt.Errorf("host error: %s", resp.Error)

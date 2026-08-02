@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -100,5 +102,52 @@ func TestAnOversizedMessageIsRefusedRatherThanBuffered(t *testing.T) {
 	}
 	if !strings.Contains(string(line), "too long") {
 		t.Errorf("the refusal should say what happened, got: %s", line)
+	}
+}
+
+// The client reads until a newline too, so a host that goes wrong — or is
+// not the host at all, on a socket path anything running as this user could
+// have bound — must not be able to grow the CLI's buffer without end.
+func TestAnOversizedResponseIsRefusedByTheClient(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "cepm-ipc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	t.Setenv("CEPM_HOME", dir)
+	if err := os.MkdirAll(filepath.Join(dir, "run"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	l, err := Listen(filepath.Join(dir, "run", "cepm.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { l.Close() })
+
+	// A "host" that answers every request with an endless line.
+	go func() {
+		for {
+			conn, err := l.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer conn.Close()
+				blob := []byte(strings.Repeat("x", 64*1024))
+				for {
+					if _, err := conn.Write(blob); err != nil {
+						return
+					}
+				}
+			}()
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if _, err := Ping(ctx); err == nil {
+		t.Fatal("an endless response line must be refused, not buffered")
+	} else if !strings.Contains(err.Error(), "too long") {
+		t.Errorf("the refusal should name the limit, got: %v", err)
 	}
 }

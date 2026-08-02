@@ -81,7 +81,7 @@ one candidate exists).`,
 						Name: e.Name, AbsDir: filepath.Join(repoDir, e.Dir), ID: e.ID,
 					})
 				}
-				return st.Save()
+				return saveState(cmd.OutOrStdout(), st)
 			})
 			if err != nil {
 				return err

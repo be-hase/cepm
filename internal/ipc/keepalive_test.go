@@ -2,6 +2,7 @@ package ipc
 
 import (
 	"context"
+	"net"
 	"strings"
 	"sync"
 	"testing"
@@ -42,33 +43,43 @@ func TestTheClientKeepsWaitingWhileTheHostReportsProgress(t *testing.T) {
 		status string
 		err    error
 	}
-	// No caller deadline — that is the case this is about. A deadline of
-	// the caller's own bounds the whole operation on purpose, progress or
-	// not; what has to survive progress is the *silence* budget.
-	const patience = 300 * time.Millisecond
-	prevPatience := clientPatience
-	t.Cleanup(func() { clientPatience = prevPatience })
-	clientPatience = func(Request) time.Duration { return patience }
+	// Every restart of the patience is observed, so nothing here waits for a
+	// deadline to expire — or sleeps to arrange one.
+	restarts := make(chan time.Duration, 16)
+	prevRestart := restartPatience
+	t.Cleanup(func() { restartPatience = prevRestart })
+	restartPatience = func(conn net.Conn, d time.Duration) {
+		prevRestart(conn, d)
+		restarts <- d
+	}
 
 	done := make(chan result, 1)
 	go func() {
+		// No caller deadline — that is the case this is about. A deadline of
+		// the caller's own bounds the whole operation on purpose, progress
+		// or not; what has to survive progress is the *silence* budget.
 		status, err := Uninstall(context.Background(), "abcdefghijklmnopabcdefghijklmnop")
 		done <- result{status, err}
 	}()
 
 	<-reached
-	// The handler is deliberately held past the client's whole patience.
-	// This is the one thing here that cannot be proven without real time
-	// passing: the claim is about a deadline. Each interim line has to push
-	// that deadline out, so the total wait below (5×) exceeds it several
-	// times over while no single gap comes close.
 	for i := range 5 {
 		select {
 		case tick <- time.Time{}: // "still working"
 		case r := <-done:
 			t.Fatalf("gave up after %d progress line(s), with the host still working: %+v", i, r)
 		}
-		time.Sleep(patience / 3)
+		select {
+		case d := <-restarts:
+			if d != ClientDeadline(Request{Cmd: CmdUninstall}) {
+				t.Errorf("restart %d used %v, want the uninstall budget", i, d)
+			}
+		case r := <-done:
+			t.Fatalf("gave up on progress line %d: %+v", i, r)
+		case <-time.After(30 * time.Second):
+			// Bounds the failure only; the passing path never waits here.
+			t.Fatalf("progress line %d did not restart the patience", i)
+		}
 	}
 	unblock()
 

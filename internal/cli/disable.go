@@ -74,7 +74,7 @@ remove it from Chrome too (Chrome shows its own confirmation dialog).`,
 					e.Disabled = true
 					disabled = append(disabled, *e)
 				}
-				return st.Save()
+				return saveState(cmd.OutOrStdout(), st)
 			})
 			if err != nil {
 				return err
@@ -197,8 +197,12 @@ func performChromeRemoval(cmd *cobra.Command, exts []state.Extension, approved m
 // extension and reports the outcome, returning whether it is gone from Chrome.
 func uninstallViaChrome(ctx context.Context, cmd *cobra.Command, id, name string) bool {
 	out := cmd.OutOrStdout()
-	ctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
-	defer cancel()
+	// Deliberately no deadline. The wait is a person answering Chrome's
+	// dialog, and nothing closes that dialog when a deadline expires — so a
+	// deadline here would only release the update lock while the "Remove"
+	// button is still live, which is the thing the lock is held across. The
+	// host stops waiting when the helper goes quiet, and Ctrl-C reaches the
+	// read (see ipc.watchCancel), so this cannot hang forever.
 	fmt.Fprintf(out, "  Asking Chrome to uninstall %q (confirm in the dialog Chrome shows) ... ", name)
 	status, err := ipc.Uninstall(ctx, id)
 	switch {

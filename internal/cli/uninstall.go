@@ -156,7 +156,7 @@ func newUninstallCmd() *cobra.Command {
 				}
 				delete(st.Repos, name)
 				st.AddOrphans(orphans)
-				return st.Save()
+				return saveState(cmd.OutOrStdout(), st)
 			})
 			if err != nil {
 				return err
