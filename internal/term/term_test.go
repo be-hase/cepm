@@ -1,6 +1,7 @@
 package term
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -101,6 +102,46 @@ func TestHasControl(t *testing.T) {
 	for _, s := range []string{"plain", "ext/sub", "日本語"} {
 		if HasControl(s) {
 			t.Errorf("HasControl(%q) = true", s)
+		}
+	}
+}
+
+// U+2028 and U+2029 are categories Zl/Zp, not Cc, so unicode.IsControl
+// misses them — but terminals and paste targets render them as line breaks,
+// which is enough to forge a line SafeLines never got to prefix.
+func TestUnicodeLineSeparatorsAreDefanged(t *testing.T) {
+	for _, r := range []rune{0x2028, 0x2029} {
+		s := "a" + string(r) + "b"
+		if !HasControl(s) {
+			t.Errorf("HasControl misses U+%04X", r)
+		}
+		if got := Safe(s); strings.ContainsRune(got, r) {
+			t.Errorf("Safe leaves U+%04X intact: %q", r, got)
+		}
+		if got := Strip(s); strings.ContainsRune(got, r) {
+			t.Errorf("Strip leaves U+%04X intact: %q", r, got)
+		}
+		if got := SafeLines(s); strings.ContainsRune(got, r) {
+			t.Errorf("SafeLines leaves U+%04X intact: %q", r, got)
+		}
+	}
+	// And the escape names the right character: two nibbles would print
+	if got, want := Safe("\u2028"), `\u2028`; got != want {
+		t.Errorf("Safe(U+2028) = %q, want %q", got, want)
+	}
+	if got, want := Safe("\u0007"), `\x07`; got != want {
+		t.Errorf("Safe(U+0007) = %q, want %q", got, want)
+	}
+}
+
+// The forgery this prevents, end to end at this layer: a remote-controlled
+// string cannot mint a line that looks like cepm's own output.
+func TestSeparatorsCannotForgeALine(t *testing.T) {
+	banner := "fatal: no access\u2028✔ reloaded evil\u2029Error: forged"
+	got := SafeLines(banner)
+	for _, forged := range []string{"✔ reloaded evil", "Error: forged"} {
+		if regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(forged)).MatchString(got) {
+			t.Errorf("a separator-forged line reached the start of a line:\n%q", got)
 		}
 	}
 }

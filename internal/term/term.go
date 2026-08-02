@@ -32,9 +32,17 @@ func Safe(s string) string {
 		switch {
 		case r == '\t':
 			b.WriteByte(' ')
-		case unicode.IsControl(r):
-			b.WriteString("\\x")
+		case unicode.IsControl(r) || isLineBreaking(r):
 			const hex = "0123456789abcdef"
+			if r > 0xFF {
+				// \x with two nibbles would render U+2028 as "\x28", which
+				// is a different character entirely.
+				b.WriteString("\\u")
+				b.WriteByte(hex[(r>>12)&0xF])
+				b.WriteByte(hex[(r>>8)&0xF])
+			} else {
+				b.WriteString("\\x")
+			}
 			b.WriteByte(hex[(r>>4)&0xF])
 			b.WriteByte(hex[r&0xF])
 		case isBidi(r):
@@ -79,6 +87,15 @@ func isBidi(r rune) bool {
 		(r >= 0x200E && r <= 0x200F) || (r >= 0x202A && r <= 0x202E) || (r >= 0x2066 && r <= 0x2069)
 }
 
+// isLineBreaking reports whether r starts a new line somewhere it will be
+// read. U+2028 and U+2029 are category Zl/Zp rather than Cc, so
+// unicode.IsControl misses them — but terminals, editors and chat clients
+// render them as breaks, which is enough to forge a line that SafeLines
+// never got to prefix.
+func isLineBreaking(r rune) bool {
+	return r == 0x2028 || r == 0x2029
+}
+
 // Strip removes every character Safe would have to escape, for values cepm
 // may rewrite — a manifest name is a label, so dropping the dangerous parts
 // is friendlier than showing escapes. Paths cannot use this: they have to
@@ -89,7 +106,7 @@ func Strip(s string) string {
 		switch {
 		case r == '\t':
 			b.WriteByte(' ')
-		case unicode.IsControl(r) || isBidi(r):
+		case unicode.IsControl(r) || isBidi(r) || isLineBreaking(r):
 			// dropped
 		default:
 			b.WriteRune(r)
@@ -102,7 +119,7 @@ func Strip(s string) string {
 // value cepm will print or pass around.
 func HasControl(s string) bool {
 	for _, r := range s {
-		if unicode.IsControl(r) || isBidi(r) {
+		if unicode.IsControl(r) || isBidi(r) || isLineBreaking(r) {
 			return true
 		}
 	}
