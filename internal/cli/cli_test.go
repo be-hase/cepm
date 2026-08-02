@@ -57,6 +57,13 @@ type fakeHost struct {
 	// is while its "remove from Chrome too?" prompt is being prepared, i.e.
 	// the window in which another cepm can change the state.
 	onList func()
+	// Reload failure modes, for exit-code tests: a host-level error, per-id
+	// error results, an empty result set (every item unanswered), or
+	// not_installed answers.
+	reloadHostError    string
+	failReloads        bool
+	dropReloadResults  bool
+	reloadNotInstalled bool
 }
 
 func startFakeHost(t *testing.T, loaded ...string) *fakeHost {
@@ -127,10 +134,23 @@ func (h *fakeHost) handle(_ context.Context, req ipc.Request) ipc.Response {
 		if _, err := nmhost.AuthorizeReload(req.IDs); err != nil {
 			return ipc.Response{Error: err.Error()}
 		}
+		if h.reloadHostError != "" {
+			return ipc.Response{Error: h.reloadHostError}
+		}
+		if h.dropReloadResults {
+			return ipc.Response{OK: true}
+		}
 		h.reloaded = append(h.reloaded, req.IDs...)
 		results := make([]ipc.ReloadResult, len(req.IDs))
 		for i, id := range req.IDs {
-			results[i] = ipc.ReloadResult{ID: id, Status: ipc.StatusReloaded}
+			status := ipc.StatusReloaded
+			switch {
+			case h.failReloads:
+				status = ipc.StatusError
+			case h.reloadNotInstalled:
+				status = ipc.StatusNotInstalled
+			}
+			results[i] = ipc.ReloadResult{ID: id, Status: status}
 		}
 		return ipc.Response{OK: true, Results: results}
 	case ipc.CmdPing:

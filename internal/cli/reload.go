@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/spf13/cobra"
@@ -53,7 +54,16 @@ reloaded; otherwise pass repository names.`,
 			if skipped > 0 {
 				fmt.Fprintf(cmd.OutOrStdout(), "(%d available extension(s) skipped)\n", skipped)
 			}
-			reloadExtensions(cmd.Context(), cmd.OutOrStdout(), items)
+			// Unlike update — where the pull already succeeded and applies
+			// on the next launch — a reload that reloads nothing has simply
+			// failed, and a script must be able to see that.
+			outcome := reloadExtensions(cmd.Context(), cmd.OutOrStdout(), items)
+			if outcome.HostUnreachable {
+				return errors.New("nothing was reloaded: the cepm host is not reachable (is Chrome running with the helper loaded?)")
+			}
+			if outcome.Failed > 0 {
+				return fmt.Errorf("%d of %d reload(s) failed (see above)", outcome.Failed, len(items))
+			}
 			return nil
 		},
 	}

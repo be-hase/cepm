@@ -43,11 +43,18 @@ func newUpdateCmd() *cobra.Command {
 					items = append(items, reloadItem{ID: c.ID, Name: c.Name, ManifestChanged: c.ManifestChanged})
 				}
 			}
+			var outcome reloadOutcome
 			if len(items) > 0 && !noReload {
-				reloadExtensions(cmd.Context(), out, items)
+				outcome = reloadExtensions(cmd.Context(), out, items)
 			}
 			if failed {
 				return errors.New("some repositories failed to update (see above)")
+			}
+			// An unreachable host stays a success — the pull happened and
+			// applies on the next Chrome launch — but real errors from a
+			// connected host must not exit 0.
+			if outcome.Failed > 0 {
+				return fmt.Errorf("%d reload(s) failed (see above)", outcome.Failed)
 			}
 			return nil
 		},
@@ -108,9 +115,19 @@ type reloadItem struct {
 	ManifestChanged bool
 }
 
-// reloadExtensions asks the native host to reload the given extensions,
-// degrading gracefully when Chrome is not running.
-func reloadExtensions(ctx context.Context, out io.Writer, items []reloadItem) {
+// reloadOutcome is what reloadExtensions achieved, so each command can apply
+// its own exit policy: update treats an unreachable host as "applies on next
+// launch", while a bare cepm reload has then simply failed.
+type reloadOutcome struct {
+	HostUnreachable bool
+	Reloaded        int
+	Failed          int      // transport errors, per-id errors, missing answers
+	NotInstalledIDs []string // for enable: these still need the load ceremony
+}
+
+// reloadExtensions asks the native host to reload the given extensions and
+// reports what happened; it prints but never decides the exit code.
+func reloadExtensions(ctx context.Context, out io.Writer, items []reloadItem) reloadOutcome {
 	ids := make([]string, len(items))
 	for i, it := range items {
 		ids[i] = it.ID
@@ -118,17 +135,18 @@ func reloadExtensions(ctx context.Context, out io.Writer, items []reloadItem) {
 	results, err := ipc.Reload(ctx, ids)
 	if errors.Is(err, ipc.ErrHostNotRunning) {
 		fmt.Fprintf(out, "\nChrome is not running (or the helper is not connected); updates will apply on next launch.\n")
-		return
+		return reloadOutcome{HostUnreachable: true}
 	}
 	if err != nil {
 		fmt.Fprintf(out, "\nReload failed: %v\nExtensions will pick up changes on next Chrome launch, or run: cepm reload\n", err)
-		return
+		return reloadOutcome{Failed: len(items)}
 	}
 	byID := map[string]ipc.ReloadResult{}
 	for _, r := range results {
 		byID[r.ID] = r
 	}
 	fmt.Fprintln(out)
+	var outcome reloadOutcome
 	var manifestPending []string
 	for _, it := range items {
 		name := it.Name
@@ -138,13 +156,16 @@ func reloadExtensions(ctx context.Context, out io.Writer, items []reloadItem) {
 		r, answered := byID[it.ID]
 		switch {
 		case !answered:
+			outcome.Failed++
 			fmt.Fprintf(out, "? %s: no reload result from Chrome; check with cepm doctor\n", name)
 		case r.Status == ipc.StatusReloaded:
+			outcome.Reloaded++
 			fmt.Fprintf(out, "↻ reloaded %s\n", name)
 			if it.ManifestChanged {
 				manifestPending = append(manifestPending, name)
 			}
 		case r.Status == ipc.StatusNotInstalled:
+			outcome.NotInstalledIDs = append(outcome.NotInstalledIDs, it.ID)
 			fmt.Fprintf(out, "  %s is not loaded in Chrome (one-time \"Load unpacked\" still needed)\n", name)
 		case r.Status == ipc.StatusSkippedDisabled:
 			fmt.Fprintf(out, "  %s is turned off in Chrome; left as is\n", name)
@@ -155,6 +176,7 @@ func reloadExtensions(ctx context.Context, out io.Writer, items []reloadItem) {
 		case r.Status == ipc.StatusSkippedNotUnpacked:
 			fmt.Fprintf(out, "  %s is installed from the Web Store, not loaded unpacked; left alone\n", name)
 		default:
+			outcome.Failed++
 			fmt.Fprintf(out, "✘ reload %s failed: %s\n", name, term.Safe(r.Error))
 		}
 	}
@@ -164,4 +186,5 @@ func reloadExtensions(ctx context.Context, out io.Writer, items []reloadItem) {
 		fmt.Fprintf(out, "  time. Restart Chrome (or click Reload in chrome://extensions) to apply\n")
 		fmt.Fprintf(out, "  manifest changes such as new permissions or a version bump.\n")
 	}
+	return outcome
 }

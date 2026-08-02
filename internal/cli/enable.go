@@ -101,6 +101,7 @@ one candidate exists).`,
 			loaded, lerr := ipc.ListChrome(listCtx)
 			cancel()
 			if lerr == nil {
+				byID := map[string]loadTarget{}
 				loadedSet := map[string]bool{}
 				for _, e := range loaded {
 					loadedSet[e.ID] = true
@@ -108,6 +109,7 @@ one candidate exists).`,
 				var items []reloadItem
 				var rest []loadTarget
 				for _, t := range targets {
+					byID[t.ID] = t
 					if loadedSet[t.ID] {
 						items = append(items, reloadItem{ID: t.ID, Name: t.Name})
 					} else {
@@ -115,7 +117,12 @@ one candidate exists).`,
 					}
 				}
 				if len(items) > 0 {
-					reloadExtensions(cmd.Context(), out, items)
+					outcome := reloadExtensions(cmd.Context(), out, items)
+					// Gone from Chrome between the list and the reload: it
+					// still needs the one-time Load unpacked after all.
+					for _, id := range outcome.NotInstalledIDs {
+						rest = append(rest, byID[id])
+					}
 				}
 				targets = rest
 			}
