@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/be-hase/cepm/internal/helperext"
 	"github.com/be-hase/cepm/internal/nmmanifest"
 	"github.com/be-hase/cepm/internal/paths"
 	"github.com/be-hase/cepm/internal/state"
@@ -216,5 +217,42 @@ func TestDoctorFlagsAnIncompatibleHelper(t *testing.T) {
 	out, _ = run(t, "", "doctor")
 	if strings.Contains(out, "older than this host supports") {
 		t.Errorf("doctor flags a compatible helper:\n%s", out)
+	}
+}
+
+// A current marker next to corrupted helper files means Chrome may be
+// running something else entirely under cepm's name; doctor and setup must
+// both notice content, not just the marker.
+func TestDoctorAndSetupNoticeCorruptedHelperFiles(t *testing.T) {
+	startFakeHost(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	if out, err := run(t, "", "setup"); err != nil {
+		t.Fatalf("setup: %v\n%s", err, out)
+	}
+	helperDir, err := paths.HelperDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bg := filepath.Join(helperDir, "background.js")
+	if err := os.WriteFile(bg, []byte("// corrupted\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, _ := run(t, "", "doctor")
+	if !strings.Contains(out, "do not match this binary") {
+		t.Errorf("doctor should flag corrupted helper files:\n%s", out)
+	}
+
+	if out, err := run(t, "", "setup"); err != nil {
+		t.Fatalf("setup after corruption: %v\n%s", err, out)
+	}
+	if !helperext.InstalledMatches(helperDir) {
+		t.Error("setup should regenerate corrupted helper files")
+	}
+	out, _ = run(t, "", "doctor")
+	if strings.Contains(out, "do not match this binary") {
+		t.Errorf("doctor flags a repaired helper:\n%s", out)
 	}
 }

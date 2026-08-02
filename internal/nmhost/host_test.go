@@ -1030,3 +1030,34 @@ func TestHostRefusesAnIncompatibleHelper(t *testing.T) {
 		t.Fatal("the hello never reached the host")
 	})
 }
+
+// A corrupted helper file next to a current version marker must be repaired
+// by the host's refresh, not trusted because the marker looks right.
+func TestMaybeRefreshHelperRepairsCorruptedFiles(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "cepm-host")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	t.Setenv("CEPM_HOME", dir)
+	helperDir := filepath.Join(dir, "helper")
+	if err := helperext.Install(helperDir); err != nil {
+		t.Fatal(err)
+	}
+	bg := filepath.Join(helperDir, "background.js")
+	if err := os.WriteFile(bg, []byte("// corrupted\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	h := &Host{log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	h.maybeRefreshHelper(context.Background())
+	// Independent oracle — reading the bytes, not asking InstalledMatches,
+	// which is itself the function under test's mutation.
+	b, err := os.ReadFile(bg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b) == "// corrupted\n" {
+		t.Error("the refresh should repair corrupted helper files")
+	}
+}

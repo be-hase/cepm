@@ -190,6 +190,13 @@ func checkHelperFiles() []diagnostic {
 		return []diagnostic{{Name: "helper extension", Status: "warn",
 			Detail: fmt.Sprintf("v%s installed, v%s embedded in this binary", v, helperext.Version),
 			Hint:   "run: cepm setup"}}
+	case !helperext.InstalledMatches(helperDir):
+		// A current marker next to files that differ from this binary's:
+		// corrupted or hand-edited — Chrome may be running something else
+		// entirely under cepm's name.
+		return []diagnostic{{Name: "helper extension", Status: "fail",
+			Detail: fmt.Sprintf("files at %s do not match this binary's helper (corrupted or edited)", helperDir),
+			Hint:   "run: cepm setup"}}
 	default:
 		return []diagnostic{{Name: "helper extension", Status: "ok",
 			Detail: fmt.Sprintf("%s (v%s, id %s)", helperDir, v, helperext.ExtensionID())}}

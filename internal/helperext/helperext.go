@@ -3,6 +3,7 @@
 package helperext
 
 import (
+	"bytes"
 	"embed"
 	"encoding/base64"
 	"encoding/json"
@@ -67,11 +68,15 @@ type manifest struct {
 	} `json:"background"`
 }
 
-// Install writes the helper extension files into dir.
-func Install(dir string) error {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
-	}
+// renderFiles produces the exact files this binary installs — the single
+// source both Install and InstalledMatches work from, so "matches" can never
+// drift from "would be written". Order matters: the version marker is what
+// everything else uses to decide whether the helper is up to date, so it
+// comes last and is written only after the files it describes are in place.
+func renderFiles() ([]struct {
+	name    string
+	content []byte
+}, error) {
 	m := manifest{
 		ManifestVersion: 3,
 		Name:            "cepm helper",
@@ -85,24 +90,30 @@ func Install(dir string) error {
 	m.Background.ServiceWorker = "background.js"
 	manifestJSON, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	bg, err := assets.ReadFile("assets/background.js")
 	if err != nil {
-		return err
+		return nil, err
 	}
-	// Order matters: the version marker is what everything else uses to
-	// decide whether the helper is up to date, so it must be written last
-	// and only after the files it describes are in place. (A map would give
-	// Go's randomized iteration order and could leave the marker claiming a
-	// version whose files failed to write.)
-	files := []struct {
+	return []struct {
 		name    string
 		content []byte
 	}{
 		{"manifest.json", append(manifestJSON, '\n')},
 		{"background.js", bg},
 		{versionMarker, []byte(Version + "\n")},
+	}, nil
+}
+
+// Install writes the helper extension files into dir.
+func Install(dir string) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	files, err := renderFiles()
+	if err != nil {
+		return err
 	}
 	for _, f := range files {
 		if err := writeAtomic(filepath.Join(dir, f.name), f.content); err != nil {
@@ -110,6 +121,23 @@ func Install(dir string) error {
 		}
 	}
 	return nil
+}
+
+// InstalledMatches reports whether every helper file at dir is byte-for-byte
+// what this binary would install. The version marker alone is not evidence:
+// it says nothing about a truncated or hand-edited file sitting next to it.
+func InstalledMatches(dir string) bool {
+	files, err := renderFiles()
+	if err != nil {
+		return false
+	}
+	for _, f := range files {
+		got, err := os.ReadFile(filepath.Join(dir, f.name))
+		if err != nil || !bytes.Equal(got, f.content) {
+			return false
+		}
+	}
+	return true
 }
 
 // writeAtomic replaces path in one step, so Chrome never observes a

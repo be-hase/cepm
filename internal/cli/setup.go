@@ -54,7 +54,9 @@ func runSetup(cmd *cobra.Command, variant string, force bool) error {
 	}
 
 	installedVersion := helperext.InstalledVersion(helperDir)
-	helperChanged := force || installedVersion != helperext.Version
+	// Content, not just the marker: a truncated or hand-edited helper file
+	// next to a current marker used to read as "up to date".
+	helperChanged := force || installedVersion != helperext.Version || !helperext.InstalledMatches(helperDir)
 	if helperChanged {
 		if err := helperext.Install(helperDir); err != nil {
 			return fmt.Errorf("install helper extension: %w", err)

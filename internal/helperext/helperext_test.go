@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -56,5 +57,49 @@ func TestInstall(t *testing.T) {
 	}
 	if v := InstalledVersion(dir); v != Version {
 		t.Errorf("InstalledVersion = %q, want %q", v, Version)
+	}
+}
+
+// The version marker alone is not evidence: a truncated or hand-edited file
+// next to a current marker must read as "does not match".
+func TestInstalledMatchesDetectsCorruption(t *testing.T) {
+	dir := t.TempDir()
+	if err := Install(dir); err != nil {
+		t.Fatal(err)
+	}
+	if !InstalledMatches(dir) {
+		t.Fatal("a fresh install must match")
+	}
+
+	bg := filepath.Join(dir, "background.js")
+	orig, err := os.ReadFile(bg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(bg, []byte("// not the helper\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if InstalledMatches(dir) {
+		t.Error("a corrupted (non-empty) background.js must not match")
+	}
+	if err := os.WriteFile(bg, orig, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// And a manifest whose permissions were edited.
+	mf := filepath.Join(dir, "manifest.json")
+	data, err := os.ReadFile(mf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	edited := strings.Replace(string(data), `"storage"`, `"tabs"`, 1)
+	if edited == string(data) {
+		t.Fatal("fixture missed: manifest should mention storage")
+	}
+	if err := os.WriteFile(mf, []byte(edited), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if InstalledMatches(dir) {
+		t.Error("an edited manifest must not match")
 	}
 }

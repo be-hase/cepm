@@ -515,7 +515,9 @@ func (h *Host) maybeRefreshHelper(ctx context.Context) {
 		return
 	}
 	installed := helperext.InstalledVersion(dir)
-	if installed == helperext.Version {
+	// Content, not just the marker: a corrupted file next to a current
+	// marker must be repaired, not trusted.
+	if installed == helperext.Version && helperext.InstalledMatches(dir) {
 		h.helperRefreshed.Store(true)
 		return
 	}
