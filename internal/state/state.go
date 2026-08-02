@@ -1,7 +1,8 @@
 // Package state persists cepm's machine-managed state (~/.cepm/state.json).
 //
 // Writers must hold the update lock (see internal/updater) so that the CLI
-// and the native host never race; Save itself is atomic (temp file + rename).
+// and the native host never race; Save itself is atomic and durable (temp
+// file + fsync + rename + directory fsync).
 //
 // # Trust
 //
@@ -349,11 +350,6 @@ func (s *State) DuplicateLiveID() (id string, a, b ExtRef) {
 	return "", ExtRef{}, ExtRef{}
 }
 
-// Validate reports a state that cepm must not act on. No cepm writes such a
-// state (Save refuses), so on disk it means corruption or a hand edit — and
-// finding that out only at save time would be too late: by then a command
-// may have removed something from Chrome. This is an integrity check, not an
-// authorization boundary; see the trust note on the package.
 // extIDRe is Chrome's extension id alphabet: 32 characters, 'a' through 'p'.
 var extIDRe = regexp.MustCompile(`^[a-p]{32}$`)
 
@@ -362,6 +358,11 @@ var extIDRe = regexp.MustCompile(`^[a-p]{32}$`)
 // like "--output=/path" would be read as an option, not a revision.
 var headRe = regexp.MustCompile(`^([0-9a-f]{40}|[0-9a-f]{64})$`)
 
+// Validate reports a state that cepm must not act on. No cepm writes such a
+// state (Save refuses), so on disk it means corruption or a hand edit — and
+// finding that out only at save time would be too late: by then a command
+// may have removed something from Chrome. This is an integrity check, not an
+// authorization boundary; see the trust note on the package.
 func (s *State) Validate() error {
 	if id, a, b := s.DuplicateLiveID(); id != "" {
 		return fmt.Errorf("%s and %s both claim extension id %s "+
@@ -504,7 +505,8 @@ func (s *State) save() error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	// 0700 like paths.EnsureLayout: nothing under ~/.cepm is for other users.
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
 	data, err := json.MarshalIndent(s, "", "  ")
@@ -520,8 +522,24 @@ func (s *State) save() error {
 		tmp.Close()
 		return err
 	}
+	// Sync before the rename: without it a crash can commit the rename to
+	// disk ahead of the data blocks, replacing a good state.json with a
+	// truncated one that only "cepm reset" recovers from. The directory is
+	// synced too so the rename itself survives the crash.
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmp.Name(), path)
+	if err := os.Rename(tmp.Name(), path); err != nil {
+		return err
+	}
+	dir, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return dir.Sync()
 }

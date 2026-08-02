@@ -164,9 +164,11 @@ func TestStaleBookkeeping(t *testing.T) {
 }
 
 // The file records which repositories a background process will pull and
-// which extensions it may touch, so keep it owner-only.
+// which extensions it may touch, so keep it owner-only — including the
+// directory when Save is the one creating it (EnsureLayout usually does,
+// but a writer must not depend on having gone through it).
 func TestSaveIsOwnerOnly(t *testing.T) {
-	home := t.TempDir()
+	home := filepath.Join(t.TempDir(), "cepm")
 	t.Setenv("CEPM_HOME", home)
 	if err := New().Save(); err != nil {
 		t.Fatal(err)
@@ -177,6 +179,13 @@ func TestSaveIsOwnerOnly(t *testing.T) {
 	}
 	if perm := st.Mode().Perm(); perm&0o077 != 0 {
 		t.Errorf("state.json mode = %o, want no group/other access", perm)
+	}
+	dir, err := os.Stat(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := dir.Mode().Perm(); perm&0o077 != 0 {
+		t.Errorf("state dir mode = %o, want no group/other access", perm)
 	}
 }
 
