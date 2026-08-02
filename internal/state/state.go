@@ -264,11 +264,10 @@ func (s *State) sanitizeNames() {
 // passing (see AGENTS.md). Versions 1–5 were never released and stay
 // unreadable on purpose.
 //
-// Version is the state schema version this build writes and the only one it
-// reads. Every change to what is persisted raises it: a mismatched binary
-// would silently drop fields it does not know on its next write, so Load
-// refuses anything else instead. There are no migrations — pre-release
-// development builds are the only writers so far.
+// Version is the state schema version this build writes. Every change to
+// what is persisted raises it: a mismatched binary would silently drop
+// fields it does not know on its next write, so Load refuses anything newer
+// outright, and anything older it has no migration for.
 const Version = 6
 
 var repoNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)

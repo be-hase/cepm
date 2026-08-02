@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -307,46 +308,54 @@ func TestVersion6BaselineFixtureLoads(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the v6 baseline must load and validate: %v", err)
 	}
-	if st.Version != 6 {
-		t.Errorf("version = %d, want 6", st.Version)
-	}
 
-	tools := st.Repos["tools"]
-	if tools == nil {
-		t.Fatal("repo tools missing")
+	mustTime := func(s string) time.Time {
+		tm, err := time.Parse(time.RFC3339, s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return tm
 	}
-	if tools.URL != "https://git.example.com/team/tools.git" || tools.Track != TrackBranch ||
-		tools.Branch != "main" || tools.Head != strings.Repeat("a", 40) {
-		t.Errorf("tools fields not preserved: %+v", tools)
+	// The whole persisted shape, compared exactly: a future migration that
+	// drops or rewrites any v6 field fails here, not at a user's machine.
+	want := &State{
+		Version: 6,
+		Repos: map[string]*Repo{
+			"tools": {
+				URL: "https://git.example.com/team/tools.git", Track: TrackBranch, Branch: "main",
+				Head:      strings.Repeat("a", 40),
+				LastPull:  mustTime("2026-08-01T12:00:00Z"),
+				LastError: "fetch: connection timed out",
+				Extensions: []Extension{
+					{Dir: "ext/alpha", Name: "Alpha", ID: "jnndgchnmfmbidammmghalgbfcogokio", Key: "Zml4dHVyZS1hbHBoYQ=="},
+					{Dir: "ext/beta", Name: "Beta", ID: "iidiaccbihdcdlmomgiagchjkapjlmal", Key: "Zml4dHVyZS1iZXRh", Disabled: true},
+				},
+				Stale: []StaleExtension{
+					{ID: "abcdefghijklmnopabcdefghijklmnop", Name: "Old Widget", Reason: "removed"},
+					{ID: "bacdefghijklmnopabcdefghijklmnop", Name: "Moved Widget", Reason: "renamed", NewDir: "ext/alpha"},
+				},
+			},
+			"release": {
+				URL: "https://git.example.com/team/release.git", Track: TrackTag,
+				TagPattern: "v*", Tag: "v1.2.0", Prerelease: true,
+				Head:     strings.Repeat("b", 40),
+				LastPull: mustTime("2026-08-01T12:05:00Z"),
+				Extensions: []Extension{
+					{Dir: ".", Name: "Release Tool", ID: "bbijpodelfmiddmhfjokfbhghibgbhno", Key: "Zml4dHVyZS1nYW1tYQ=="},
+				},
+			},
+		},
+		Orphans: []StaleExtension{
+			{ID: "ponmlkjihgfedcbaponmlkjihgfedcba", Name: "Uninstalled Tool", Reason: "uninstalled"},
+		},
 	}
-	if tools.LastError != "fetch: connection timed out" || tools.LastPull.IsZero() {
-		t.Errorf("tools history not preserved: lastError=%q lastPull=%v", tools.LastError, tools.LastPull)
-	}
-	alpha := tools.FindExtension("ext/alpha")
-	if alpha == nil || alpha.ID != "jnndgchnmfmbidammmghalgbfcogokio" || alpha.Name != "Alpha" || !alpha.Enabled() {
-		t.Errorf("alpha not preserved: %+v", alpha)
-	}
-	beta := tools.FindExtension("ext/beta")
-	if beta == nil || beta.ID != "iidiaccbihdcdlmomgiagchjkapjlmal" || beta.Enabled() {
-		t.Errorf("beta not preserved (must stay disabled): %+v", beta)
-	}
-	if len(tools.Stale) != 1 || tools.Stale[0].ID != "abcdefghijklmnopabcdefghijklmnop" || tools.Stale[0].Reason != "removed" {
-		t.Errorf("stale record not preserved: %+v", tools.Stale)
-	}
-
-	release := st.Repos["release"]
-	if release == nil {
-		t.Fatal("repo release missing")
-	}
-	if release.Track != TrackTag || release.TagPattern != "v*" || release.Tag != "v1.2.0" || !release.Prerelease {
-		t.Errorf("release tag-mode fields not preserved: %+v", release)
-	}
-	if e := release.FindExtension("."); e == nil || e.ID != "bbijpodelfmiddmhfjokfbhghibgbhno" {
-		t.Errorf("root extension not preserved: %+v", e)
-	}
-
-	if len(st.Orphans) != 1 || st.Orphans[0].ID != "ponmlkjihgfedcbaponmlkjihgfedcba" {
-		t.Errorf("orphan not preserved: %+v", st.Orphans)
+	if !reflect.DeepEqual(st, want) {
+		t.Errorf("the loaded v6 baseline differs from the fixture contract:\ngot:  %#v\nwant: %#v", st, want)
+		for name := range want.Repos {
+			if !reflect.DeepEqual(st.Repos[name], want.Repos[name]) {
+				t.Errorf("repo %q:\ngot:  %+v\nwant: %+v", name, st.Repos[name], want.Repos[name])
+			}
+		}
 	}
 }
 
@@ -359,7 +368,7 @@ func TestLoadRefusesANewerStateVersion(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err := Load()
-	if err == nil || !strings.Contains(err.Error(), "newer") {
+	if err == nil || !strings.Contains(err.Error(), "newer") || !strings.Contains(err.Error(), "upgrade") {
 		t.Fatalf("a newer state version must be refused with upgrade advice, got: %v", err)
 	}
 }

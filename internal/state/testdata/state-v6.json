@@ -28,6 +28,12 @@
           "id": "abcdefghijklmnopabcdefghijklmnop",
           "name": "Old Widget",
           "reason": "removed"
+        },
+        {
+          "id": "bacdefghijklmnopabcdefghijklmnop",
+          "name": "Moved Widget",
+          "reason": "renamed",
+          "newDir": "ext/alpha"
         }
       ]
     },
