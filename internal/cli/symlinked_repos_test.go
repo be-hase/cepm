@@ -6,9 +6,35 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/be-hase/cepm/internal/assist"
 	"github.com/be-hase/cepm/internal/paths"
 	"github.com/be-hase/cepm/internal/state"
 )
+
+// localOriginWithTwoExtensions builds a repository that makes install stop
+// at the selection prompt — the window a concurrent reset slips into.
+func localOriginWithTwoExtensions(t *testing.T) (originPath string) {
+	t.Helper()
+	src := t.TempDir()
+	origin := filepath.Join(src, "origin.git")
+	work := filepath.Join(src, "work")
+	gitCmd(t, src, "init", "-q", "--bare", "--initial-branch=main", origin)
+	gitCmd(t, src, "clone", "-q", origin, work)
+	gitCmd(t, work, "checkout", "-q", "-b", "main")
+	for _, name := range []string{"one", "two"} {
+		if err := os.MkdirAll(filepath.Join(work, name), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		manifest := `{"manifest_version":3,"name":"` + name + `","version":"1.0"}`
+		if err := os.WriteFile(filepath.Join(work, name, "manifest.json"), []byte(manifest), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gitCmd(t, work, "add", "-A")
+	gitCmd(t, work, "commit", "-qm", "init")
+	gitCmd(t, work, "push", "-q", "origin", "main")
+	return origin
+}
 
 // symlinkedRepos points ~/.cepm/repos at a directory elsewhere — the layout
 // someone sets up to keep clones off the boot volume — and returns where it
@@ -64,12 +90,139 @@ func TestResetMovesTheSymlinkNotWhatItPointsAt(t *testing.T) {
 	}
 }
 
-// The final step of an install is one rename from staging to repos/<name>,
-// and staging next to repos/ makes that rename cross devices whenever repos/
-// points at another volume — EXDEV, so install fails outright for that whole
-// layout. A second filesystem cannot be conjured in a test, so the decision
-// is forced here instead; what it proves is that the fallback path works and
-// leaves nothing behind.
+// The staging path is logical, and repos/ can stop meaning what it meant:
+// a reset during the selection prompt replaces the symlink. The cleanup
+// would then delete a directory on the new side and leave the real staging
+// — a full clone — behind on a volume nobody looks at. Failing the install
+// is the accepted trade; leaking the clone is not.
+func TestAFailedInstallCleansUpTheStagingItReallyMade(t *testing.T) {
+	interactive(t)
+	startFakeHost(t)
+	home, target := symlinkedRepos(t)
+	prev := sameFilesystem
+	t.Cleanup(func() { sameFilesystem = prev })
+	sameFilesystem = func(string, string) bool { return false } // stage inside repos/
+
+	origin := localOriginWithTwoExtensions(t)
+
+	// At the selection prompt, re-point repos/ somewhere else, as a reset
+	// moving it away would.
+	elsewhere, err := os.MkdirTemp("/tmp", "cepm-elsewhere")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(elsewhere) })
+	swapped := false
+	origIsTTY := assist.IsTTY
+	t.Cleanup(func() { assist.IsTTY = origIsTTY })
+	assist.IsTTY = func() bool {
+		if !swapped {
+			swapped = true
+			link := filepath.Join(home, "repos")
+			if err := os.Remove(link); err != nil {
+				t.Error(err)
+			}
+			if err := os.Symlink(elsewhere, link); err != nil {
+				t.Error(err)
+			}
+		}
+		return true
+	}
+
+	// Whether this install succeeds or fails is not the claim; what it
+	// leaves behind is.
+	_, _ = run(t, "1\n", "install", origin, "--name", "tools")
+	if !swapped {
+		t.Fatal("the test never reached the selection prompt")
+	}
+	entries, err := os.ReadDir(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".install-") {
+			t.Errorf("the real staging was left behind: %s", filepath.Join(target, e.Name()))
+		}
+	}
+}
+
+// sameFilesystem has to actually compare devices, not just answer "yes".
+// The staging decision is proved with the function replaced, so an
+// implementation that lost its comparison would still pass that — and put
+// the staging where the final rename cannot reach, for every user with
+// repos/ on another volume.
+func TestSameFilesystemSeesTwoDevicesApart(t *testing.T) {
+	// Somewhere on a different filesystem from /tmp. Not every machine has
+	// one, so this contributes coverage where it can rather than requiring
+	// a particular layout.
+	var other string
+	for _, candidate := range []string{"/dev/shm", "/run/user", "/System/Volumes/Data", "/private/var/vm"} {
+		if _, err := os.Stat(candidate); err == nil && !sameFilesystem("/tmp", candidate) {
+			other = candidate
+			break
+		}
+	}
+	if other == "" {
+		t.Skip("no second filesystem to compare against on this machine")
+	}
+	if sameFilesystem("/tmp", other) {
+		t.Errorf("%s and /tmp are on different devices but compared equal", other)
+	}
+	if !sameFilesystem("/tmp", "/tmp") {
+		t.Error("a directory must be on the same filesystem as itself")
+	}
+}
+
+// A relative symlink means something different once it has been moved:
+// "repos -> ../repo-store" lands in backup-xxx/ still saying "../", which
+// now points inside ~/.cepm at nothing. The recovery reset prints for a
+// broken state — reading each clone's origin URL out of the backup — is
+// exactly what stops working.
+func TestResetKeepsARelativeSymlinkPointingWhereItDid(t *testing.T) {
+	interactive(t)
+	home, err := os.MkdirTemp("/tmp", "cepm-home")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(home) })
+	t.Setenv("CEPM_HOME", home)
+	// A sibling of the home, reached relatively — the shape someone gets
+	// from "ln -s ../repo-store repos".
+	target := filepath.Join(filepath.Dir(home), filepath.Base(home)+"-store")
+	if err := os.MkdirAll(filepath.Join(target, "tools"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(target) })
+	if err := os.Symlink(filepath.Join("..", filepath.Base(target)), filepath.Join(home, "repos")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	seedRepo(t, "tools", state.Extension{Dir: "ext", Name: "Ext", ID: idA, Key: keyA})
+
+	out, err := run(t, "yes\n", "reset")
+	if err != nil {
+		t.Fatalf("reset: %v\n%s", err, out)
+	}
+
+	entries, err := os.ReadDir(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var backup string
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "backup-") {
+			backup = filepath.Join(home, e.Name())
+		}
+	}
+	if backup == "" {
+		t.Fatal("fixture: reset should have made a backup")
+	}
+	// The clones have to still be reachable through the moved link, which
+	// is the whole promise of the backup.
+	if _, err := os.Stat(filepath.Join(backup, "repos", "tools")); err != nil {
+		t.Errorf("the backup no longer reaches the clones: %v", err)
+	}
+}
+
 // Where the staging goes is the whole decision, so assert it directly: an
 // end-to-end install passes either way on a single filesystem, which is all
 // a test machine has.
@@ -87,6 +240,9 @@ func TestStagingFollowsReposOntoItsOwnFilesystem(t *testing.T) {
 	}
 }
 
+// The end-to-end counterpart: the fallback staging really does produce a
+// working install and leaves nothing behind. A second filesystem cannot be
+// conjured in a test, so the decision is forced rather than arranged.
 func TestInstallWorksWhenReposIsOnAnotherFilesystem(t *testing.T) {
 	startFakeHost(t)
 	_, target := symlinkedRepos(t)

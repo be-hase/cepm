@@ -21,6 +21,32 @@ import (
 // provoke that through the filesystem.
 var renameForBackup = os.Rename
 
+// absolutizeSymlink rewrites path, when it is a symlink with a relative
+// target, to point at the same place by absolute path — so that moving it
+// somewhere else does not silently change what it means. Anything that is
+// not a relative symlink is left exactly as it is.
+func absolutizeSymlink(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil || info.Mode()&os.ModeSymlink == 0 {
+		return nil // not a symlink, or gone; the move itself will report it
+	}
+	target, err := os.Readlink(path)
+	if err != nil || filepath.IsAbs(target) {
+		return nil
+	}
+	absolute := filepath.Join(filepath.Dir(path), target)
+	// Replace, not edit: symlink targets cannot be rewritten in place.
+	tmp := path + ".cepm-relink"
+	if err := os.Symlink(absolute, tmp); err != nil {
+		return fmt.Errorf("rewrite %s to an absolute target: %w", path, err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("rewrite %s to an absolute target: %w", path, err)
+	}
+	return nil
+}
+
 // newResetCmd moves the state and the clones out of the way so cepm can
 // start over. It exists for the one situation cepm refuses to handle
 // automatically: a state file it cannot use (corrupted, hand-edited, or from
@@ -116,6 +142,16 @@ backup, and the clones stay intact until you remove the backup yourself.`,
 				}
 				for _, src := range sources {
 					dst := filepath.Join(backup, filepath.Base(src))
+					// A symlink carries its target with it, and a relative
+					// one means something different from a directory
+					// deeper down: "repos -> ../repo-store" moved into
+					// backup-xxx/ would point at ~/.cepm/repo-store, which
+					// is nothing. The recovery this command prints —
+					// "git -C <backup>/repos/<name> remote get-url" — then
+					// fails on the one path a broken state leaves.
+					if err := absolutizeSymlink(src); err != nil {
+						return err
+					}
 					if err := renameForBackup(src, dst); err != nil {
 						// All or nothing: a half-moved world — metadata in
 						// the backup, clones still active — is exactly the

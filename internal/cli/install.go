@@ -121,6 +121,15 @@ func runInstall(cmd *cobra.Command, url string, flags installFlags) error {
 	if err != nil {
 		return err
 	}
+	// Pin where the staging really is, now, while repos/ still means what it
+	// meant. A reset landing during the selection prompt replaces that
+	// symlink, and the logical path would then name a directory on the other
+	// side of it: the rename would fail (which is the accepted trade) and
+	// the cleanup would delete the wrong place, leaving a full clone behind
+	// on the volume nobody looks at.
+	if resolved, rerr := filepath.EvalSymlinks(staging); rerr == nil {
+		staging = resolved
+	}
 	defer os.RemoveAll(staging)
 	stagingClone := filepath.Join(staging, name)
 

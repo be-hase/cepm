@@ -86,6 +86,35 @@ func TestARestartCannotUndoACancellation(t *testing.T) {
 	}
 }
 
+// The sequential test above proves the flag is consulted; it does not prove
+// the two are ordered against each other. They run on different goroutines
+// in production — the watcher cancels while exchange restarts — so dropping
+// the mutex would put the read back to sleep for a caller who has left.
+// Under -race, which CI runs, that regression shows up here as a data race
+// on the flag rather than as a rare hang in the field.
+func TestCancelAndRestartAreOrderedAgainstEachOther(t *testing.T) {
+	prev := restartPatience
+	t.Cleanup(func() { restartPatience = prev })
+	restartPatience = func(net.Conn, time.Duration) {}
+
+	a, b := net.Pipe()
+	t.Cleanup(func() { a.Close(); b.Close() })
+
+	for range 50 {
+		d := &deadline{conn: a}
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() { defer wg.Done(); <-start; d.cancel() }()
+		go func() { defer wg.Done(); <-start; d.restart(time.Hour) }()
+		close(start)
+		wg.Wait()
+		if !d.cancelled {
+			t.Fatal("a cancellation must never be forgotten")
+		}
+	}
+}
+
 // Both sides read until a newline. A peer that never sends one would
 // otherwise make the other grow a buffer for as long as it keeps writing,
 // which for the host means being killed by a runaway on its own socket.
