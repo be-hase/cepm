@@ -58,6 +58,34 @@ func TestCancellingStopsAWaitAlreadyInProgress(t *testing.T) {
 	unblock()
 }
 
+// Two things move the read deadline — a progress line pushes it out, a
+// cancelled caller pulls it into the past — and the last SetDeadline wins.
+// Checking ctx before extending only narrows that window; the ordering has
+// to be settled where both changes are made, or a progress line arriving
+// alongside a Ctrl-C puts the read back to sleep for a caller who has left.
+func TestARestartCannotUndoACancellation(t *testing.T) {
+	restarts := make(chan struct{}, 4)
+	prev := restartPatience
+	t.Cleanup(func() { restartPatience = prev })
+	restartPatience = func(net.Conn, time.Duration) { restarts <- struct{}{} }
+
+	a, b := net.Pipe()
+	t.Cleanup(func() { a.Close(); b.Close() })
+	d := &deadline{conn: a}
+
+	d.restart(time.Hour)
+	if len(restarts) != 1 {
+		t.Fatalf("fixture: a restart before any cancellation should happen, got %d", len(restarts))
+	}
+	<-restarts
+
+	d.cancel()
+	d.restart(time.Hour) // the progress line that lost the race
+	if len(restarts) != 0 {
+		t.Error("a cancelled read must not be given another budget of patience")
+	}
+}
+
 // Both sides read until a newline. A peer that never sends one would
 // otherwise make the other grow a buffer for as long as it keeps writing,
 // which for the host means being killed by a runaway on its own socket.

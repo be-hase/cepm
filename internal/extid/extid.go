@@ -12,17 +12,28 @@ import (
 	"encoding/base64"
 	"fmt"
 	"path/filepath"
+
+	"github.com/be-hase/cepm/internal/paths"
 )
 
 // FromPath returns the ID Chrome assigns to an unpacked extension loaded from
-// absPath. The path must be absolute and must match exactly what Chrome sees:
-// no trailing slash, and symlinks already resolved — Chrome resolves them
-// before hashing, so callers canonicalize with paths.Canonical first.
+// absPath.
+//
+// The path is canonicalized here rather than by callers. Chrome resolves
+// symlinks before it hashes, so an unresolved path yields an id no extension
+// will ever have — and nothing downstream can notice, because Validate
+// re-derives ids the same way and agrees with itself. Leaving that to every call
+// site is how it went wrong twice: the path a caller has is usually the one
+// it needs for the filesystem, which is the unresolved one.
 func FromPath(absPath string) (string, error) {
 	if !filepath.IsAbs(absPath) {
 		return "", fmt.Errorf("extension path must be absolute: %q", absPath)
 	}
-	return fromBytes([]byte(filepath.Clean(absPath))), nil
+	canonical, err := paths.Canonical(absPath)
+	if err != nil {
+		return "", err
+	}
+	return fromBytes([]byte(canonical)), nil
 }
 
 // FromPublicKey returns the ID of an extension whose manifest embeds the given

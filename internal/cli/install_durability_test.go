@@ -43,6 +43,32 @@ func TestInstallKeepsTheCloneWhenOnlyTheFlushFailed(t *testing.T) {
 	}
 }
 
+// Uninstall is the one caller that destroys something after saving, and for
+// it "the new state is live" is not enough. If the flush never lands, a
+// crash brings the registration back — with the clone already deleted, and
+// no way to tell the state to forget it again.
+func TestUninstallRefusesToDeleteTheCloneUntilTheSaveIsDurable(t *testing.T) {
+	interactive(t)
+	startFakeHost(t, idA)
+	seedRepo(t, "tools", state.Extension{Dir: "ext", Name: "Ext", ID: idA, Key: keyA})
+	dir, err := updaterRepoDir("tools")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(state.FailDurability())
+
+	out, err := run(t, "n\n", "uninstall", "tools")
+	if err == nil {
+		t.Fatalf("uninstall must not proceed on a save it cannot make durable:\n%s", out)
+	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Errorf("the clone must survive: %v", err)
+	}
+}
+
 // localOrigin builds a bare repository with one extension in ext/ and
 // returns its path, so an install can run for real without a network.
 func localOrigin(t *testing.T, manifest string) (originPath string) {

@@ -156,7 +156,12 @@ func newUninstallCmd() *cobra.Command {
 				}
 				delete(st.Repos, name)
 				st.AddOrphans(orphans)
-				return saveState(cmd.OutOrStdout(), st)
+				// Deliberately not saveState: this is the one caller that
+				// destroys something afterwards. "The new state is live"
+				// is not enough when the next step deletes the clone — a
+				// crash before the flush lands brings the registration
+				// back with its files already gone.
+				return st.Save()
 			})
 			if err != nil {
 				return err

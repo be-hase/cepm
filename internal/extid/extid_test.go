@@ -2,6 +2,8 @@ package extid
 
 import (
 	"encoding/base64"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -10,12 +12,16 @@ func TestFromPath(t *testing.T) {
 	//   python3 -c 'import hashlib; h = hashlib.sha256(path.encode()).hexdigest()[:32];
 	//               print("".join(chr(ord("a") + int(c, 16)) for c in h))'
 	// The algorithm matches Chrome's crx_file::id_util::GenerateIdForPath.
+	// Paths that exist nowhere, so canonicalization has nothing to resolve
+	// and the hash is of exactly what is written here. (/tmp would not do:
+	// on macOS it is a symlink to /private/tmp, and FromPath resolves it —
+	// which is the point of TestFromPathResolvesSymlinks below.)
 	tests := []struct {
 		path string
 		want string
 	}{
 		{"/Users/alice/.cepm/repos/mytools/ext", "padbcojcikcnemkfdlfdmpndcijbikii"},
-		{"/tmp/x", "cofgkkdgpfdilddleipdhopfbofennlf"},
+		{"/nonexistent-for-tests/x", "obohbcmeoainnibkialpibpglhnhpibn"},
 	}
 	for _, tt := range tests {
 		got, err := FromPath(tt.path)
@@ -35,10 +41,39 @@ func TestFromPathRejectsRelative(t *testing.T) {
 }
 
 func TestFromPathCleansTrailingSlash(t *testing.T) {
-	a, _ := FromPath("/tmp/x")
-	b, _ := FromPath("/tmp/x/")
+	a, _ := FromPath("/nonexistent-for-tests/x")
+	b, _ := FromPath("/nonexistent-for-tests/x/")
 	if a != b {
 		t.Errorf("trailing slash changed ID: %q vs %q", a, b)
+	}
+}
+
+// Chrome resolves symlinks before it hashes, so this has to as well — and it
+// has to happen here rather than at the call sites. Twice now a caller has
+// passed the path it needed for the filesystem, which is the unresolved one,
+// and the resulting id was wrong in a way nothing downstream can detect:
+// state.Validate re-derives ids the same way and so agrees with itself.
+func TestFromPathResolvesSymlinks(t *testing.T) {
+	real := t.TempDir()
+	resolved, err := filepath.EvalSymlinks(real)
+	if err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	viaLink, err := FromPath(filepath.Join(link, "ext"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	viaReal, err := FromPath(filepath.Join(resolved, "ext"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if viaLink != viaReal {
+		t.Errorf("id via a symlink = %s, want the resolved %s", viaLink, viaReal)
 	}
 }
 

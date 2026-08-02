@@ -96,13 +96,28 @@ func runInstall(cmd *cobra.Command, url string, flags installFlags) error {
 	// selection — happens in a staging directory. The final path only comes
 	// into existence inside the lock, together with the state entry: a
 	// concurrent reset (which moves repos/ away wholesale) can then never
-	// separate a registered repository from its clone. Same filesystem as
-	// repos/, so the final step is one atomic rename.
+	// separate a registered repository from its clone.
+	//
+	// Staged beside repos/, which is normally the same filesystem, so the
+	// last step is one atomic rename — and a reset that moves repos/ away
+	// while install waits at the prompt leaves the staging untouched.
+	//
+	// Unless repos/ is a symlink to another volume. A rename across devices
+	// fails outright (EXDEV), so for that layout the staging goes inside
+	// repos/ instead: install working at all is worth more than surviving a
+	// concurrent reset, which for that layout it never did.
 	home, err := paths.CepmDir()
 	if err != nil {
 		return err
 	}
-	staging, err := os.MkdirTemp(home, ".install-")
+	reposDir, err := paths.ReposDir()
+	if err != nil {
+		return err
+	}
+	if err := paths.EnsureLayout(); err != nil {
+		return err
+	}
+	staging, err := os.MkdirTemp(stagingParentFor(home, reposDir), ".install-")
 	if err != nil {
 		return err
 	}
@@ -346,6 +361,40 @@ func destFree(st *state.State, name, dir string) error {
 	}
 	return fmt.Errorf("%s exists but no repository is registered for it — likely an interrupted install; "+
 		"remove it (rm -rf %s) or run cepm reset, then retry", dir, term.Quote(dir))
+}
+
+// stagingParentFor picks where an install stages its clone: beside repos/
+// normally, inside it when repos/ lives on another filesystem. See the note
+// at the call site for what each choice costs.
+func stagingParentFor(home, reposDir string) string {
+	if sameFilesystem(home, reposDir) {
+		return home
+	}
+	return reposDir
+}
+
+// sameFilesystem reports whether a rename between the two directories can
+// work. It answers "yes" when it cannot tell: the caller's fallback trades
+// away a guarantee, and guessing that away on a failed stat would be worse
+// than the rename failing loudly.
+var sameFilesystem = func(a, b string) bool {
+	fa, err := os.Stat(a)
+	if err != nil {
+		return true
+	}
+	fb, err := os.Stat(b)
+	if err != nil {
+		return true
+	}
+	da, ok := deviceOf(fa)
+	if !ok {
+		return true
+	}
+	db, ok := deviceOf(fb)
+	if !ok {
+		return true
+	}
+	return da == db
 }
 
 // undoRename moves the clone back to staging after a failed registration.

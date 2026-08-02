@@ -68,29 +68,30 @@ func TestCepmDirIsResolvedBeforeAnyIDIsDerived(t *testing.T) {
 	}
 }
 
-// Resolving the home alone is not enough. repos/ is exactly the directory
-// someone moves to another volume and leaves a symlink behind, and it is the
-// one every path-derived id is built from — Chrome would hash the resolved
-// path, cepm the symlinked one, and Validate would agree with itself forever
-// because it derives ids the same wrong way.
-func TestASymlinkInsideTheHomeIsResolvedToo(t *testing.T) {
+// The paths under the home are the ones cepm operates on as filesystem
+// entries — reset renames repos/ into a backup, uninstall deletes a clone —
+// and there a symlink is the thing to act on, not something to see through.
+// Resolving would make reset move the target and leave the link dangling, or
+// fail outright across devices. Extension ids need the opposite, and get it
+// in extid, which canonicalizes what it is given.
+func TestPathsUnderTheHomeKeepTheirSymlinks(t *testing.T) {
 	home := t.TempDir()
 	elsewhere := t.TempDir()
-	realRepos, err := filepath.EvalSymlinks(elsewhere)
-	if err != nil {
-		t.Fatal(err)
-	}
 	t.Setenv("CEPM_HOME", home)
 	if err := os.Symlink(elsewhere, filepath.Join(home, "repos")); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
+	}
+	resolvedHome, err := filepath.EvalSymlinks(home)
+	if err != nil {
+		t.Fatal(err)
 	}
 
 	got, err := ReposDir()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != realRepos {
-		t.Errorf("ReposDir() = %q, want the resolved %q", got, realRepos)
+	if want := filepath.Join(resolvedHome, "repos"); got != want {
+		t.Errorf("ReposDir() = %q, want the symlink itself at %q", got, want)
 	}
 }
 
