@@ -74,6 +74,13 @@ type Host struct {
 	// approximate.
 	afterReloadAuthorized func()
 
+	// schedulerWait and runUpdate are test seams (nil in production): the
+	// first lets a test drive scheduler ticks without real time passing,
+	// the second records what a cycle would have updated with. Set before
+	// the scheduler starts; never mutated after.
+	schedulerWait func(time.Duration) <-chan time.Time
+	runUpdate     func(context.Context, *config.Config)
+
 	// pendingReload holds ids whose reload is owed to Chrome: the update
 	// already checked out their new code, but the reload has not been
 	// confirmed. The set survives failed attempts and is retried on every
@@ -761,33 +768,22 @@ func logHint() string {
 // happens shortly after startup; later runs are spaced by the configured
 // interval with ±10% jitter so a fleet of machines doesn't hit the git server
 // in lockstep.
-// configRetryInterval paces the re-reads of a config.toml that does not
-// parse; a variable so the test does not wait a real minute.
-var configRetryInterval = time.Minute
+// configRecheckInterval bounds how often the scheduler re-reads a config
+// that is currently unusable (does not parse, or has auto update off): the
+// user is likely editing the file, and before this the host had to be
+// restarted to notice.
+const configRecheckInterval = time.Minute
 
 func (h *Host) runScheduler(ctx context.Context) {
-	// A broken config.toml must not end periodic updates for the whole
-	// Chrome session — the user is likely editing the file right now.
-	// Retry until it parses (cepm doctor points at the same error).
-	var cfg *config.Config
-	for {
-		var err error
-		if cfg, err = config.Load(); err == nil {
-			break
-		}
-		h.log.Error("load config failed; periodic updates paused until it parses",
-			"err", err, "retryIn", configRetryInterval)
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(configRetryInterval):
-		}
+	wait := h.schedulerWait
+	if wait == nil {
+		wait = func(d time.Duration) <-chan time.Time { return time.After(d) }
 	}
-	if !cfg.Update.Auto {
-		h.log.Info("auto update disabled by config")
-		<-ctx.Done()
-		return
+	run := h.runUpdate
+	if run == nil {
+		run = func(ctx context.Context, cfg *config.Config) { h.autoUpdate(ctx, cfg) }
 	}
+
 	delay := time.Minute + rand.N(time.Minute)
 	// E2E tests shorten the first run to avoid multi-minute waits.
 	if v := os.Getenv("CEPM_BOOTSTRAP_UPDATE_DELAY"); v != "" {
@@ -795,14 +791,46 @@ func (h *Host) runScheduler(ctx context.Context) {
 			delay = d
 		}
 	}
-	h.log.Info("auto update scheduled", "interval", cfg.Update.Interval, "firstRunIn", delay)
+	h.log.Info("auto update scheduled", "firstRunIn", delay)
+
+	// The config is re-read every cycle, so edits (a fixed typo, auto
+	// toggled, a new interval or stash_dirty) apply without a Chrome
+	// restart. standing dedupes the log: a paused scheduler must not repeat
+	// the same complaint every recheck, but must say when it resumes.
+	standing := ""
+	pause := func(reason string, log func()) {
+		if standing != reason {
+			log()
+			standing = reason
+		}
+		delay = configRecheckInterval
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(delay):
+		case <-wait(delay):
 		}
-		h.autoUpdate(ctx, cfg)
+		cfg, err := config.Load()
+		if err != nil {
+			pause("err:"+err.Error(), func() {
+				h.log.Error("load config failed; periodic updates paused until it parses",
+					"err", err, "recheckIn", configRecheckInterval)
+			})
+			continue
+		}
+		if !cfg.Update.Auto {
+			pause("disabled", func() {
+				h.log.Info("auto update disabled by config; re-checking periodically",
+					"recheckIn", configRecheckInterval)
+			})
+			continue
+		}
+		if standing != "" {
+			h.log.Info("config usable again; auto update resumed", "interval", cfg.Update.Interval)
+			standing = ""
+		}
+		run(ctx, cfg)
 		jitter := time.Duration(float64(cfg.Update.Interval) * 0.1)
 		delay = cfg.Update.Interval - jitter + rand.N(2*jitter)
 	}

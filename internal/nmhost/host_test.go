@@ -713,55 +713,198 @@ func (s *syncBuffer) String() string {
 	return s.b.String()
 }
 
-// A config.toml that does not parse must pause the scheduler, not end it for
-// the whole Chrome session: the user is probably editing the file right now,
-// and before this fix the host never updated again until Chrome restarted.
-func TestSchedulerRecoversWhenTheConfigStartsParsing(t *testing.T) {
+// schedHarness drives runScheduler deterministically: every wait the
+// scheduler requests comes out of delays (the cycle boundary), ticks go in
+// through tick, and every update a cycle would run lands in updates — no
+// real time passes and no sleep synchronizes anything.
+type schedHarness struct {
+	h       *Host
+	buf     *syncBuffer
+	tick    chan time.Time
+	delays  chan time.Duration
+	updates chan *config.Config
+	cancel  context.CancelFunc
+	done    chan struct{}
+	cfgPath string
+}
+
+func startScheduler(t *testing.T, initialConfig string) *schedHarness {
+	t.Helper()
 	dir, err := os.MkdirTemp("/tmp", "cepm-host")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { os.RemoveAll(dir) })
 	t.Setenv("CEPM_HOME", dir)
-	cfgPath := filepath.Join(dir, "config.toml")
-	if err := os.WriteFile(cfgPath, []byte("[update\n"), 0o644); err != nil {
-		t.Fatal(err)
+	sh := &schedHarness{
+		buf:     &syncBuffer{},
+		tick:    make(chan time.Time),
+		delays:  make(chan time.Duration, 64),
+		updates: make(chan *config.Config, 64),
+		done:    make(chan struct{}),
+		cfgPath: filepath.Join(dir, "config.toml"),
 	}
-
-	orig := configRetryInterval
-	configRetryInterval = 10 * time.Millisecond
-	t.Cleanup(func() { configRetryInterval = orig })
-
-	var buf syncBuffer
-	h := &Host{log: slog.New(slog.NewTextHandler(&buf, nil))}
+	if initialConfig != "" {
+		sh.writeConfig(t, initialConfig)
+	}
+	sh.h = &Host{log: slog.New(slog.NewTextHandler(sh.buf, nil))}
+	sh.h.schedulerWait = func(d time.Duration) <-chan time.Time {
+		sh.delays <- d
+		return sh.tick
+	}
+	sh.h.runUpdate = func(_ context.Context, cfg *config.Config) { sh.updates <- cfg }
 	ctx, cancel := context.WithCancel(context.Background())
+	sh.cancel = cancel
 	t.Cleanup(cancel)
-	done := make(chan struct{})
-	go func() { h.runScheduler(ctx); close(done) }()
-
-	waitLog := func(substr string) {
-		t.Helper()
-		deadline := time.Now().Add(10 * time.Second)
-		for time.Now().Before(deadline) {
-			if strings.Contains(buf.String(), substr) {
-				return
-			}
-			time.Sleep(10 * time.Millisecond)
-		}
-		t.Fatalf("log never contained %q:\n%s", substr, buf.String())
+	go func() { sh.h.runScheduler(ctx); close(sh.done) }()
+	// Consume the bootstrap wait so the first cycle() tick lands cleanly.
+	select {
+	case <-sh.delays:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the scheduler never requested its first wait")
 	}
+	return sh
+}
 
-	waitLog("periodic updates paused")
-	// Repaired mid-session (auto off keeps the test free of real updates):
-	// the scheduler must pick it up without a host restart.
-	if err := os.WriteFile(cfgPath, []byte("[update]\nauto = false\n"), 0o644); err != nil {
+func (sh *schedHarness) writeConfig(t *testing.T, content string) {
+	t.Helper()
+	if err := os.WriteFile(sh.cfgPath, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	waitLog("auto update disabled by config")
+}
 
-	cancel()
+// cycle delivers one tick and returns the delay the scheduler chose for its
+// next wait; when it returns, the cycle's update (if any) is already in
+// updates, because the scheduler requests the next wait only afterwards.
+func (sh *schedHarness) cycle(t *testing.T) time.Duration {
+	t.Helper()
 	select {
-	case <-done:
+	case sh.tick <- time.Now():
+	case <-time.After(10 * time.Second):
+		t.Fatal("the scheduler never returned to its wait")
+	}
+	select {
+	case d := <-sh.delays:
+		return d
+	case <-time.After(10 * time.Second):
+		t.Fatal("the scheduler never requested the next wait")
+	}
+	return 0
+}
+
+func (sh *schedHarness) mustUpdate(t *testing.T) *config.Config {
+	t.Helper()
+	select {
+	case cfg := <-sh.updates:
+		return cfg
+	default:
+		t.Fatal("expected an update this cycle")
+		return nil
+	}
+}
+
+func (sh *schedHarness) noUpdate(t *testing.T) {
+	t.Helper()
+	select {
+	case cfg := <-sh.updates:
+		t.Fatalf("no update expected this cycle, got one with %+v", cfg)
+	default:
+	}
+}
+
+func inJitterBand(d, interval time.Duration) bool {
+	jitter := time.Duration(float64(interval) * 0.1)
+	return d >= interval-jitter && d <= interval+jitter
+}
+
+// A config.toml that does not parse must pause the scheduler — no updates,
+// no busy loop, no repeated identical complaints — and a repaired file must
+// bring it back without a Chrome restart.
+func TestSchedulerRecoversFromABrokenConfig(t *testing.T) {
+	sh := startScheduler(t, "[update\n")
+
+	d := sh.cycle(t)
+	sh.noUpdate(t)
+	if d != configRecheckInterval {
+		t.Errorf("invalid config should pace rechecks at %v, got %v", configRecheckInterval, d)
+	}
+	if d <= 0 {
+		t.Fatal("a non-positive recheck delay would busy-loop")
+	}
+	sh.cycle(t)
+	sh.noUpdate(t)
+	if n := strings.Count(sh.buf.String(), "periodic updates paused"); n != 1 {
+		t.Errorf("an unchanged config error should be logged once, got %d times", n)
+	}
+
+	sh.writeConfig(t, "[update]\nauto = true\ninterval = \"90m\"\n")
+	d = sh.cycle(t)
+	sh.mustUpdate(t)
+	if !strings.Contains(sh.buf.String(), "auto update resumed") {
+		t.Error("recovery should be logged")
+	}
+	if !inJitterBand(d, 90*time.Minute) {
+		t.Errorf("delay %v outside 90m ±10%%", d)
+	}
+}
+
+// auto = false pauses updates but keeps watching the file: turning it back
+// on (or off again) applies without a Chrome restart.
+func TestSchedulerFollowsAutoToggles(t *testing.T) {
+	sh := startScheduler(t, "[update]\nauto = false\n")
+
+	if d := sh.cycle(t); d != configRecheckInterval {
+		t.Errorf("auto=false should pace rechecks at %v, got %v", configRecheckInterval, d)
+	}
+	sh.noUpdate(t)
+
+	sh.writeConfig(t, "[update]\nauto = true\n")
+	sh.cycle(t)
+	sh.mustUpdate(t)
+
+	sh.writeConfig(t, "[update]\nauto = false\n")
+	if d := sh.cycle(t); d != configRecheckInterval {
+		t.Errorf("turning auto off should pause again, got delay %v", d)
+	}
+	sh.noUpdate(t)
+}
+
+// interval and stash_dirty edits reach the very next cycle.
+func TestSchedulerAppliesIntervalAndStashDirtyChanges(t *testing.T) {
+	sh := startScheduler(t, "[update]\nauto = true\ninterval = \"60m\"\n")
+
+	d := sh.cycle(t)
+	if cfg := sh.mustUpdate(t); cfg.Git.StashDirty {
+		t.Error("stash_dirty should start false")
+	}
+	if !inJitterBand(d, 60*time.Minute) {
+		t.Errorf("delay %v outside 60m ±10%%", d)
+	}
+
+	sh.writeConfig(t, "[update]\nauto = true\ninterval = \"120m\"\n[git]\nstash_dirty = true\n")
+	d = sh.cycle(t)
+	cfg := sh.mustUpdate(t)
+	if !cfg.Git.StashDirty {
+		t.Error("the stash_dirty change should reach the next update")
+	}
+	if cfg.Update.Interval != 120*time.Minute {
+		t.Errorf("interval = %v, want 120m", cfg.Update.Interval)
+	}
+	if !inJitterBand(d, 120*time.Minute) {
+		t.Errorf("delay %v outside 120m ±10%%", d)
+	}
+}
+
+// No config file at all means defaults — updates run, nothing is flagged —
+// and a context cancel ends the scheduler promptly even mid-wait.
+func TestSchedulerDefaultsAndCancel(t *testing.T) {
+	sh := startScheduler(t, "")
+	sh.cycle(t)
+	sh.mustUpdate(t)
+
+	sh.cancel()
+	select {
+	case <-sh.done:
 	case <-time.After(10 * time.Second):
 		t.Fatal("the scheduler did not stop on cancel")
 	}

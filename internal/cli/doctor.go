@@ -105,13 +105,15 @@ func runDiagnostics(ctx context.Context) []diagnostic {
 
 	// A broken config.toml pauses the host's periodic updates until it
 	// parses again; without this row, "updates stopped" reads all green.
+	// A missing file is fine — the defaults shown are what actually runs.
 	if cfg, err := config.Load(); err != nil {
 		add("config", "fail", oneLine(err.Error()),
 			"fix the file (or delete it to fall back to defaults)")
 	} else if !cfg.Update.Auto {
 		add("config", "ok", "auto update disabled by config", "")
 	} else {
-		add("config", "ok", fmt.Sprintf("auto update every %s", cfg.Update.Interval), "")
+		add("config", "ok",
+			fmt.Sprintf("auto update every %s (stash_dirty=%t)", cfg.Update.Interval, cfg.Git.StashDirty), "")
 	}
 
 	diags = append(diags, checkHelperFiles()...)

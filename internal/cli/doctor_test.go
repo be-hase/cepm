@@ -110,18 +110,38 @@ func TestDoctorFlagsEveryBrokenNMManifestField(t *testing.T) {
 	}
 }
 
-// A config.toml that does not parse pauses the host's periodic updates, so
-// doctor — where "updates stopped working" gets diagnosed — must name the
-// parse error instead of reading all green.
+// An unusable config.toml pauses the host's periodic updates, so doctor —
+// where "updates stopped working" gets diagnosed — must name the error
+// instead of reading all green, and must show the effective values when the
+// file is healthy or absent.
 func TestDoctorFlagsABrokenConfig(t *testing.T) {
 	startFakeHost(t)
 	cfgPath := filepath.Join(os.Getenv("CEPM_HOME"), "config.toml")
-	if err := os.WriteFile(cfgPath, []byte("[update\ninterval="), 0o644); err != nil {
-		t.Fatal(err)
-	}
+
+	// No file at all: the defaults are what actually runs; show them as ok.
 	out, _ := run(t, "", "doctor")
-	if !strings.Contains(out, "fix the file") {
-		t.Errorf("doctor should flag the unparsable config:\n%s", out)
+	if !strings.Contains(out, "auto update every") || !strings.Contains(out, "stash_dirty=") {
+		t.Errorf("doctor should show the effective defaults without a config file:\n%s", out)
+	}
+
+	for label, broken := range map[string]string{
+		"parse error":        "[update\ninterval=",
+		"unknown key":        "[update]\natuo = false\n",
+		"invalid duration":   "[update]\ninterval = \"soon\"\n",
+		"too-short interval": "[update]\ninterval = \"1s\"\n",
+	} {
+		if err := os.WriteFile(cfgPath, []byte(broken), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		out, _ := run(t, "", "doctor")
+		if !strings.Contains(out, "fix the file") {
+			t.Errorf("doctor should flag the config with a %s:\n%s", label, out)
+		}
+	}
+
+	// The same diagnostic reaches --json consumers.
+	if out, _ := run(t, "", "doctor", "--json"); !strings.Contains(out, "fix the file") {
+		t.Errorf("doctor --json should carry the config failure:\n%s", out)
 	}
 
 	if err := os.WriteFile(cfgPath, []byte("[update]\nauto = false\n"), 0o644); err != nil {
