@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/be-hase/cepm/internal/extid"
+	"github.com/be-hase/cepm/internal/paths"
 )
 
 // Fixture ids pinned by manifest keys, because Validate re-derives every
@@ -269,9 +270,15 @@ func TestValidateRejectsStructurallyBrokenStates(t *testing.T) {
 // A path-derived id (no manifest key) validates against the id recomputed
 // from the clone's location — the design's foundation, so pin it here.
 func TestValidateAcceptsPathDerivedIDs(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("CEPM_HOME", home)
-	id, err := extid.FromPath(filepath.Join(home, "repos", "tools", "ext"))
+	t.Setenv("CEPM_HOME", t.TempDir())
+	// Deliberately not filepath.Join(home, ...): the id has to match the
+	// path Chrome loads from, which is the canonical one, and t.TempDir()
+	// hands out a path with symlinks in it on macOS.
+	repos, err := paths.ReposDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := extid.FromPath(filepath.Join(repos, "tools", "ext"))
 	if err != nil {
 		t.Fatal(err)
 	}

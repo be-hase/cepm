@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/be-hase/cepm/internal/extid"
+	"github.com/be-hase/cepm/internal/paths"
 	"github.com/be-hase/cepm/internal/scan"
 )
 
@@ -24,6 +25,11 @@ otherwise Chrome derives it from the absolute path.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			abs, err := filepath.Abs(args[0])
 			if err != nil {
+				return err
+			}
+			// Chrome resolves symlinks before it hashes the path, so an
+			// unresolved one here would answer a question nobody asked.
+			if abs, err = paths.Canonical(abs); err != nil {
 				return err
 			}
 			key := ""

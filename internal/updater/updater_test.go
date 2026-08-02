@@ -543,6 +543,62 @@ func TestUpdateRecordsRemovedAsStale(t *testing.T) {
 	}
 }
 
+// A manifest.json that stops being a usable extension manifest makes
+// scan.Detect stop reporting the directory, exactly like a deletion does.
+// The two must not end in the same place: recording the extension as removed
+// marks it stale, and the stale record is what "cepm cleanup" uninstalls
+// from Chrome. Losing a working extension over one edited line of JSON is
+// the failure this guards.
+func TestABrokenManifestIsNotReadAsARemoval(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		manifest string
+	}{
+		{"unsupported version", `{"manifest_version": 4, "name": "Beta", "version": "1.0"}`},
+		{"version dropped", `{"name": "Beta", "version": "1.0"}`},
+		{"not json at all", `{"manifest_version": 3, "name":`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			author := setupRepo(t, "mytools")
+			before, err := state.Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			headBefore := before.Repos["mytools"].Head
+
+			writeFile(t, filepath.Join(author, "ext", "beta", "manifest.json"), tc.manifest)
+			git(t, author, "add", "-A")
+			git(t, author, "commit", "-m", "break beta's manifest")
+			git(t, author, "push", "origin", "main")
+
+			results, err := Update(context.Background(), nil, Options{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if results[0].Err == nil {
+				t.Fatalf("an unusable manifest must fail the refresh, got %+v", results[0])
+			}
+			if len(results[0].Removed) != 0 {
+				t.Errorf("it must not be reported as a removal: %+v", results[0].Removed)
+			}
+			st, err := state.Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			repo := st.Repos["mytools"]
+			if len(repo.Stale) != 0 {
+				t.Errorf("nothing may be queued for cleanup: %+v", repo.Stale)
+			}
+			if repo.FindExtension(filepath.Join("ext", "beta")) == nil {
+				t.Error("beta must stay registered while only its manifest is broken")
+			}
+			if repo.Head != headBefore {
+				t.Errorf("head advanced past a commit that was never scanned: %s -> %s", headBefore, repo.Head)
+			}
+		})
+	}
+}
+
 func TestUpdateDetectsNewExtension(t *testing.T) {
 	author := setupRepo(t, "mytools")
 	writeManifest(t, filepath.Join(author, "ext", "gamma"), "Gamma")
@@ -1009,5 +1065,62 @@ func TestUpdateWarnsAboutTheAutoStashItLeaves(t *testing.T) {
 	}
 	if !strings.Contains(warning, strings.Split(stashes, "\n")[0]) {
 		t.Errorf("the warning should name the commit that is still listed:\n%s\nstashes:\n%s", warning, stashes)
+	}
+}
+
+// "git stash push" moves the user's work out of the working tree before
+// anything else can go wrong, and everything after it can: a cancelled
+// context is enough to make identifying the entry fail. Reporting only the
+// underlying error would leave the user with a clean clone, no message about
+// their changes, and a next update that sees nothing to restore. The entry
+// has to be named even when cepm never learned its commit id.
+func TestUpdateNamesAnAutoStashItLostTrackOf(t *testing.T) {
+	setupRepo(t, "mytools")
+	dir, err := RepoDir("mytools")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(dir, "README.md"), "local edit")
+
+	// Cancel in the gap between creating the auto-stash and looking it up —
+	// the one place where the work is out of the tree and cepm does not yet
+	// know where it went.
+	ctx, cancel := context.WithCancel(context.Background())
+	gitx.AfterStashPush = func() {
+		gitx.AfterStashPush = nil
+		cancel()
+	}
+	t.Cleanup(func() { gitx.AfterStashPush = nil })
+
+	results, _ := Update(ctx, nil, Options{StashDirty: true})
+	if len(results) != 1 {
+		t.Fatalf("expected one repo result, got %+v", results)
+	}
+	if results[0].Err == nil {
+		t.Fatal("a stash whose entry could not be identified must fail the update")
+	}
+
+	// The fixture is only meaningful if the work really did leave the tree.
+	b, err := os.ReadFile(filepath.Join(dir, "README.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b) == "local edit" {
+		t.Fatal("fixture: the local edit should have been stashed away")
+	}
+	// git prefixes the subject with "On <branch>: "; what has to match is the
+	// part the user will scan for in "git stash list".
+	title := git(t, dir, "stash", "list", "--format=%s")
+	i := strings.Index(title, "cepm auto-stash ")
+	if i < 0 {
+		t.Fatalf("fixture: the auto-stash entry should be listed, got %q", title)
+	}
+	entry := title[i:]
+	warning := strings.Join(results[0].Warnings, "\n")
+	if !strings.Contains(warning, entry) {
+		t.Errorf("the warning must name the entry holding the user's work (%q):\n%s", entry, warning)
+	}
+	if !strings.Contains(warning, "stash") {
+		t.Errorf("the warning must say how to get the work back:\n%s", warning)
 	}
 }

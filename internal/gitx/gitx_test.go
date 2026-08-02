@@ -135,7 +135,7 @@ func TestStashPopRestoresOurEntryNotWhateverIsOnTop(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "ours"), []byte("cepm stashed this\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	stashID, err := repo.StashPush(ctx)
+	stashID, _, err := repo.StashPush(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -191,7 +191,7 @@ func TestStashPopStillRestoresADroppedEntry(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "f"), []byte("edited\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	stashID, err := repo.StashPush(ctx)
+	stashID, _, err := repo.StashPush(ctx)
 	if err != nil || stashID == "" {
 		t.Fatalf("StashPush: %q %v", stashID, err)
 	}
@@ -228,7 +228,7 @@ func TestStashPopIgnoresAStashPushedAfterResolution(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "ours"), []byte("cepm stashed this\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	stashID, err := repo.StashPush(ctx)
+	stashID, _, err := repo.StashPush(ctx)
 	if err != nil || stashID == "" {
 		t.Fatalf("StashPush: %q %v", stashID, err)
 	}
@@ -297,17 +297,17 @@ func TestStashPushIdentifiesItsOwnEntry(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "ours"), []byte("cepm\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	afterStashPush = func() {
-		afterStashPush = nil // once: the user stashes right after we do
+	AfterStashPush = func() {
+		AfterStashPush = nil // once: the user stashes right after we do
 		if err := os.WriteFile(filepath.Join(dir, "theirs"), []byte("user\n"), 0o644); err != nil {
 			t.Error(err)
 			return
 		}
 		gitIn(t, dir, "stash", "push", "-m", "the user's own stash")
 	}
-	t.Cleanup(func() { afterStashPush = nil })
+	t.Cleanup(func() { AfterStashPush = nil })
 
-	stashID, err := repo.StashPush(ctx)
+	stashID, _, err := repo.StashPush(ctx)
 	if err != nil || stashID == "" {
 		t.Fatalf("StashPush: %q %v", stashID, err)
 	}
@@ -352,7 +352,7 @@ func TestStashPopNeverRemovesAnyStash(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "ours"), []byte("cepm\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	stashID, err := repo.StashPush(ctx)
+	stashID, _, err := repo.StashPush(ctx)
 	if err != nil || stashID == "" {
 		t.Fatalf("StashPush: %q %v", stashID, err)
 	}
@@ -396,7 +396,7 @@ func TestStashPopReportsNothingWhenTheEntryIsGone(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "f"), []byte("edited\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	stashID, err := repo.StashPush(ctx)
+	stashID, _, err := repo.StashPush(ctx)
 	if err != nil || stashID == "" {
 		t.Fatalf("StashPush: %q %v", stashID, err)
 	}

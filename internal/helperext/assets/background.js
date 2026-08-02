@@ -67,10 +67,19 @@ async function onMessage(msg) {
   }
 }
 
+// UNINSTALL_HEARTBEAT_MS paces the "the dialog is still open" messages. The
+// host waits on these instead of a clock: nothing closes Chrome's dialog
+// when a deadline expires, and cepm holds the update lock for exactly as
+// long as the dialog is up.
+const UNINSTALL_HEARTBEAT_MS = 5000;
+
 async function handleUninstall(msg) {
   // Chrome itself shows a confirmation dialog; the user stays in control.
   let status = "uninstalled";
   let error = "";
+  const beat = setInterval(() => {
+    post({ type: "uninstallPending", requestId: msg.requestId });
+  }, UNINSTALL_HEARTBEAT_MS);
   try {
     await chrome.management.uninstall(msg.extensionId, {
       showConfirmDialog: true,
@@ -88,6 +97,8 @@ async function handleUninstall(msg) {
       status = "error";
       error = detail;
     }
+  } finally {
+    clearInterval(beat);
   }
   post({ type: "uninstallResult", requestId: msg.requestId, status, error });
 }

@@ -30,7 +30,16 @@ func Call(ctx context.Context, req Request) (*Response, error) {
 		return nil, err
 	}
 	defer conn.Close()
-	return exchange(conn, r, req)
+	return exchange(conn, r, req, patienceFor(ctx, req))
+}
+
+// patienceFor is how long silence from the host is tolerated. A caller's own
+// deadline wins: it knows something this does not.
+func patienceFor(ctx context.Context, req Request) time.Duration {
+	if deadline, ok := ctx.Deadline(); ok {
+		return time.Until(deadline)
+	}
+	return ClientDeadline(req)
 }
 
 // dialHost opens a connection to the host with the deadline ctx implies, or
@@ -56,8 +65,12 @@ func dialHost(ctx context.Context, req Request) (net.Conn, *bufio.Reader, error)
 	return conn, bufio.NewReader(conn), nil
 }
 
-// exchange sends one request and reads its response on an open connection.
-func exchange(conn net.Conn, r *bufio.Reader, req Request) (*Response, error) {
+// exchange sends one request and reads its response on an open connection,
+// skipping the host's interim "still working" lines. patience bounds each
+// wait between lines rather than the whole exchange: an uninstall waits on a
+// Chrome dialog that only a person can close, and giving up on it would
+// release the update lock with that dialog still on screen.
+func exchange(conn net.Conn, r *bufio.Reader, req Request, patience time.Duration) (*Response, error) {
 	req.Protocol = ProtocolVersion
 	enc, err := json.Marshal(req)
 	if err != nil {
@@ -66,13 +79,21 @@ func exchange(conn net.Conn, r *bufio.Reader, req Request) (*Response, error) {
 	if _, err := conn.Write(append(enc, '\n')); err != nil {
 		return nil, fmt.Errorf("write to host: %w", err)
 	}
-	line, err := r.ReadBytes('\n')
-	if err != nil {
-		return nil, fmt.Errorf("read from host: %w", err)
-	}
 	var resp Response
-	if err := json.Unmarshal(line, &resp); err != nil {
-		return nil, fmt.Errorf("parse host response: %w", err)
+	for {
+		line, err := r.ReadBytes('\n')
+		if err != nil {
+			return nil, fmt.Errorf("read from host: %w", err)
+		}
+		resp = Response{}
+		if err := json.Unmarshal(line, &resp); err != nil {
+			return nil, fmt.Errorf("parse host response: %w", err)
+		}
+		if !resp.Working {
+			break
+		}
+		// The host is still on it; start the patience over.
+		_ = conn.SetDeadline(time.Now().Add(patience))
 	}
 	if !resp.OK {
 		return &resp, fmt.Errorf("host error: %s", resp.Error)
@@ -139,14 +160,14 @@ func call(ctx context.Context, req Request) (*Response, error) {
 	}
 	defer conn.Close()
 
-	resp, err := exchange(conn, r, Request{Cmd: CmdPing})
+	resp, err := exchange(conn, r, Request{Cmd: CmdPing}, patienceFor(ctx, req))
 	if err != nil {
 		return nil, err
 	}
 	if resp.Host == nil || resp.Host.Protocol != ProtocolVersion {
 		return nil, ErrProtocolMismatch
 	}
-	return exchange(conn, r, req)
+	return exchange(conn, r, req, patienceFor(ctx, req))
 }
 
 // Reload asks the host to reload the given extension IDs via the helper.
@@ -169,7 +190,10 @@ func ListChrome(ctx context.Context) ([]ChromeExt, error) {
 
 // Uninstall asks Chrome (via the helper) to uninstall an extension. Chrome
 // shows a native confirmation dialog; the returned status reflects the
-// user's choice. Callers should use a generous ctx deadline.
+// user's choice. The wait is not bounded by how long someone takes to
+// decide — the host reports progress and this keeps waiting — so callers
+// should leave ctx without a deadline unless they mean to abandon a dialog
+// that is still open.
 func Uninstall(ctx context.Context, id string) (string, error) {
 	resp, err := call(ctx, Request{Cmd: CmdUninstall, ID: id})
 	if err != nil {

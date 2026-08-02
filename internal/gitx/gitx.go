@@ -202,29 +202,33 @@ func (r Repo) ChangedFiles(ctx context.Context, from, to string) ([]string, erro
 // The entry is tagged with a nonce and found by it, not by reading the top
 // of the stash afterwards: the user can push their own stash between our
 // push and our look, and we would then adopt theirs as ours.
-func (r Repo) StashPush(ctx context.Context) (stashID string, err error) {
+//
+// message is set as soon as the push has succeeded, including when the
+// lookup afterwards fails: at that point the user's work has already left
+// the working tree, and the message is the only handle anyone has on it.
+func (r Repo) StashPush(ctx context.Context) (stashID, message string, err error) {
 	nonce, err := stashNonce()
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
-	message := "cepm auto-stash " + nonce
+	message = "cepm auto-stash " + nonce
 	if _, err := run(ctx, r.Dir, "stash", "push", "--include-untracked", "--message", message); err != nil {
-		return "", err
+		return "", "", err
 	}
-	if afterStashPush != nil {
-		afterStashPush()
+	if AfterStashPush != nil {
+		AfterStashPush()
 	}
 	id, _, err := r.findStash(ctx, nonce)
 	if err != nil {
-		return "", err
+		return "", message, err
 	}
-	return id, nil
+	return id, message, nil
 }
 
-// afterStashPush runs between creating the auto-stash and identifying it.
+// AfterStashPush runs between creating the auto-stash and identifying it.
 // Test-only seam (nil in production): that gap is where a user's own "git
 // stash" can land, and nothing else can open it deterministically.
-var afterStashPush func()
+var AfterStashPush func()
 
 // stashNonce is what makes one auto-stash distinguishable from every other
 // entry, including a previous cepm run's.

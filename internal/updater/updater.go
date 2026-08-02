@@ -6,7 +6,9 @@ package updater
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"path"
 	"path/filepath"
@@ -225,7 +227,21 @@ func updateRepo(ctx context.Context, name string, r *state.Repo, opts Options, t
 
 	stashID := ""
 	if dirty {
-		if stashID, err = repo.StashPush(ctx); err != nil {
+		var message string
+		if stashID, message, err = repo.StashPush(ctx); err != nil {
+			// The push can succeed and everything after it fail — a
+			// cancelled context is enough. The changes are then out of the
+			// working tree and in an entry nothing has named yet, so the
+			// next update sees a clean clone and says nothing. Naming it is
+			// the whole difference between an interruption and a user
+			// hunting for work they did not know had moved.
+			if message != "" {
+				res.Warnings = append(res.Warnings, fmt.Sprintf(
+					"your local changes were stashed before this update and cepm then lost track of "+
+						"the entry: it is the one titled %q. Restore it with: git -C %s stash list  "+
+						"(then: git -C %s stash apply <entry>)",
+					message, term.Quote(dir), term.Quote(dir)))
+			}
 			res.Err = fmt.Errorf("stash: %w", err)
 			return res
 		}
@@ -422,6 +438,39 @@ func LatestTag(tags []string, includePrerelease bool) (latest string, warning st
 		"tag releases as v1.2.3, or track a branch instead", nonSemver, tags[0])
 }
 
+// checkVanishedAreReallyGone refuses the refresh when a registered directory
+// dropped out of the scan while its manifest.json is still there.
+//
+// scan.Detect reports "no extension here" for two very different situations:
+// the directory is gone, and the directory holds a manifest.json that is not
+// a usable extension manifest — an unsupported or missing manifest_version,
+// which a bad merge or a typo'd upstream commit produces easily. Only the
+// first is a removal. Letting the second reach the removal path records the
+// extension as stale, tells the user to run "cepm cleanup", and uninstalls a
+// working extension from Chrome over an edit to one line of JSON. The
+// deliberate case — an entry taken out of cepm.toml — still reads as a
+// removal, because its manifest is fine.
+func checkVanishedAreReallyGone(found []scan.Extension, registered []state.Extension, dir string) error {
+	scanned := make(map[string]bool, len(found))
+	for _, e := range found {
+		scanned[e.Dir] = true
+	}
+	for _, e := range registered {
+		if scanned[e.Dir] {
+			continue
+		}
+		_, err := scan.ReadManifest(filepath.Join(dir, e.Dir))
+		if err == nil || errors.Is(err, fs.ErrNotExist) {
+			continue // really gone, or no longer declared: a real removal
+		}
+		// The manifest's own text reaches a terminal from here.
+		return fmt.Errorf("%s: %s; cepm will not record it as removed while a "+
+			"manifest.json is still there (fix the manifest, or delete the directory "+
+			"if the extension really is gone)", term.Safe(e.Dir), term.Safe(err.Error()))
+	}
+	return nil
+}
+
 // refreshExtensions re-scans the repo, updates r.Extensions (preserving the
 // user's enabled/available intent), and fills res.Changed/Added/Renamed/
 // Removed. Renames are inferred by matching manifest names between vanished
@@ -439,6 +488,10 @@ func refreshExtensions(name string, r *state.Repo, dir string, res *RepoResult, 
 	old := make(map[string]state.Extension, len(r.Extensions))
 	for _, e := range r.Extensions {
 		old[e.Dir] = e
+	}
+	if err := checkVanishedAreReallyGone(exts, r.Extensions, dir); err != nil {
+		res.Err = err
+		return
 	}
 	var newList []state.Extension
 	var added []ExtChange

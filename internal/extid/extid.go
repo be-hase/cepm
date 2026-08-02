@@ -15,8 +15,9 @@ import (
 )
 
 // FromPath returns the ID Chrome assigns to an unpacked extension loaded from
-// absPath. The path must be absolute and must match exactly what Chrome sees
-// (no trailing slash, symlinks unresolved).
+// absPath. The path must be absolute and must match exactly what Chrome sees:
+// no trailing slash, and symlinks already resolved — Chrome resolves them
+// before hashing, so callers canonicalize with paths.Canonical first.
 func FromPath(absPath string) (string, error) {
 	if !filepath.IsAbs(absPath) {
 		return "", fmt.Errorf("extension path must be absolute: %q", absPath)

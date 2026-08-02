@@ -16,6 +16,10 @@ const (
 	typeListResult      = "listResult"
 	typeUninstall       = "uninstall"
 	typeUninstallResult = "uninstallResult"
+	// typeUninstallPending is the helper repeating "Chrome's confirmation
+	// dialog is still open". It is what keeps the host waiting; see
+	// Host.Uninstall.
+	typeUninstallPending = "uninstallPending"
 )
 
 type envelope struct {

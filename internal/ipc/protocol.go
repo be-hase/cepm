@@ -99,6 +99,10 @@ type Response struct {
 	Results    []ReloadResult `json:"results,omitempty"`
 	Extensions []ChromeExt    `json:"extensions,omitempty"`
 	Status     string         `json:"status,omitempty"` // for CmdUninstall
+	// Working marks an interim line: the host is still on the command and
+	// the client should keep waiting. It is never the final answer, so
+	// every other field is meaningless on such a line.
+	Working bool `json:"working,omitempty"`
 }
 
 // Helper compatibility verdicts, as reported in HostInfo.HelperCompat. A

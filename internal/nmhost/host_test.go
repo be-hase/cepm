@@ -47,6 +47,13 @@ type fakeHelper struct {
 	// have to slip through.
 	holdReload chan struct{}
 	reloadSeen chan struct{}
+	// holdUninstall, when non-nil, keeps the uninstall unanswered until the
+	// channel is closed — Chrome's confirmation dialog sitting on screen.
+	// Each receive on beatUninstall makes the helper report that the dialog
+	// is still open, so a test can drive the heartbeat exactly.
+	holdUninstall chan struct{}
+	beatUninstall chan struct{}
+	uninstallSeen chan struct{}
 }
 
 func (f *fakeHelper) send(msg any) {
@@ -122,6 +129,26 @@ func (f *fakeHelper) run() {
 				},
 			})
 		case "uninstall":
+			if f.uninstallSeen != nil {
+				select {
+				case f.uninstallSeen <- struct{}{}:
+				default:
+				}
+			}
+			// The dialog is open for as long as the test says it is, and
+			// says so whenever the test asks it to.
+			if f.holdUninstall != nil {
+				for open := true; open; {
+					select {
+					case <-f.beatUninstall:
+						f.send(map[string]any{
+							"type": "uninstallPending", "requestId": msg.RequestID,
+						})
+					case <-f.holdUninstall:
+						open = false
+					}
+				}
+			}
 			// Emulate the user confirming Chrome's dialog.
 			f.send(map[string]any{
 				"type": "uninstallResult", "requestId": msg.RequestID,

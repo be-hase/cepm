@@ -69,6 +69,57 @@ func Serve(ctx context.Context, l net.Listener, h Handler) {
 // rather than a constant the budget can outgrow.
 var serverDeadlineFor = ClientDeadline
 
+// keepaliveTick paces the interim "still working" lines. Test seam: a test
+// fires the returned channel itself, so proving the behaviour never depends
+// on real time passing.
+var keepaliveTick = func() (c <-chan time.Time, stop func()) {
+	t := time.NewTicker(keepaliveEvery)
+	return t.C, t.Stop
+}
+
+// keepaliveEvery is well inside every command's budget, so a client sees
+// several signs of life before its own patience could run out.
+const keepaliveEvery = 5 * time.Second
+
+// runReporting runs the handler, telling the client it is still working for
+// as long as it takes.
+//
+// Some commands wait on a person: "uninstall" is a Chrome confirmation
+// dialog, and nothing closes that dialog when a deadline expires. A client
+// that gave up would release the update lock it holds precisely to keep the
+// extension id from being registered again while the dialog is open. So the
+// client's patience must track the host's progress rather than a guess about
+// how long someone takes to decide.
+func runReporting(ctx context.Context, conn net.Conn, req Request, h Handler) Response {
+	done := make(chan Response, 1)
+	go func() { done <- h(ctx, req) }()
+	tick, stop := keepaliveTick()
+	defer stop()
+	for {
+		select {
+		case resp := <-done:
+			return resp
+		case <-tick:
+			_ = conn.SetDeadline(time.Now().Add(serverDeadlineFor(req)))
+			if _, err := conn.Write(append(mustMarshal(Response{Working: true}), '\n')); err != nil {
+				// The client is gone. Let the handler finish — it is
+				// acting on Chrome and must not be abandoned half-done —
+				// and discard what it returns.
+				return <-done
+			}
+		}
+	}
+}
+
+func mustMarshal(v any) []byte {
+	b, err := json.Marshal(v)
+	if err != nil {
+		// Response is a fixed struct of plain types; this cannot fail.
+		panic(err)
+	}
+	return b
+}
+
 func serveConn(ctx context.Context, conn net.Conn, h Handler) {
 	defer conn.Close()
 	// A floor for reading the request itself; extended per command below,
@@ -93,7 +144,7 @@ func serveConn(ctx context.Context, conn net.Conn, h Handler) {
 			// a fixed five minutes cut off a large reload the host was
 			// still entitled to be running.
 			_ = conn.SetDeadline(time.Now().Add(serverDeadlineFor(req)))
-			resp = h(ctx, req)
+			resp = runReporting(ctx, conn, req, h)
 		}
 		enc, err := json.Marshal(resp)
 		if err != nil {

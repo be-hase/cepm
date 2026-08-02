@@ -52,7 +52,11 @@ type Host struct {
 
 	mu      sync.Mutex
 	pending map[string]chan json.RawMessage
-	reqSeq  atomic.Int64
+	// alive carries the helper's signs of life for a request still being
+	// worked on, separate from pending so a heartbeat can never be mistaken
+	// for the answer. Only the uninstall dialog uses it; see Uninstall.
+	alive  map[string]chan struct{}
+	reqSeq atomic.Int64
 
 	startedAt       time.Time
 	leader          atomic.Bool
@@ -386,6 +390,15 @@ func (h *Host) readLoop(ctx context.Context) error {
 			if ch != nil {
 				ch <- json.RawMessage(frame)
 			}
+		case typeUninstallPending:
+			// A sign of life, not an answer: the request stays pending.
+			h.mu.Lock()
+			beat := h.alive[env.RequestID]
+			h.mu.Unlock()
+			select {
+			case beat <- struct{}{}:
+			default: // one queued beat is as good as ten
+			}
 		default:
 			h.log.Warn("unknown message type from helper", "type", env.Type)
 		}
@@ -430,6 +443,54 @@ func (h *Host) requestCtx(ctx context.Context, requestID string, msg any) (json.
 		return raw, nil
 	case <-ctx.Done():
 		return nil, fmt.Errorf("helper extension did not answer (is it loaded and enabled?): %w", ctx.Err())
+	}
+}
+
+// aliveTimeout produces the "the helper has gone quiet" signal, plus a reset
+// to call on every sign of life. Test seam: replacing it lets a test decide
+// exactly when the silence is declared, so nothing here has to be
+// synchronized by sleeping.
+var aliveTimeout = func(d time.Duration) (c <-chan time.Time, reset, stop func()) {
+	t := time.NewTimer(d)
+	return t.C, func() { t.Reset(d) }, func() { t.Stop() }
+}
+
+// requestAlive is requestCtx for a request whose answer waits on a person.
+// It gives up only after the helper has been silent for idle — every
+// heartbeat starts that window again — so the wait lasts as long as the work
+// on the other side is demonstrably still happening.
+func (h *Host) requestAlive(ctx context.Context, requestID string, msg any, idle time.Duration) (json.RawMessage, error) {
+	ch := make(chan json.RawMessage, 1)
+	beat := make(chan struct{}, 1)
+	h.mu.Lock()
+	h.pending[requestID] = ch
+	if h.alive == nil {
+		h.alive = map[string]chan struct{}{}
+	}
+	h.alive[requestID] = beat
+	h.mu.Unlock()
+	defer func() {
+		h.mu.Lock()
+		delete(h.pending, requestID)
+		delete(h.alive, requestID)
+		h.mu.Unlock()
+	}()
+	if err := h.send(ctx, msg); err != nil {
+		return nil, err
+	}
+	quiet, reset, stop := aliveTimeout(idle)
+	defer stop()
+	for {
+		select {
+		case raw := <-ch:
+			return raw, nil
+		case <-beat:
+			reset()
+		case <-quiet:
+			return nil, fmt.Errorf("the helper extension stopped responding after %s", idle)
+		case <-ctx.Done():
+			return nil, fmt.Errorf("helper extension did not answer (is it loaded and enabled?): %w", ctx.Err())
+		}
 	}
 }
 
@@ -507,16 +568,23 @@ func (h *Host) ListChrome(ctx context.Context) ([]ipc.ChromeExt, error) {
 }
 
 // Uninstall asks the helper to uninstall an extension; Chrome shows a native
-// confirmation dialog, so this can never remove anything silently. Waiting is
-// bounded by the user's decision, hence the longer timeout.
+// confirmation dialog, so this can never remove anything silently.
+//
+// The wait follows the helper's heartbeat rather than a clock. A deadline
+// would expire while the dialog is still on screen — the dialog is a person
+// deciding, and nothing closes it when cepm stops listening. The caller
+// holds the update lock across this call precisely so the id cannot be
+// registered again while the dialog is open; releasing it early would leave
+// a live "Remove" button pointed at whatever holds that id when it is
+// finally pressed. Silence, by contrast, means the helper's worker is gone,
+// and the pending uninstall goes with it.
 func (h *Host) Uninstall(ctx context.Context, extID string) (status string, err error) {
 	if err := h.helperGate(); err != nil {
 		return "", err
 	}
 	id := h.nextRequestID()
-	ctx, cancel := context.WithTimeout(ctx, ipc.UninstallBudget)
-	defer cancel()
-	raw, err := h.requestCtx(ctx, id, uninstallReq{Type: typeUninstall, RequestID: id, ExtensionID: extID})
+	raw, err := h.requestAlive(ctx, id, uninstallReq{Type: typeUninstall, RequestID: id, ExtensionID: extID},
+		ipc.UninstallBudget)
 	if err != nil {
 		return "", err
 	}
