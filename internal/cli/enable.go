@@ -1,13 +1,16 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/be-hase/cepm/internal/assist"
+	"github.com/be-hase/cepm/internal/ipc"
 	"github.com/be-hase/cepm/internal/state"
 	"github.com/be-hase/cepm/internal/term"
 	"github.com/be-hase/cepm/internal/updater"
@@ -87,7 +90,35 @@ one candidate exists).`,
 			for i, t := range targets {
 				names[i] = t.Name
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "✔ Enabled: %s\n", strings.Join(names, ", "))
+			out := cmd.OutOrStdout()
+			fmt.Fprintf(out, "✔ Enabled: %s\n", strings.Join(names, ", "))
+
+			// Code pulled while the extension sat disabled is already on
+			// disk, so one still loaded in Chrome gets a reload now instead
+			// of running stale code until the next update tick. The rest go
+			// through the load ceremony.
+			listCtx, cancel := context.WithTimeout(cmd.Context(), 3*time.Second)
+			loaded, lerr := ipc.ListChrome(listCtx)
+			cancel()
+			if lerr == nil {
+				loadedSet := map[string]bool{}
+				for _, e := range loaded {
+					loadedSet[e.ID] = true
+				}
+				var items []reloadItem
+				var rest []loadTarget
+				for _, t := range targets {
+					if loadedSet[t.ID] {
+						items = append(items, reloadItem{ID: t.ID, Name: t.Name})
+					} else {
+						rest = append(rest, t)
+					}
+				}
+				if len(items) > 0 {
+					reloadExtensions(cmd.Context(), out, items)
+				}
+				targets = rest
+			}
 			runLoadCeremony(cmd.Context(), cmd, targets)
 			return nil
 		},

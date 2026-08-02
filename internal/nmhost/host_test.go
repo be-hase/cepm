@@ -121,6 +121,65 @@ func fixtureKey(seed string) (key, id string) {
 		extid.FromPublicKey([]byte(seed))
 }
 
+// seedHostState points CEPM_HOME at a fresh temp dir (short path: unix
+// sockets) and registers testrepo with the given extensions.
+func seedHostState(t *testing.T, exts ...state.Extension) {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "cepm-host")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	t.Setenv("CEPM_HOME", dir)
+	st := state.New()
+	st.Repos["testrepo"] = &state.Repo{
+		URL: "u", Track: state.TrackBranch, Branch: "main",
+		Head:       "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		Extensions: exts,
+	}
+	if err := st.Save(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// newTestHost wires a Host to helper over in-memory pipes, with the writer
+// pump and the read loop running until the test ends. The catch-up flag is
+// pre-set: the hello-triggered catch-up reload would race most assertions.
+func newTestHost(t *testing.T, helper *fakeHelper) (*Host, context.Context) {
+	t.Helper()
+	helperToHostR, helperToHostW := io.Pipe()
+	hostToHelperR, hostToHelperW := io.Pipe()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	h := &Host{
+		version:   "test",
+		log:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		in:        helperToHostR,
+		out:       make(chan []byte, 16),
+		pending:   map[string]chan json.RawMessage{},
+		startedAt: time.Now(),
+	}
+	h.caughtUp.Store(true)
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case frame := <-h.out:
+				if err := WriteMessage(hostToHelperW, frame); err != nil {
+					return
+				}
+			}
+		}
+	}()
+	go func() { _ = h.readLoop(ctx) }()
+	helper.t = t
+	helper.toHost = helperToHostW
+	helper.from = hostToHelperR
+	go helper.run()
+	return h, ctx
+}
+
 func TestHostEndToEnd(t *testing.T) {
 	dir, err := os.MkdirTemp("/tmp", "cepm-host")
 	if err != nil {
@@ -333,54 +392,11 @@ func TestHostRefreshesOutdatedHelper(t *testing.T) {
 // user running old code until the next commit or a Chrome restart. The next
 // scheduler tick — even one that finds nothing new — retries it.
 func TestAutoUpdateRetriesFailedReloads(t *testing.T) {
-	dir, err := os.MkdirTemp("/tmp", "cepm-host")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { os.RemoveAll(dir) })
-	t.Setenv("CEPM_HOME", dir)
 	// The owed id has to be live and enabled: pending reloads are re-checked
 	// against the state before every attempt.
-	st := state.New()
-	st.Repos["testrepo"] = &state.Repo{
-		URL: "u", Track: state.TrackBranch, Branch: "main", Head: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-		Extensions: []state.Extension{{Dir: "a", Name: "A", ID: idA, Key: keyA}},
-	}
-	if err := st.Save(); err != nil {
-		t.Fatal(err)
-	}
-
-	helperToHostR, helperToHostW := io.Pipe()
-	hostToHelperR, hostToHelperW := io.Pipe()
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-
-	h := &Host{
-		version:   "test",
-		log:       slog.New(slog.NewTextHandler(io.Discard, nil)),
-		in:        helperToHostR,
-		out:       make(chan []byte, 16),
-		pending:   map[string]chan json.RawMessage{},
-		startedAt: time.Now(),
-	}
-	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case frame := <-h.out:
-				if err := WriteMessage(hostToHelperW, frame); err != nil {
-					return
-				}
-			}
-		}
-	}()
-	// The hello-triggered catch-up reload would race these assertions.
-	h.caughtUp.Store(true)
-	go func() { _ = h.readLoop(ctx) }()
-	helper := &fakeHelper{t: t, toHost: helperToHostW, from: hostToHelperR,
-		reloads: make(chan []string, 4)}
-	go helper.run()
+	seedHostState(t, state.Extension{Dir: "a", Name: "A", ID: idA, Key: keyA})
+	helper := &fakeHelper{reloads: make(chan []string, 4)}
+	h, ctx := newTestHost(t, helper)
 
 	// Tick 1: the update itself succeeds (nothing registered, nothing to
 	// pull) but the reload of an owed id fails transiently.
@@ -422,55 +438,12 @@ func TestAutoUpdateRetriesFailedReloads(t *testing.T) {
 // disables or uninstalls the extension before the retry, delivering it
 // anyway would override that choice — the debt is dropped instead.
 func TestPendingReloadDropsDisabledAndUninstalledExtensions(t *testing.T) {
-	dir, err := os.MkdirTemp("/tmp", "cepm-host")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { os.RemoveAll(dir) })
-	t.Setenv("CEPM_HOME", dir)
-	head := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	st := state.New()
-	st.Repos["testrepo"] = &state.Repo{
-		URL: "u", Track: state.TrackBranch, Branch: "main", Head: head,
-		Extensions: []state.Extension{
-			{Dir: "a", Name: "A", ID: idA, Key: keyA},
-			{Dir: "b", Name: "B", ID: idB, Key: keyB},
-		},
-	}
-	if err := st.Save(); err != nil {
-		t.Fatal(err)
-	}
-
-	helperToHostR, helperToHostW := io.Pipe()
-	hostToHelperR, hostToHelperW := io.Pipe()
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	h := &Host{
-		version:   "test",
-		log:       slog.New(slog.NewTextHandler(io.Discard, nil)),
-		in:        helperToHostR,
-		out:       make(chan []byte, 16),
-		pending:   map[string]chan json.RawMessage{},
-		startedAt: time.Now(),
-	}
-	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case frame := <-h.out:
-				if err := WriteMessage(hostToHelperW, frame); err != nil {
-					return
-				}
-			}
-		}
-	}()
-	// The hello-triggered catch-up reload would race these assertions.
-	h.caughtUp.Store(true)
-	go func() { _ = h.readLoop(ctx) }()
-	helper := &fakeHelper{t: t, toHost: helperToHostW, from: hostToHelperR,
-		reloads: make(chan []string, 4)}
-	go helper.run()
+	seedHostState(t,
+		state.Extension{Dir: "a", Name: "A", ID: idA, Key: keyA},
+		state.Extension{Dir: "b", Name: "B", ID: idB, Key: keyB},
+	)
+	helper := &fakeHelper{reloads: make(chan []string, 4)}
+	h, ctx := newTestHost(t, helper)
 
 	// Both reloads fail transiently and stay owed.
 	helper.failReloads.Store(true)
@@ -484,7 +457,7 @@ func TestPendingReloadDropsDisabledAndUninstalledExtensions(t *testing.T) {
 
 	// Before the retry: the user disables A and uninstalls B's repository
 	// entry entirely.
-	st, err = state.Load()
+	st, err := state.Load()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -514,54 +487,12 @@ func TestPendingReloadDropsDisabledAndUninstalledExtensions(t *testing.T) {
 // lock across both makes the two operations order themselves: this test
 // proves the disable cannot commit while a reload is in flight.
 func TestReloadHoldsTheLockSoDisableCannotSlipIn(t *testing.T) {
-	dir, err := os.MkdirTemp("/tmp", "cepm-host")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { os.RemoveAll(dir) })
-	t.Setenv("CEPM_HOME", dir)
-	head := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	st := state.New()
-	st.Repos["testrepo"] = &state.Repo{
-		URL: "u", Track: state.TrackBranch, Branch: "main", Head: head,
-		Extensions: []state.Extension{{Dir: "a", Name: "A", ID: idA, Key: keyA}},
-	}
-	if err := st.Save(); err != nil {
-		t.Fatal(err)
-	}
-
-	helperToHostR, helperToHostW := io.Pipe()
-	hostToHelperR, hostToHelperW := io.Pipe()
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	h := &Host{
-		version:   "test",
-		log:       slog.New(slog.NewTextHandler(io.Discard, nil)),
-		in:        helperToHostR,
-		out:       make(chan []byte, 16),
-		pending:   map[string]chan json.RawMessage{},
-		startedAt: time.Now(),
-	}
-	h.caughtUp.Store(true)
-	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case frame := <-h.out:
-				if err := WriteMessage(hostToHelperW, frame); err != nil {
-					return
-				}
-			}
-		}
-	}()
-	go func() { _ = h.readLoop(ctx) }()
+	seedHostState(t, state.Extension{Dir: "a", Name: "A", ID: idA, Key: keyA})
 	helper := &fakeHelper{
-		t: t, toHost: helperToHostW, from: hostToHelperR,
 		holdReload: make(chan struct{}),
 		reloadSeen: make(chan struct{}, 1),
 	}
-	go helper.run()
+	h, ctx := newTestHost(t, helper)
 
 	reloadDone := make(chan error, 1)
 	go func() {
@@ -611,54 +542,12 @@ func TestReloadHoldsTheLockSoDisableCannotSlipIn(t *testing.T) {
 // reload / cepm update): the handler must take the lock too, or the window
 // reopens for every CLI-driven reload.
 func TestSocketReloadHoldsTheLockToo(t *testing.T) {
-	dir, err := os.MkdirTemp("/tmp", "cepm-host")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { os.RemoveAll(dir) })
-	t.Setenv("CEPM_HOME", dir)
-	st := state.New()
-	st.Repos["testrepo"] = &state.Repo{
-		URL: "u", Track: state.TrackBranch, Branch: "main",
-		Head:       "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-		Extensions: []state.Extension{{Dir: "a", Name: "A", ID: idA, Key: keyA}},
-	}
-	if err := st.Save(); err != nil {
-		t.Fatal(err)
-	}
-
-	helperToHostR, helperToHostW := io.Pipe()
-	hostToHelperR, hostToHelperW := io.Pipe()
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	h := &Host{
-		version:   "test",
-		log:       slog.New(slog.NewTextHandler(io.Discard, nil)),
-		in:        helperToHostR,
-		out:       make(chan []byte, 16),
-		pending:   map[string]chan json.RawMessage{},
-		startedAt: time.Now(),
-	}
-	h.caughtUp.Store(true)
-	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case frame := <-h.out:
-				if err := WriteMessage(hostToHelperW, frame); err != nil {
-					return
-				}
-			}
-		}
-	}()
-	go func() { _ = h.readLoop(ctx) }()
+	seedHostState(t, state.Extension{Dir: "a", Name: "A", ID: idA, Key: keyA})
 	helper := &fakeHelper{
-		t: t, toHost: helperToHostW, from: hostToHelperR,
 		holdReload: make(chan struct{}),
 		reloadSeen: make(chan struct{}, 1),
 	}
-	go helper.run()
+	h, ctx := newTestHost(t, helper)
 
 	respDone := make(chan ipc.Response, 1)
 	go func() {
@@ -702,51 +591,9 @@ func TestSocketReloadHoldsTheLockToo(t *testing.T) {
 // the update lock so the handler blocks after authorizing, and disabling the
 // extension inside that window.
 func TestReloadReportsStateChangeDistinctlyFromChromeDisabled(t *testing.T) {
-	dir, err := os.MkdirTemp("/tmp", "cepm-host")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { os.RemoveAll(dir) })
-	t.Setenv("CEPM_HOME", dir)
-	st := state.New()
-	st.Repos["testrepo"] = &state.Repo{
-		URL: "u", Track: state.TrackBranch, Branch: "main",
-		Head:       "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-		Extensions: []state.Extension{{Dir: "a", Name: "A", ID: idA, Key: keyA}},
-	}
-	if err := st.Save(); err != nil {
-		t.Fatal(err)
-	}
-
-	helperToHostR, helperToHostW := io.Pipe()
-	hostToHelperR, hostToHelperW := io.Pipe()
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	h := &Host{
-		version:   "test",
-		log:       slog.New(slog.NewTextHandler(io.Discard, nil)),
-		in:        helperToHostR,
-		out:       make(chan []byte, 16),
-		pending:   map[string]chan json.RawMessage{},
-		startedAt: time.Now(),
-	}
-	h.caughtUp.Store(true)
-	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case frame := <-h.out:
-				if err := WriteMessage(hostToHelperW, frame); err != nil {
-					return
-				}
-			}
-		}
-	}()
-	go func() { _ = h.readLoop(ctx) }()
-	helper := &fakeHelper{t: t, toHost: helperToHostW, from: hostToHelperR,
-		reloads: make(chan []string, 4)}
-	go helper.run()
+	seedHostState(t, state.Extension{Dir: "a", Name: "A", ID: idA, Key: keyA})
+	helper := &fakeHelper{reloads: make(chan []string, 4)}
+	h, ctx := newTestHost(t, helper)
 
 	// Hold the lock, let the request authorize and block on it, then change
 	// the state from inside the window. The hook — not a sleep — is what
@@ -754,7 +601,7 @@ func TestReloadReportsStateChangeDistinctlyFromChromeDisabled(t *testing.T) {
 	authorized := make(chan struct{})
 	h.afterReloadAuthorized = func() { close(authorized) }
 	respDone := make(chan ipc.Response, 1)
-	err = updater.WithLock(context.Background(), func() error {
+	err := updater.WithLock(context.Background(), func() error {
 		go func() {
 			respDone <- h.handleIPC(ctx, ipc.Request{Cmd: ipc.CmdReload, IDs: []string{idA}})
 		}()
@@ -800,20 +647,7 @@ func TestReloadReportsStateChangeDistinctlyFromChromeDisabled(t *testing.T) {
 // error, not kill the host for every other caller: these paths act on state
 // and Chrome, which is exactly where a panic is most likely to live.
 func TestHandleIPCRecoversFromAPanic(t *testing.T) {
-	dir, err := os.MkdirTemp("/tmp", "cepm-host")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { os.RemoveAll(dir) })
-	t.Setenv("CEPM_HOME", dir)
-	st := state.New()
-	st.Repos["testrepo"] = &state.Repo{
-		URL: "u", Track: state.TrackBranch, Branch: "main", Head: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-		Extensions: []state.Extension{{Dir: "a", Name: "A", ID: idA, Key: keyA}},
-	}
-	if err := st.Save(); err != nil {
-		t.Fatal(err)
-	}
+	seedHostState(t, state.Extension{Dir: "a", Name: "A", ID: idA, Key: keyA})
 
 	h := &Host{
 		version:   "test",

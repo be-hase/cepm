@@ -63,6 +63,20 @@ func TestDisableRemovesFromChromeWhenApproved(t *testing.T) {
 	}
 }
 
+// Enabling an extension Chrome still has loaded reloads it on the spot:
+// code pulled while it sat disabled is already on disk, and waiting for the
+// next update tick would leave stale code running.
+func TestEnableReloadsAnAlreadyLoadedExtension(t *testing.T) {
+	h := startFakeHost(t, idA)
+	seedRepo(t, "tools", state.Extension{Dir: "ext", Name: "Ext", ID: idA, Key: keyA, Disabled: true})
+	if out, err := run(t, "", "enable", "tools/ext"); err != nil {
+		t.Fatalf("enable failed: %v\n%s", err, out)
+	}
+	if len(h.reloaded) != 1 || h.reloaded[0] != idA {
+		t.Errorf("expected the loaded extension to be reloaded, got %v", h.reloaded)
+	}
+}
+
 // "cepm reload tools tools" must reach Chrome once per extension: duplicate
 // ids would run two interleaved disable/enable cycles for one extension.
 func TestReloadDeduplicatesRepeatedRepos(t *testing.T) {

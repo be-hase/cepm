@@ -210,7 +210,7 @@ func applySelection(cmd *cobra.Command, repoName string, repo *state.Repo, flags
 			for d := range want {
 				missing = append(missing, d)
 			}
-			return fmt.Errorf("--only: no extension found at %v (detected: %v)", missing, extensionDirs(repo))
+			return fmt.Errorf("--only: no extension found at %v (detected: %v)", missing, repoDirs(repo))
 		}
 	case flags.all || len(repo.Extensions) <= 1 || !assist.IsTTY():
 		// everything enabled (the default zero value)
@@ -233,14 +233,6 @@ func applySelection(cmd *cobra.Command, repoName string, repo *state.Repo, flags
 		}
 	}
 	return nil
-}
-
-func extensionDirs(repo *state.Repo) []string {
-	dirs := make([]string, len(repo.Extensions))
-	for i, e := range repo.Extensions {
-		dirs[i] = e.Dir
-	}
-	return dirs
 }
 
 // buildRepo inspects a fresh clone and produces its state entry, resolving the
