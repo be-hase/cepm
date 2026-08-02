@@ -285,8 +285,10 @@ type handoffResult struct {
 // inject a startup failure and check the scenario reports it rather than
 // silently concluding that nothing reached the old host.
 //
-// Everything it creates — temp dir, env var, listeners, goroutines — is
-// cleaned up before it returns, in both the normal and the failure path.
+// Everything it creates — temp dir, listeners, goroutines — is cleaned up
+// before it returns, on both the normal and the failure path. CEPM_HOME is
+// the exception: t.Setenv restores it when the test itself ends, which is
+// soon enough because nothing outside the test reads it.
 func runHandoffScenario(t *testing.T, listen func(string) (net.Listener, error)) handoffResult {
 	t.Helper()
 	dir, err := os.MkdirTemp("/tmp", "cepm-ipc")

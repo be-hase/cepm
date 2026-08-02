@@ -393,26 +393,20 @@ func TestResolveChromeFailsRatherThanSkips(t *testing.T) {
 	}
 }
 
-// Two runs repairing the same incomplete cache entry must both succeed: the
-// loser of the rename race wants exactly what the winner produced. Both are
-// held at the quarantine point — past the first rename and its winner
-// check, where the collision the final re-check exists for happens.
+// Two runs repairing the same incomplete cache entry must both succeed and
+// leave a complete cache: the loser of the race wants exactly what the
+// winner produced. Both are gathered at the promotion stage, each holding a
+// verified tree, before either is allowed to install it.
 func TestConcurrentRepairOfAnIncompleteCacheBothSucceed(t *testing.T) {
 	cs := newChromeServer(t, "100.0.0", filepath.Join("chrome-testplat", "chrome"))
 	cacheDir := t.TempDir()
-	partial := filepath.Join(cacheDir, "100.0.0", "chrome-testplat")
-	if err := os.MkdirAll(partial, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(partial, "half"), []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	writeIncompleteCache(t, cacheDir)
 
 	const runners = 2
-	atCollision := make(chan struct{}, runners)
+	atPromotion := make(chan struct{}, runners)
 	release := make(chan struct{})
 	barrier := func() {
-		atCollision <- struct{}{}
+		atPromotion <- struct{}{}
 		<-release
 	}
 
@@ -423,22 +417,17 @@ func TestConcurrentRepairOfAnIncompleteCacheBothSucceed(t *testing.T) {
 	results := make(chan result, runners)
 	for i := 0; i < runners; i++ {
 		go func() {
-			f := &chromeFetcher{versionsURL: cs.URL + "/versions.json", cacheDir: cacheDir,
-				platform: "testplat", binRel: filepath.Join("chrome-testplat", "chrome"),
-				beforeQuarantine: barrier}
+			f := newRepairFetcher(cs, cacheDir)
+			f.beforePromote = barrier
 			bin, _, err := f.ensure(quietf)
 			results <- result{bin, err}
 		}()
 	}
-	// Both must have found the destination unusable and be about to move
-	// it aside: that is where the collision the winner re-check exists for
-	// actually happens. Releasing earlier lets one finish before the other
-	// looks, which proves nothing.
 	for i := 0; i < runners; i++ {
 		select {
-		case <-atCollision:
+		case <-atPromotion:
 		case <-time.After(30 * time.Second):
-			t.Fatal("a repair never reached the quarantine point")
+			t.Fatal("a repair never reached the promotion stage")
 		}
 	}
 	close(release)
@@ -457,5 +446,85 @@ func TestConcurrentRepairOfAnIncompleteCacheBothSucceed(t *testing.T) {
 	}
 	if !fileExists(filepath.Join(cacheDir, "100.0.0", "chrome-testplat", "chrome")) {
 		t.Error("the cache entry should be complete afterwards")
+	}
+}
+
+// The guarantee behind that: promotion is mutually exclusive. While one run
+// holds the promotion lock, another must not be inside it — that overlap is
+// what let a run move aside a tree the other had just installed and then
+// return a path with no binary in it.
+func TestPromotionIsSerialized(t *testing.T) {
+	cs := newChromeServer(t, "100.0.0", filepath.Join("chrome-testplat", "chrome"))
+	cacheDir := t.TempDir()
+	writeIncompleteCache(t, cacheDir)
+
+	firstInside := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	firstDone := make(chan error, 1)
+	go func() {
+		f := newRepairFetcher(cs, cacheDir)
+		f.insidePromoteLock = func() {
+			close(firstInside)
+			<-releaseFirst
+		}
+		_, _, err := f.ensure(quietf)
+		firstDone <- err
+	}()
+	select {
+	case <-firstInside:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the first repair never entered the promotion lock")
+	}
+
+	secondInside := make(chan struct{})
+	secondDone := make(chan error, 1)
+	go func() {
+		f := newRepairFetcher(cs, cacheDir)
+		f.insidePromoteLock = func() { close(secondInside) }
+		_, _, err := f.ensure(quietf)
+		secondDone <- err
+	}()
+
+	// It must block: the wait is bounded, and entering within it is the
+	// failure — a passing run pays this once.
+	select {
+	case <-secondInside:
+		t.Fatal("two repairs were inside the promotion lock at once")
+	case <-time.After(500 * time.Millisecond):
+	}
+
+	close(releaseFirst)
+	for _, done := range []chan error{firstDone, secondDone} {
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Errorf("a serialized repair failed: %v", err)
+			}
+		case <-time.After(30 * time.Second):
+			t.Fatal("a serialized repair never finished")
+		}
+	}
+	if !fileExists(filepath.Join(cacheDir, "100.0.0", "chrome-testplat", "chrome")) {
+		t.Error("the cache entry should be complete afterwards")
+	}
+}
+
+// writeIncompleteCache leaves the debris an interrupted extraction would:
+// a directory named after the current version, with no binary in it.
+func writeIncompleteCache(t *testing.T, cacheDir string) {
+	t.Helper()
+	partial := filepath.Join(cacheDir, "100.0.0", "chrome-testplat")
+	if err := os.MkdirAll(partial, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(partial, "half"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func newRepairFetcher(cs *chromeServer, cacheDir string) *chromeFetcher {
+	return &chromeFetcher{
+		versionsURL: cs.URL + "/versions.json", cacheDir: cacheDir,
+		platform: "testplat", binRel: filepath.Join("chrome-testplat", "chrome"),
 	}
 }

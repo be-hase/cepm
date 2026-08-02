@@ -15,6 +15,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gofrs/flock"
 )
 
 const versionsURL = "https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json"
@@ -37,11 +39,13 @@ type chromeFetcher struct {
 	cacheDir    string
 	platform    string
 	binRel      string // binary path inside the extracted archive
-	// beforeQuarantine runs once this fetcher has found the destination
-	// occupied by an unusable tree and is about to move it aside — the
-	// exact point two repairs of the same entry collide. Test-only seam
-	// (nil in production), per fetcher rather than global.
-	beforeQuarantine func()
+	// beforePromote runs when this fetcher holds a verified tree and is
+	// about to take the promotion lock; insidePromoteLock runs once it
+	// holds that lock. Test-only seams (nil in production), per fetcher:
+	// promotion is where two repairs of the same entry collide, and the
+	// second is how a test proves they are actually serialized.
+	beforePromote     func()
+	insidePromoteLock func()
 }
 
 // chromeReporter is the slice of *testing.T resolveChrome needs. Splitting
@@ -272,36 +276,35 @@ func (f *chromeFetcher) download(url, dest string) error {
 	if !fileExists(filepath.Join(tree, f.binRel)) {
 		return fmt.Errorf("archive from %s has no %s", url, f.binRel)
 	}
-	// Another run may have finished the same version first; its tree is as
-	// good as ours, so treat losing the race as success. A *partial* tree
-	// at dest (an older cepm interrupted mid-unzip) has no such claim: move
-	// it aside so this complete one can take its place, rather than failing
-	// every future run against debris nothing repairs.
-	if err := os.Rename(tree, dest); err != nil {
-		if fileExists(filepath.Join(dest, f.binRel)) {
-			return nil
-		}
-		if f.beforeQuarantine != nil {
-			f.beforeQuarantine()
-		}
-		quarantine, qerr := os.MkdirTemp(f.cacheDir, ".broken-*")
-		if qerr != nil {
-			return err
-		}
-		defer os.RemoveAll(quarantine)
-		if mErr := os.Rename(dest, filepath.Join(quarantine, "old")); mErr != nil && !os.IsNotExist(mErr) {
-			return err
-		}
-		if rErr := os.Rename(tree, dest); rErr != nil {
-			// Same race as above, one step later: another run may have
-			// repaired the entry while we were quarantining. A complete
-			// tree at dest is the outcome we wanted either way.
-			if fileExists(filepath.Join(dest, f.binRel)) {
-				return nil
-			}
-			return rErr
-		}
+	return f.promote(tree, dest)
+}
+
+// promote installs a verified tree at dest, serialized against other runs
+// by a lock file. Without that serialization the steps interleave: one run
+// can move aside the tree another has just finished installing, and that
+// other run then returns a path whose binary no longer exists. Under the
+// lock the sequence is a plain check-then-swap.
+func (f *chromeFetcher) promote(tree, dest string) error {
+	if f.beforePromote != nil {
+		f.beforePromote()
+	}
+	lock := flock.New(filepath.Join(f.cacheDir, ".promote.lock"))
+	if err := lock.Lock(); err != nil {
+		return err
+	}
+	defer lock.Unlock()
+	if f.insidePromoteLock != nil {
+		f.insidePromoteLock()
+	}
+	// Another run may have finished this version first; its tree is as good
+	// as ours, and it is not ours to disturb.
+	if fileExists(filepath.Join(dest, f.binRel)) {
 		return nil
 	}
-	return nil
+	// Anything else at dest is debris from an interrupted run — the lock is
+	// what makes that safe to say.
+	if err := os.RemoveAll(dest); err != nil {
+		return err
+	}
+	return os.Rename(tree, dest)
 }
