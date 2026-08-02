@@ -3,6 +3,7 @@ package gitx
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -94,5 +95,114 @@ func TestErrorsCarryNoRawControlCharacters(t *testing.T) {
 		if !strings.Contains(msg, forged) {
 			t.Errorf("fixture missed: %q should appear (quoted) in %q", forged, msg)
 		}
+	}
+}
+
+// gitIn runs a git command in dir with a pinned identity.
+func gitIn(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	cmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t",
+		"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t",
+		"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// The auto-stash must be restored by identity, not by position. A user (or
+// another tool) can stash in the same clone while cepm is pulling; popping
+// "the top one" would then apply their work, delete their entry, and leave
+// cepm's own changes stranded in the stash.
+func TestStashPopRestoresOurEntryNotWhateverIsOnTop(t *testing.T) {
+	dir := t.TempDir()
+	gitIn(t, dir, "init", "--initial-branch=main")
+	if err := os.WriteFile(filepath.Join(dir, "ours"), []byte("committed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "theirs"), []byte("committed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitIn(t, dir, "add", "-A")
+	gitIn(t, dir, "commit", "-m", "base")
+
+	repo := Repo{Dir: dir}
+	ctx := context.Background()
+
+	// cepm's auto-stash of the user's in-progress edit.
+	if err := os.WriteFile(filepath.Join(dir, "ours"), []byte("cepm stashed this\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stashID, err := repo.StashPush(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stashID == "" {
+		t.Fatal("a dirty tree should have produced a stash")
+	}
+
+	// Meanwhile the user stashes something of their own; it lands on top.
+	if err := os.WriteFile(filepath.Join(dir, "theirs"), []byte("user stashed this\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitIn(t, dir, "stash", "push", "-m", "the user's own stash")
+
+	if err := repo.StashPop(ctx, stashID); err != nil {
+		t.Fatalf("popping our own stash: %v", err)
+	}
+
+	ours, err := os.ReadFile(filepath.Join(dir, "ours"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(ours) != "cepm stashed this\n" {
+		t.Errorf("cepm's own change was not restored, file is %q", ours)
+	}
+	theirs, err := os.ReadFile(filepath.Join(dir, "theirs"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(theirs) != "committed\n" {
+		t.Errorf("the user's stash was applied to the working tree: %q", theirs)
+	}
+	if list := gitIn(t, dir, "stash", "list"); !strings.Contains(list, "the user's own stash") {
+		t.Errorf("the user's stash must still be there, list is:\n%s", list)
+	}
+	if strings.Contains(gitIn(t, dir, "stash", "list"), "cepm auto-stash") {
+		t.Error("cepm's own stash should be gone after a successful pop")
+	}
+}
+
+// A stash that has disappeared (dropped by hand between push and pop) is
+// named in the error rather than silently taking someone else's entry.
+func TestStashPopRefusesWhenOurEntryIsGone(t *testing.T) {
+	dir := t.TempDir()
+	gitIn(t, dir, "init", "--initial-branch=main")
+	if err := os.WriteFile(filepath.Join(dir, "f"), []byte("committed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitIn(t, dir, "add", "-A")
+	gitIn(t, dir, "commit", "-m", "base")
+
+	repo := Repo{Dir: dir}
+	ctx := context.Background()
+	if err := os.WriteFile(filepath.Join(dir, "f"), []byte("edited\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stashID, err := repo.StashPush(ctx)
+	if err != nil || stashID == "" {
+		t.Fatalf("StashPush: %q %v", stashID, err)
+	}
+	gitIn(t, dir, "stash", "drop")
+
+	err = repo.StashPop(ctx, stashID)
+	if err == nil {
+		t.Fatal("popping a vanished stash must fail")
+	}
+	if !strings.Contains(err.Error(), stashID) {
+		t.Errorf("the error should name the missing entry: %v", err)
 	}
 }

@@ -219,22 +219,27 @@ func updateRepo(ctx context.Context, name string, r *state.Repo, opts Options, t
 		return res
 	}
 
-	stashed := false
+	stashID := ""
 	if dirty {
-		if stashed, err = repo.StashPush(ctx); err != nil {
+		if stashID, err = repo.StashPush(ctx); err != nil {
 			res.Err = fmt.Errorf("stash: %w", err)
 			return res
 		}
 	}
 	newTag, moveErr := moveToLatest(ctx, repo, r, &res)
-	if stashed {
-		if err := repo.StashPop(ctx); err != nil {
+	if stashID != "" {
+		if err := repo.StashPop(ctx, stashID); err != nil {
 			// The tree now holds conflict markers, so re-scanning it would
 			// misread manifests and unregister extensions. Stop here and let
-			// the user resolve it.
+			// the user resolve it — naming the entry, since another stash may
+			// have been pushed on top of it since.
+			ref, refErr := repo.StashRef(ctx, stashID)
+			if refErr != nil || ref == "" {
+				ref = stashID
+			}
 			res.Err = fmt.Errorf("restoring your local changes failed; resolve the conflict in %s "+
-				"(your changes are still in the stash: git -C %s stash pop): %w",
-				term.Quote(dir), term.Quote(dir), err)
+				"(your changes are still in the stash: git -C %s stash pop %s): %w",
+				term.Quote(dir), term.Quote(dir), term.Quote(ref), err)
 			return res
 		}
 	}

@@ -191,24 +191,46 @@ func (r Repo) ChangedFiles(ctx context.Context, from, to string) ([]string, erro
 	return strings.Split(out, "\n"), nil
 }
 
-// StashPush stashes local changes including untracked files. It reports
-// whether an entry was actually created: "git status --porcelain" considers
-// e.g. a dirty submodule a change, but stash refuses to save it ("No local
-// changes to save") and still exits 0. Popping in that case would drop an
-// unrelated stash entry belonging to the user.
-func (r Repo) StashPush(ctx context.Context) (stashed bool, err error) {
+// StashPush stashes local changes including untracked files and returns the
+// commit id of the entry it created, or "" when it created none: "git status
+// --porcelain" considers e.g. a dirty submodule a change, but stash refuses
+// to save it ("No local changes to save") and still exits 0. Popping in that
+// case would drop an unrelated stash entry belonging to the user.
+//
+// The id is what StashPop restores by: stash positions shift, and the entry
+// cepm pushed is not necessarily the top one by the time it pops.
+func (r Repo) StashPush(ctx context.Context) (stashID string, err error) {
 	before, err := r.stashTop(ctx)
 	if err != nil {
-		return false, err
+		return "", err
 	}
 	if _, err := run(ctx, r.Dir, "stash", "push", "--include-untracked", "--message", "cepm auto-stash"); err != nil {
-		return false, err
+		return "", err
 	}
 	after, err := r.stashTop(ctx)
 	if err != nil {
-		return false, err
+		return "", err
 	}
-	return after != "" && after != before, nil
+	if after == "" || after == before {
+		return "", nil
+	}
+	return after, nil
+}
+
+// StashRef returns the stash reference (stash@{n}) currently holding the
+// entry with the given commit id, or "" when the entry is gone.
+func (r Repo) StashRef(ctx context.Context, stashID string) (string, error) {
+	out, err := run(ctx, r.Dir, "stash", "list", "--format=%H %gd")
+	if err != nil {
+		return "", err
+	}
+	for _, line := range strings.Split(out, "\n") {
+		id, ref, ok := strings.Cut(strings.TrimSpace(line), " ")
+		if ok && id == stashID {
+			return ref, nil
+		}
+	}
+	return "", nil
 }
 
 // stashTop returns the commit id of refs/stash, or "" when there is none.
@@ -222,9 +244,19 @@ func (r Repo) stashTop(ctx context.Context) (string, error) {
 	return out, nil
 }
 
-// StashPop restores the most recent stash. On conflict the stash entry is
-// kept by git; callers should surface the error to the user.
-func (r Repo) StashPop(ctx context.Context) error {
-	_, err := run(ctx, r.Dir, "stash", "pop")
+// StashPop restores the entry StashPush created, by id — never "the top
+// one". The user (or another tool) can push a stash in the clone while cepm
+// is pulling, and popping blind would apply their work, delete their entry,
+// and leave cepm's own changes sitting in the stash. On conflict git keeps
+// the entry; callers should surface the error to the user.
+func (r Repo) StashPop(ctx context.Context, stashID string) error {
+	ref, err := r.StashRef(ctx, stashID)
+	if err != nil {
+		return err
+	}
+	if ref == "" {
+		return fmt.Errorf("the auto-stash %s is no longer in the stash list", stashID)
+	}
+	_, err = run(ctx, r.Dir, "stash", "pop", ref)
 	return err
 }
