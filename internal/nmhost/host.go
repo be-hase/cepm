@@ -949,6 +949,13 @@ func (h *Host) autoUpdate(ctx context.Context, cfg *config.Config) {
 	}
 	var ids []string
 	for _, r := range results {
+		// Before the outcome branches and independent of them: a warning
+		// can accompany any of them, and the periodic updater is the one
+		// path with nobody watching a terminal. The leftover auto-stash in
+		// particular would otherwise pile up unannounced on a dirty clone.
+		for _, w := range r.Warnings {
+			h.log.Warn("repo update warning", "repo", r.Name, "warning", w)
+		}
 		switch {
 		case r.Err != nil:
 			h.log.Warn("repo update failed", "repo", r.Name, "err", r.Err)

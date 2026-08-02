@@ -268,17 +268,17 @@ func (r Repo) StashRef(ctx context.Context, stashID string) (string, error) {
 	return "", nil
 }
 
-// StashPop restores the entry StashPush created — never "the top one". The
-// user (or another tool) can push a stash in the clone while cepm is
-// pulling, and popping blind would apply their work, delete their entry, and
-// leave cepm's own changes sitting in the stash.
+// StashPop restores the entry StashPush created — never "the top one" — and
+// removes nothing. The user (or another tool) can push a stash in the clone
+// while cepm is pulling, so applying goes by commit id, which no concurrent
+// push can move.
 //
-// Applying is done by commit id, which no concurrent push can move. Only
-// dropping needs a position, and git offers no way to drop by id: the
-// position is re-resolved and re-verified immediately before, and if it
-// cannot be confirmed the entry is left in place rather than risking
-// someone else's. On conflict git keeps the entry; callers should surface
-// the error to the user.
+// Nothing is dropped because nothing can be dropped safely: git deletes a
+// stash entry by position only, and the position can name someone else's
+// entry by the time the command runs. It returns the id of the entry it
+// left, so the caller can tell the user what to clean up; "" means the
+// entry was already gone. On conflict the apply itself fails and the error
+// is the caller's to surface.
 func (r Repo) StashPop(ctx context.Context, stashID string) (leftBehind string, err error) {
 	// By commit id, with no position resolved first: there is then no
 	// window in which a concurrent push can redirect what gets applied.

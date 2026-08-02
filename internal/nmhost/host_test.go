@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -1242,4 +1243,84 @@ func TestFlushDoesNotSettleADebtAddedMidFlight(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("the newer debt was never retried")
 	}
+}
+
+// The periodic updater is the one path with nobody watching a terminal, so
+// a warning it drops is a warning nobody ever sees. With stash_dirty set, a
+// clone left dirty collects an auto-stash every cycle — silently, before
+// this.
+func TestAutoUpdateLogsRepoWarnings(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "cepm-host")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	t.Setenv("CEPM_HOME", dir)
+
+	// A real clone with a real local edit: the warning has to carry the
+	// stash commit the update actually leaves behind.
+	base := t.TempDir()
+	bare := filepath.Join(base, "origin.git")
+	hostGit(t, base, "init", "--bare", "--initial-branch=main", bare)
+	author := filepath.Join(base, "author")
+	hostGit(t, base, "clone", bare, author)
+	if err := os.WriteFile(filepath.Join(author, "README.md"), []byte("hi\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	hostGit(t, author, "add", "-A")
+	hostGit(t, author, "commit", "-m", "initial")
+	hostGit(t, author, "push", "origin", "main")
+
+	clone, err := updater.RepoDir("testrepo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(clone), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	hostGit(t, base, "clone", bare, clone)
+	head := hostGit(t, clone, "rev-parse", "HEAD")
+	if err := os.WriteFile(filepath.Join(clone, "README.md"), []byte("local edit\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	st := state.New()
+	st.Repos["testrepo"] = &state.Repo{URL: bare, Track: state.TrackBranch, Branch: "main", Head: head}
+	if err := st.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf syncBuffer
+	h := &Host{log: slog.New(slog.NewTextHandler(&buf, nil))}
+	h.autoUpdate(context.Background(), &config.Config{Git: config.GitConfig{StashDirty: true}})
+
+	stashes := hostGit(t, clone, "stash", "list", "--format=%H")
+	if stashes == "" {
+		t.Fatal("fixture: the update should have left an auto-stash")
+	}
+	logged := buf.String()
+	if !strings.Contains(logged, "warning") {
+		t.Fatalf("repo warnings must reach the host log:\n%s", logged)
+	}
+	if !strings.Contains(logged, strings.Split(stashes, "\n")[0]) {
+		t.Errorf("the logged warning should name the stash commit:\n%s", logged)
+	}
+	if !strings.Contains(logged, "stash list") {
+		t.Errorf("the logged warning should say how to inspect it:\n%s", logged)
+	}
+	if !strings.Contains(logged, "testrepo") {
+		t.Errorf("the logged warning should name the repository:\n%s", logged)
+	}
+}
+
+func hostGit(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	cmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t",
+		"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+	return strings.TrimSpace(string(out))
 }

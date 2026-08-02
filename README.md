@@ -154,7 +154,7 @@ interval = "1h"    # auto-update cadence while Chrome runs (min "1m")
 auto     = true    # set false to only update via "cepm update"
 
 [git]
-stash_dirty = false  # stash/pop around pulls when a clone has local edits
+stash_dirty = false  # stash local edits around pulls (also the periodic ones)
 ```
 
 By default a repo with local modifications is skipped (with a warning) so
@@ -162,7 +162,9 @@ your experiments are never clobbered; `cepm update --force` stashes and
 restores them around the pull. cepm never deletes a stash entry — git can
 only drop one by position, and doing that could take an entry you pushed at
 the same moment — so it reports the one it left and you remove it when
-convenient (`git -C <clone> stash list`).
+convenient (`git -C <clone> stash list`). `git.stash_dirty = true` applies to
+the automatic updates too, so a clone left dirty collects one entry per
+update; the host writes each to `~/.cepm/logs/host.log`.
 
 ## Troubleshooting
 

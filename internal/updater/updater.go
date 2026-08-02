@@ -85,7 +85,11 @@ type RepoResult struct {
 
 // Options controls update behavior.
 type Options struct {
-	StashDirty bool // stash+pop around the pull when the tree is dirty
+	// StashDirty stashes local changes around the pull and restores them
+	// afterwards. cepm never deletes the stash entry it creates (see
+	// gitx.StashPop), so a clone that stays dirty accumulates one per
+	// update; each is reported in Warnings.
+	StashDirty bool
 }
 
 // LockTimeout bounds how long we wait for a concurrent update to finish.

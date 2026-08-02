@@ -159,7 +159,7 @@ interval = "1h"    # Chrome 起動中の自動更新の間隔(最小 "1m")
 auto     = true    # false にすると "cepm update" 実行時のみ更新
 
 [git]
-stash_dirty = false  # clone にローカル変更があるとき stash/pop して pull する
+stash_dirty = false  # ローカル変更を stash して pull(自動更新にも適用)
 ```
 
 既定では、ローカルに変更のあるリポジトリは警告つきで skip されます。作業中の
@@ -167,7 +167,9 @@ stash_dirty = false  # clone にローカル変更があるとき stash/pop し�
 stash と復元を行います。なお cepm が stash エントリを削除することはありません
 (git は位置指定でしか削除できず、同じタイミングであなたが積んだエントリを
 消しかねないためです)。cepm が残したエントリは警告で報告されるので、都合の
-よいときに削除してください(`git -C <clone> stash list`)。
+よいときに削除してください(`git -C <clone> stash list`)。`git.stash_dirty = true`
+は自動更新にも適用されるため、ローカル変更を残したままの clone では更新ごとに
+1件ずつ溜まります(host は毎回 `~/.cepm/logs/host.log` に記録します)。
 
 ## 困ったときは
 
