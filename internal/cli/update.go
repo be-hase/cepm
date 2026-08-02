@@ -122,6 +122,7 @@ type reloadOutcome struct {
 	HostUnreachable bool
 	Reloaded        int
 	Failed          int      // transport errors, per-id errors, missing answers
+	Skipped         int      // final non-reload answers: disabled in Chrome, Web Store, self, state changed
 	NotInstalledIDs []string // for enable: these still need the load ceremony
 }
 
@@ -168,12 +169,16 @@ func reloadExtensions(ctx context.Context, out io.Writer, items []reloadItem) re
 			outcome.NotInstalledIDs = append(outcome.NotInstalledIDs, it.ID)
 			fmt.Fprintf(out, "  %s is not loaded in Chrome (one-time \"Load unpacked\" still needed)\n", name)
 		case r.Status == ipc.StatusSkippedDisabled:
+			outcome.Skipped++
 			fmt.Fprintf(out, "  %s is turned off in Chrome; left as is\n", name)
 		case r.Status == ipc.StatusSkippedStateChanged:
+			outcome.Skipped++
 			fmt.Fprintf(out, "  %s is no longer enabled or managed by cepm; reload skipped\n", name)
 		case r.Status == ipc.StatusSkippedSelf:
+			outcome.Skipped++
 			fmt.Fprintf(out, "  %s is the cepm helper itself; it applies updates on the next Chrome start\n", name)
 		case r.Status == ipc.StatusSkippedNotUnpacked:
+			outcome.Skipped++
 			fmt.Fprintf(out, "  %s is installed from the Web Store, not loaded unpacked; left alone\n", name)
 		default:
 			outcome.Failed++

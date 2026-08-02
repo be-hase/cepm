@@ -64,6 +64,7 @@ type fakeHost struct {
 	failReloads        bool
 	dropReloadResults  bool
 	reloadNotInstalled bool
+	reloadStatusByID   map[string]string // per-id status override
 	// Helper-compat presentation for doctor tests.
 	helperVersion string
 	helperTooOld  bool
@@ -148,6 +149,8 @@ func (h *fakeHost) handle(_ context.Context, req ipc.Request) ipc.Response {
 		for i, id := range req.IDs {
 			status := ipc.StatusReloaded
 			switch {
+			case h.reloadStatusByID[id] != "":
+				status = h.reloadStatusByID[id]
 			case h.failReloads:
 				status = ipc.StatusError
 			case h.reloadNotInstalled:

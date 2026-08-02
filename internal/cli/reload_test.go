@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/be-hase/cepm/internal/ipc"
 	"github.com/be-hase/cepm/internal/paths"
 	"github.com/be-hase/cepm/internal/state"
 )
@@ -55,6 +56,37 @@ func TestReloadExitCodes(t *testing.T) {
 		seedRepo(t, "tools", state.Extension{Dir: "ext", Name: "Ext", ID: idA, Key: keyA})
 		if _, err := run(t, "", "reload", "tools"); err == nil {
 			t.Error("an unanswered reload must exit non-zero")
+		}
+	})
+
+	t.Run("not installed", func(t *testing.T) {
+		h := startFakeHost(t, idA)
+		h.reloadNotInstalled = true
+		seedRepo(t, "tools", state.Extension{Dir: "ext", Name: "Ext", ID: idA, Key: keyA})
+		if _, err := run(t, "", "reload", "tools"); err == nil {
+			t.Error("an extension not loaded in Chrome was not reloaded; reload must exit non-zero")
+		}
+	})
+
+	t.Run("skipped in Chrome", func(t *testing.T) {
+		h := startFakeHost(t, idA)
+		h.reloadStatusByID = map[string]string{idA: ipc.StatusSkippedDisabled}
+		seedRepo(t, "tools", state.Extension{Dir: "ext", Name: "Ext", ID: idA, Key: keyA})
+		if _, err := run(t, "", "reload", "tools"); err == nil {
+			t.Error("a skipped extension was not reloaded; reload must exit non-zero")
+		}
+	})
+
+	t.Run("mixed reloaded and skipped", func(t *testing.T) {
+		h := startFakeHost(t, idA, idB)
+		h.reloadStatusByID = map[string]string{idB: ipc.StatusSkippedNotUnpacked}
+		seedRepo(t, "tools",
+			state.Extension{Dir: "a", Name: "A", ID: idA, Key: keyA},
+			state.Extension{Dir: "b", Name: "B", ID: idB, Key: keyB},
+		)
+		out, err := run(t, "", "reload", "tools")
+		if err == nil {
+			t.Errorf("one of two requested reloads did not happen; reload must exit non-zero:\n%s", out)
 		}
 	})
 

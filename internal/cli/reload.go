@@ -61,8 +61,12 @@ reloaded; otherwise pass repository names.`,
 			if outcome.HostUnreachable {
 				return errors.New("nothing was reloaded: the cepm host is not reachable (is Chrome running with the helper loaded?)")
 			}
-			if outcome.Failed > 0 {
-				return fmt.Errorf("%d of %d reload(s) failed (see above)", outcome.Failed, len(items))
+			// Anything short of an actual reload is a miss for this command:
+			// "not loaded in Chrome" or "turned off in Chrome" may be fine
+			// for update, but the user asked for these reloads by name.
+			if outcome.Reloaded < len(items) {
+				return fmt.Errorf("%d of %d requested reload(s) did not happen (%d failed, %d skipped, %d not loaded in Chrome — see above)",
+					len(items)-outcome.Reloaded, len(items), outcome.Failed, outcome.Skipped, len(outcome.NotInstalledIDs))
 			}
 			return nil
 		},
