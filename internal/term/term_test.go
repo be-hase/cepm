@@ -46,6 +46,25 @@ func TestSafe(t *testing.T) {
 	}
 }
 
+func TestSafeLines(t *testing.T) {
+	tests := []struct {
+		in, want string
+	}{
+		// Newlines separate lines; everything else is escaped per line.
+		{"fatal: no access\nPlease check your keys", "fatal: no access\nPlease check your keys"},
+		{"remote: \x1b]0;pwned\x07 done", `remote: \x1b]0;pwned\x07 done`},
+		{"line one\r\nline two", "line one\nline two"},
+		{"cr\rmid", `cr\x0dmid`},
+		// Idempotent: escaping already-escaped text changes nothing.
+		{`remote: \x1b]0;pwned\x07`, `remote: \x1b]0;pwned\x07`},
+	}
+	for _, tt := range tests {
+		if got := SafeLines(tt.in); got != tt.want {
+			t.Errorf("SafeLines(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
+
 func TestHasControl(t *testing.T) {
 	for _, s := range []string{"a\nb", "\x1b", "a‮b"} {
 		if !HasControl(s) {

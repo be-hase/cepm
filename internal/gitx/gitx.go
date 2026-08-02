@@ -12,6 +12,8 @@ import (
 	"os/exec"
 	"regexp"
 	"strings"
+
+	"github.com/be-hase/cepm/internal/term"
 )
 
 // Repo is a git working tree at Dir.
@@ -60,7 +62,11 @@ func run(ctx context.Context, dir string, args ...string) (string, error) {
 		}
 		// Redact: args and git's own output can contain a URL with embedded
 		// credentials, and this text is shown, logged, and pasted into chats.
-		return "", fmt.Errorf("git %s: %s", RedactURL(strings.Join(args, " ")), RedactURL(msg))
+		// Escape: stderr is written by the remote ("remote:" lines, SSH
+		// banners), so it can carry escape sequences aimed at the terminal.
+		return "", fmt.Errorf("git %s: %s",
+			term.SafeLines(RedactURL(strings.Join(args, " "))),
+			term.SafeLines(RedactURL(msg)))
 	}
 	return strings.TrimSpace(stdout.String()), nil
 }

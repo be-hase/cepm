@@ -47,6 +47,20 @@ func Safe(s string) string {
 	return b.String()
 }
 
+// SafeLines is Safe applied per line: real newlines (and a CR ending a CRLF
+// pair) survive, so a multi-line git or SSH message stays readable, while
+// every other control character is escaped. The newline a hostile remote can
+// forge with this buys it a blank-looking line inside an error paragraph —
+// not a repainted terminal, which is what Safe exists to prevent. Applying it
+// to already-escaped text changes nothing, so layered callers are fine.
+func SafeLines(s string) string {
+	lines := strings.Split(s, "\n")
+	for i, line := range lines {
+		lines[i] = Safe(strings.TrimSuffix(line, "\r"))
+	}
+	return strings.Join(lines, "\n")
+}
+
 // isBidi reports whether r can reorder how a line is displayed.
 func isBidi(r rune) bool {
 	return (r >= 0x200E && r <= 0x200F) || (r >= 0x202A && r <= 0x202E) || (r >= 0x2066 && r <= 0x2069)

@@ -63,7 +63,7 @@ func printUpdateResults(out io.Writer, results []updater.RepoResult) (failed boo
 		switch {
 		case r.Err != nil:
 			failed = true
-			fmt.Fprintf(out, "✘ %-16s %v\n", r.Name, r.Err)
+			fmt.Fprintf(out, "✘ %-16s %v\n", r.Name, term.SafeLines(r.Err.Error()))
 		case r.Skipped:
 			fmt.Fprintf(out, "- %-16s skipped: %s\n", r.Name, r.SkipReason)
 		case !r.Updated:
