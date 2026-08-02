@@ -1033,18 +1033,29 @@ func TestEnableDisableRoundTrip(t *testing.T) {
 	}
 }
 
-// Repository URLs can carry a token; no command may print it.
+// Repository URLs can carry a token — in the userinfo, the query, or the
+// fragment; no command may print any of them.
 func TestListDoesNotLeakCredentials(t *testing.T) {
 	startFakeHost(t)
 	seedRepo(t, "tools", state.Extension{Dir: "ext", Name: "Ext", ID: idA, Key: keyA})
+	st, err := state.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.Repos["tools"].URL = "https://user:TOKEN@example.com/t/r.git?private_token=QSECRET#token=FSECRET"
+	if err := st.Save(); err != nil {
+		t.Fatal(err)
+	}
 
 	for _, args := range [][]string{{"list"}, {"list", "--json"}} {
 		out, err := run(t, "", args...)
 		if err != nil {
 			t.Fatalf("%v: %v\n%s", args, err, out)
 		}
-		if strings.Contains(out, "TOKEN") {
-			t.Errorf("%v leaked the token:\n%s", args, out)
+		for _, secret := range []string{"TOKEN", "QSECRET", "FSECRET"} {
+			if strings.Contains(out, secret) {
+				t.Errorf("%v leaked %s:\n%s", args, secret, out)
+			}
 		}
 	}
 	out, _ := run(t, "", "list", "--json")
@@ -1103,7 +1114,7 @@ func TestSetupRegistersExactlyOneChrome(t *testing.T) {
 // URL as given, because it can carry a token.
 func TestInstallErrorsDoNotLeakCredentials(t *testing.T) {
 	startFakeHost(t)
-	const url = "https://user:TOKEN@example.com/team/repo.git"
+	const url = "https://user:TOKEN@example.com/team/repo.git?access_token=QSECRET"
 
 	dir, err := updaterRepoDir("repo")
 	if err != nil {
@@ -1116,8 +1127,11 @@ func TestInstallErrorsDoNotLeakCredentials(t *testing.T) {
 	if err == nil {
 		t.Fatal("install should fail here")
 	}
-	if combined := out + err.Error(); strings.Contains(combined, "TOKEN") {
-		t.Errorf("install leaked the token:\n%s", combined)
+	combined := out + err.Error()
+	for _, secret := range []string{"TOKEN", "QSECRET"} {
+		if strings.Contains(combined, secret) {
+			t.Errorf("install leaked %s:\n%s", secret, combined)
+		}
 	}
 }
 

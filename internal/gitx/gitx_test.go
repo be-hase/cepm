@@ -23,6 +23,19 @@ func TestRedactURL(t *testing.T) {
 			"clone https://u:p@h/x.git failed: fatal: could not read from https://u:p@h/x.git",
 			"clone https://***@h/x.git failed: fatal: could not read from https://***@h/x.git",
 		},
+		// Tokens travel in queries and fragments too, under names nobody can
+		// enumerate — both are replaced wholesale, with no userinfo present.
+		{"https://git.example.com/repo.git?access_token=SECRET", "https://git.example.com/repo.git?***"},
+		{"https://git.example.com/repo.git#token=SECRET", "https://git.example.com/repo.git#***"},
+		{
+			"https://user:TOKEN@git.example.com/repo.git?private_token=ANOTHER#t=THIRD",
+			"https://***@git.example.com/repo.git?***#***",
+		},
+		{"https://h/x?redirect=https%3A%2F%2Fevil%2F%3Ftoken%3DSECRET", "https://h/x?***"},
+		{
+			"fetch https://h/a?x=SECRET and https://u:p@h/b failed",
+			"fetch https://h/a?*** and https://***@h/b failed",
+		},
 	}
 	for _, tt := range tests {
 		if got := RedactURL(tt.in); got != tt.want {

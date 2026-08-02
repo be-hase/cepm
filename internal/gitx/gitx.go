@@ -25,20 +25,36 @@ type Repo struct {
 // even when embedded in git's output.
 var urlRe = regexp.MustCompile(`[a-zA-Z][a-zA-Z0-9+.-]*://[^\s'"]+`)
 
-// RedactURL removes embedded credentials from every URL in s, so tokens do
-// not reach the terminal, the logs, or a pasted bug report. Parsing with
-// net/url strips the whole userinfo section, including a bare token with no
-// password separator, which a "user:pass@" pattern would miss.
+// RedactURL removes the secret-bearing parts of every URL in s, so tokens do
+// not reach the terminal, the logs, or a pasted bug report. The userinfo is
+// stripped via net/url (which also catches a bare token with no password
+// separator, unlike a "user:pass@" pattern); the query and fragment are
+// replaced wholesale, because token parameter names are too varied to
+// enumerate. Scheme, host and path survive — they are what a diagnosis
+// needs. Display-only: what git is invoked with and what state.json stores
+// are never touched.
 func RedactURL(s string) string {
 	return urlRe.ReplaceAllStringFunc(s, func(raw string) string {
 		u, err := url.Parse(raw)
-		if err != nil || u.User == nil {
-			return raw
+		if err != nil {
+			return raw // unparsable: shown as found, no worse than before
 		}
-		// Rebuild without userinfo and re-insert a literal marker: passing
-		// "***" through url.User would percent-encode it.
+		hadUser := u.User != nil
 		u.User = nil
-		return strings.Replace(u.String(), "://", "://***@", 1)
+		if u.RawQuery != "" {
+			u.RawQuery = "***"
+		}
+		if u.Fragment != "" {
+			u.Fragment = "***"
+			u.RawFragment = ""
+		}
+		out := u.String()
+		if hadUser {
+			// Re-insert a literal marker: passing "***" through url.User
+			// would percent-encode it.
+			out = strings.Replace(out, "://", "://***@", 1)
+		}
+		return out
 	})
 }
 

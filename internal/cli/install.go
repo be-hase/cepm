@@ -358,7 +358,13 @@ func undoRename(cause error, dir, stagingClone string) error {
 // repoNameFromURL derives a directory name from a git URL:
 // "git@host:team/mytools.git" or "https://host/team/mytools" → "mytools".
 func repoNameFromURL(url string) string {
-	s := strings.TrimSuffix(strings.TrimRight(url, "/"), ".git")
+	s := url
+	// A query or fragment is not part of the name — and can carry a token,
+	// which the invalid-name error would then echo to the terminal.
+	if i := strings.IndexAny(s, "?#"); i >= 0 {
+		s = s[:i]
+	}
+	s = strings.TrimSuffix(strings.TrimRight(s, "/"), ".git")
 	if i := strings.LastIndexAny(s, "/:"); i >= 0 {
 		s = s[i+1:]
 	}
