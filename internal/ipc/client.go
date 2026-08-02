@@ -25,24 +25,37 @@ const dialRetry = 3 * time.Second
 
 // Call sends one request to the native host and returns its response.
 func Call(ctx context.Context, req Request) (*Response, error) {
-	req.Protocol = ProtocolVersion
-	sock, err := paths.SocketPath()
+	conn, r, err := dialHost(ctx, req.Cmd)
 	if err != nil {
-		return nil, err
-	}
-	slog.Debug("host request", "cmd", req.Cmd, "ids", len(req.IDs), "socket", sock)
-	conn, err := dialWithRetry(ctx, sock)
-	if err != nil {
-		slog.Debug("host not reachable", "socket", sock, "err", err)
 		return nil, err
 	}
 	defer conn.Close()
+	return exchange(conn, r, req)
+}
+
+// dialHost opens a connection to the host with the deadline ctx implies.
+func dialHost(ctx context.Context, cmd string) (net.Conn, *bufio.Reader, error) {
+	sock, err := paths.SocketPath()
+	if err != nil {
+		return nil, nil, err
+	}
+	slog.Debug("host request", "cmd", cmd, "socket", sock)
+	conn, err := dialWithRetry(ctx, sock)
+	if err != nil {
+		slog.Debug("host not reachable", "socket", sock, "err", err)
+		return nil, nil, err
+	}
 	if deadline, ok := ctx.Deadline(); ok {
 		_ = conn.SetDeadline(deadline)
 	} else {
 		_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
 	}
+	return conn, bufio.NewReader(conn), nil
+}
 
+// exchange sends one request and reads its response on an open connection.
+func exchange(conn net.Conn, r *bufio.Reader, req Request) (*Response, error) {
+	req.Protocol = ProtocolVersion
 	enc, err := json.Marshal(req)
 	if err != nil {
 		return nil, err
@@ -50,7 +63,7 @@ func Call(ctx context.Context, req Request) (*Response, error) {
 	if _, err := conn.Write(append(enc, '\n')); err != nil {
 		return nil, fmt.Errorf("write to host: %w", err)
 	}
-	line, err := bufio.NewReader(conn).ReadBytes('\n')
+	line, err := r.ReadBytes('\n')
 	if err != nil {
 		return nil, fmt.Errorf("read from host: %w", err)
 	}
@@ -104,28 +117,33 @@ func Ping(ctx context.Context) (*HostInfo, error) {
 // than this binary. It is checked before every operation, never assumed away.
 var ErrProtocolMismatch = errors.New("the running cepm host is a different version than this cepm; restart Chrome to relaunch the updated host")
 
-// checkProtocol refuses to act against a host of another generation. The
-// gate has to be on this side too: a host old enough to predate the
+// call is Call with a protocol handshake first, for every command that
+// acts. The gate has to be on this side: a host old enough to predate the
 // protocol field ignores it as unknown JSON and would carry out whatever it
-// is sent — the request has to not be sent at all. Ping is the one command
-// exempt (it is how the mismatch is discovered, here and in doctor).
-func checkProtocol(ctx context.Context) error {
-	info, err := Ping(ctx)
-	if err != nil {
-		return err
-	}
-	if info == nil || info.Protocol != ProtocolVersion {
-		return ErrProtocolMismatch
-	}
-	return nil
-}
-
-// call is Call preceded by the protocol check, for every command that acts.
+// is sent, so the request must not be sent at all. Ping is the one command
+// exempt — it is how the mismatch is discovered, here and in doctor.
+//
+// Handshake and operation share one connection, deliberately: with two, a
+// host can quit between them and a follower from before the upgrade can win
+// leadership, bind the socket, and receive an operation this CLI already
+// "verified" against its predecessor. One connection means the peer that
+// answered the ping is the peer that gets the command — or the connection
+// dies with it and nothing is executed.
 func call(ctx context.Context, req Request) (*Response, error) {
-	if err := checkProtocol(ctx); err != nil {
+	conn, r, err := dialHost(ctx, req.Cmd)
+	if err != nil {
 		return nil, err
 	}
-	return Call(ctx, req)
+	defer conn.Close()
+
+	resp, err := exchange(conn, r, Request{Cmd: CmdPing})
+	if err != nil {
+		return nil, err
+	}
+	if resp.Host == nil || resp.Host.Protocol != ProtocolVersion {
+		return nil, ErrProtocolMismatch
+	}
+	return exchange(conn, r, req)
 }
 
 // Reload asks the host to reload the given extension IDs via the helper.

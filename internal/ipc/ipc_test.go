@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -269,4 +270,101 @@ func TestMatchingProtocolSendsTheOperationOnce(t *testing.T) {
 	if operations != 1 {
 		t.Errorf("the operation should be sent exactly once, got %d", operations)
 	}
+}
+
+// The handshake and the command must reach the same host process. With two
+// connections a host can quit in between and a follower from before the
+// upgrade can win leadership and receive a command this CLI only ever
+// verified against its predecessor — so the command must ride the same
+// connection the ping was answered on.
+func TestOperationsSurviveALeaderHandoffAfterTheHandshake(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "cepm-ipc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	t.Setenv("CEPM_HOME", dir)
+	if err := os.MkdirAll(filepath.Join(dir, "run"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sock := filepath.Join(dir, "run", "cepm.sock")
+
+	// The current host: answers the handshake, then dies — the moment a
+	// two-connection client would step into.
+	handedOver := make(chan struct{})
+	current, err := Listen(sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	currentCtx, stopCurrent := context.WithCancel(context.Background())
+	t.Cleanup(stopCurrent)
+	go Serve(currentCtx, current, func(ctx context.Context, req Request) Response {
+		if req.Cmd == CmdPing {
+			// Hand the socket to the old host as soon as the handshake is
+			// answered; the reply is already on its way back.
+			defer func() {
+				stopCurrent()
+				<-handedOver
+			}()
+			return Response{OK: true, Host: &HostInfo{Protocol: ProtocolVersion}}
+		}
+		return Response{OK: true, Results: []ReloadResult{{ID: "aaa", Status: StatusReloaded}}}
+	})
+
+	// The successor: a host from before the protocol field, which would
+	// carry out anything it is handed.
+	var mu sync.Mutex
+	var oldHostSaw []string
+	go func() {
+		<-currentCtx.Done()
+		old, err := Listen(sock) // replaces the socket, like a new leader
+		if err != nil {
+			close(handedOver)
+			return
+		}
+		t.Cleanup(func() { old.Close() })
+		go Serve(context.Background(), old, func(ctx context.Context, req Request) Response {
+			mu.Lock()
+			oldHostSaw = append(oldHostSaw, req.Cmd)
+			mu.Unlock()
+			return Response{OK: true, Results: []ReloadResult{{ID: "aaa", Status: StatusReloaded}}}
+		})
+		close(handedOver)
+	}()
+
+	// Whether this errors or succeeds depends on timing; what must never
+	// happen is the old host executing the command.
+	_, _ = Reload(context.Background(), []string{"aaa"})
+	<-handedOver
+
+	mu.Lock()
+	defer mu.Unlock()
+	for _, cmd := range oldHostSaw {
+		if cmd != CmdPing {
+			t.Errorf("the pre-protocol host executed %q after the handoff (saw %v)", cmd, oldHostSaw)
+		}
+	}
+}
+
+// A standalone ping must not leave the connection (or a goroutine) behind.
+func TestPingClosesItsConnection(t *testing.T) {
+	startTestServer(t, func(ctx context.Context, req Request) Response {
+		return Response{OK: true, Host: &HostInfo{Protocol: ProtocolVersion}}
+	})
+	before := runtime.NumGoroutine()
+	for i := 0; i < 20; i++ {
+		if _, err := Ping(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Connections are closed on return, so the server's per-connection
+	// goroutines finish; allow a moment for the scheduler, with a deadline.
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if runtime.NumGoroutine() <= before+2 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Errorf("goroutines grew from %d to %d across 20 pings", before, runtime.NumGoroutine())
 }

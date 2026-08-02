@@ -39,45 +39,62 @@ type chromeFetcher struct {
 	binRel      string // binary path inside the extracted archive
 }
 
+// chromeReporter is the slice of *testing.T resolveChrome needs. Splitting
+// it out is what lets a test prove the skip-versus-fail decision: skipping a
+// broken fetch would leave CI green with the real-Chrome scenarios never
+// executed, and that regression has to be catchable without a real download.
+type chromeReporter interface {
+	Skipf(format string, args ...any)
+	Fatalf(format string, args ...any)
+	Logf(format string, args ...any)
+}
+
 // ensureChrome returns a Chrome for Testing binary: $CEPM_E2E_CHROME if set,
 // the cached copy of the current stable version, or a fresh download.
 // Must be called before the test overrides $HOME.
 func ensureChrome(t *testing.T) string {
 	t.Helper()
+	cacheRoot, err := os.UserCacheDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resolveChrome(t, filepath.Join(cacheRoot, "cepm-e2e"), versionsURL)
+}
+
+// resolveChrome is ensureChrome's decision-making, over an interface a test
+// can substitute. Only an unsupported platform skips; every other failure is
+// fatal.
+func resolveChrome(r chromeReporter, cacheDir, metadataURL string) string {
 	if bin := os.Getenv("CEPM_E2E_CHROME"); bin != "" {
 		// Prove it runs: a stale path in the environment would otherwise
 		// surface much later as an unexplained scenario failure.
 		out, err := exec.Command(bin, "--version").CombinedOutput()
 		if err != nil {
-			t.Fatalf("CEPM_E2E_CHROME=%s is not usable: %v\n%s", bin, err, out)
+			r.Fatalf("CEPM_E2E_CHROME=%s is not usable: %v\n%s", bin, err, out)
+			return ""
 		}
-		t.Logf("using Chrome from CEPM_E2E_CHROME: %s (%s)", bin, strings.TrimSpace(string(out)))
+		r.Logf("using Chrome from CEPM_E2E_CHROME: %s (%s)", bin, strings.TrimSpace(string(out)))
 		return bin
 	}
-	// The only skip in this file: no Chrome for Testing exists for the
-	// platform, so there is nothing to test rather than something broken.
+	// The only skip: no Chrome for Testing exists for this platform, so
+	// there is nothing to test rather than something broken.
 	platform, binRel, err := cftPlatform()
 	if err != nil {
-		t.Skipf("chrome for testing unavailable: %v", err)
-	}
-	cacheRoot, err := os.UserCacheDir()
-	if err != nil {
-		t.Fatal(err)
+		r.Skipf("chrome for testing unavailable: %v", err)
+		return ""
 	}
 	f := &chromeFetcher{
-		versionsURL: versionsURL,
-		cacheDir:    filepath.Join(cacheRoot, "cepm-e2e"),
+		versionsURL: metadataURL,
+		cacheDir:    cacheDir,
 		platform:    platform,
 		binRel:      binRel,
 	}
-	// Fatal, not Skip: a failed download, a bad archive or a missing binary
-	// is a broken run. Skipping them made CI green while the real-Chrome
-	// scenarios never executed.
-	bin, version, err := f.ensure(t.Logf)
+	bin, version, err := f.ensure(r.Logf)
 	if err != nil {
-		t.Fatalf("cannot obtain Chrome for Testing: %v", err)
+		r.Fatalf("cannot obtain Chrome for Testing: %v", err)
+		return ""
 	}
-	t.Logf("using Chrome for Testing %s (%s): %s", version, platform, bin)
+	r.Logf("using Chrome for Testing %s (%s): %s", version, platform, bin)
 	return bin
 }
 
@@ -267,7 +284,16 @@ func (f *chromeFetcher) download(url, dest string) error {
 		if mErr := os.Rename(dest, filepath.Join(quarantine, "old")); mErr != nil && !os.IsNotExist(mErr) {
 			return err
 		}
-		return os.Rename(tree, dest)
+		if rErr := os.Rename(tree, dest); rErr != nil {
+			// Same race as above, one step later: another run may have
+			// repaired the entry while we were quarantining. A complete
+			// tree at dest is the outcome we wanted either way.
+			if fileExists(filepath.Join(dest, f.binRel)) {
+				return nil
+			}
+			return rErr
+		}
+		return nil
 	}
 	return nil
 }

@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -21,9 +22,22 @@ import (
 // so the cache logic can be exercised without the network.
 type chromeServer struct {
 	*httptest.Server
+	mu        sync.Mutex
 	version   string
 	zipEntry  string // path inside the archive ("" = empty archive)
 	downloads int
+}
+
+func (cs *chromeServer) downloadCount() int {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	return cs.downloads
+}
+
+func (cs *chromeServer) setZipEntry(entry string) {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	cs.zipEntry = entry
 }
 
 func newChromeServer(t *testing.T, version, zipEntry string) *chromeServer {
@@ -31,19 +45,25 @@ func newChromeServer(t *testing.T, version, zipEntry string) *chromeServer {
 	cs := &chromeServer{version: version, zipEntry: zipEntry}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/versions.json", func(w http.ResponseWriter, r *http.Request) {
+		cs.mu.Lock()
+		version := cs.version
+		cs.mu.Unlock()
 		fmt.Fprintf(w, `{"channels":{"Stable":{"version":%q,"downloads":{"chrome":[
-			{"platform":"testplat","url":%q}]}}}}`, cs.version, cs.URL+"/chrome.zip")
+			{"platform":"testplat","url":%q}]}}}}`, version, cs.URL+"/chrome.zip")
 	})
 	mux.HandleFunc("/chrome.zip", func(w http.ResponseWriter, r *http.Request) {
+		cs.mu.Lock()
 		cs.downloads++
+		entry, version := cs.zipEntry, cs.version
+		cs.mu.Unlock()
 		var buf bytes.Buffer
 		zw := zip.NewWriter(&buf)
-		if cs.zipEntry != "" {
-			f, err := zw.Create(cs.zipEntry)
+		if entry != "" {
+			f, err := zw.Create(entry)
 			if err != nil {
 				t.Error(err)
 			} else {
-				fmt.Fprintf(f, "#!/bin/sh\necho chrome %s\n", cs.version)
+				fmt.Fprintf(f, "#!/bin/sh\necho chrome %s\n", version)
 			}
 		}
 		if err := zw.Close(); err != nil {
@@ -96,12 +116,12 @@ func TestChromeFetcherPrefersTheCurrentVersion(t *testing.T) {
 	}
 
 	// And the freshly cached copy is reused without downloading again.
-	before := cs.downloads
+	before := cs.downloadCount()
 	if _, _, err := f.ensure(quietf); err != nil {
 		t.Fatal(err)
 	}
-	if cs.downloads != before {
-		t.Errorf("a complete cache entry should be reused, got %d extra download(s)", cs.downloads-before)
+	if got := cs.downloadCount(); got != before {
+		t.Errorf("a complete cache entry should be reused, got %d extra download(s)", got-before)
 	}
 }
 
@@ -127,7 +147,7 @@ func TestChromeFetcherLeavesNoCacheAfterABadArchive(t *testing.T) {
 
 	// The next run, with a good archive, succeeds — the failure was not
 	// cached as a version.
-	cs.zipEntry = filepath.Join("chrome-testplat", "chrome")
+	cs.setZipEntry(filepath.Join("chrome-testplat", "chrome"))
 	if _, version, err := f.ensure(quietf); err != nil || version != "100.0.0" {
 		t.Fatalf("retry after a bad archive: version=%q err=%v", version, err)
 	}
@@ -311,5 +331,110 @@ func TestCDPPipeSurvivesATimeoutMidFrame(t *testing.T) {
 	}
 	if !strings.Contains(string(res), `"ok":true`) {
 		t.Errorf("unexpected result after recovery: %s", res)
+	}
+}
+
+// fakeReporter records which of the three outcomes resolveChrome chose.
+type fakeReporter struct {
+	skipped, fatal string
+	logs           strings.Builder
+}
+
+func (r *fakeReporter) Skipf(format string, args ...any) {
+	r.skipped = fmt.Sprintf(format, args...)
+}
+func (r *fakeReporter) Fatalf(format string, args ...any) {
+	r.fatal = fmt.Sprintf(format, args...)
+}
+func (r *fakeReporter) Logf(format string, args ...any) {
+	fmt.Fprintf(&r.logs, format, args...)
+}
+
+// A broken fetch has to fail the run, not skip it: skipping leaves CI green
+// with the real-Chrome scenarios never executed, which is the one regression
+// nothing else would catch.
+func TestResolveChromeFailsRatherThanSkips(t *testing.T) {
+	t.Setenv("CEPM_E2E_CHROME", "")
+	if _, _, err := cftPlatform(); err != nil {
+		t.Skip("no Chrome for Testing on this platform; the skip path is the one under test elsewhere")
+	}
+
+	cases := map[string]func(t *testing.T) (cacheDir, metadataURL string){
+		"http error": func(t *testing.T) (string, string) {
+			cs := newChromeServer(t, "100.0.0", filepath.Join("chrome-testplat", "chrome"))
+			cs.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				http.Error(w, "boom", http.StatusInternalServerError)
+			})
+			return t.TempDir(), cs.URL + "/versions.json"
+		},
+		"bad archive": func(t *testing.T) (string, string) {
+			cs := newChromeServer(t, "100.0.0", "wrong/place")
+			return t.TempDir(), cs.URL + "/versions.json"
+		},
+		"offline without cache": func(t *testing.T) (string, string) {
+			cs := newChromeServer(t, "100.0.0", filepath.Join("chrome-testplat", "chrome"))
+			url := cs.URL + "/versions.json"
+			cs.Close()
+			return t.TempDir(), url
+		},
+	}
+	for label, setup := range cases {
+		t.Run(label, func(t *testing.T) {
+			cacheDir, metadataURL := setup(t)
+			r := &fakeReporter{}
+			resolveChrome(r, cacheDir, metadataURL)
+			if r.fatal == "" {
+				t.Errorf("a %s must be fatal, got skip=%q", label, r.skipped)
+			}
+			if r.skipped != "" {
+				t.Errorf("a %s must not skip the run: %q", label, r.skipped)
+			}
+		})
+	}
+}
+
+// Two runs repairing the same incomplete cache entry must both succeed: the
+// loser of the rename race wants exactly what the winner produced.
+func TestConcurrentRepairOfAnIncompleteCacheBothSucceed(t *testing.T) {
+	cs := newChromeServer(t, "100.0.0", filepath.Join("chrome-testplat", "chrome"))
+	cacheDir := t.TempDir()
+	partial := filepath.Join(cacheDir, "100.0.0", "chrome-testplat")
+	if err := os.MkdirAll(partial, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(partial, "half"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	start := make(chan struct{})
+	type result struct {
+		bin string
+		err error
+	}
+	results := make(chan result, 2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			f := &chromeFetcher{versionsURL: cs.URL + "/versions.json", cacheDir: cacheDir,
+				platform: "testplat", binRel: filepath.Join("chrome-testplat", "chrome")}
+			<-start // both enter the repair together
+			bin, _, err := f.ensure(quietf)
+			results <- result{bin, err}
+		}()
+	}
+	close(start)
+	for i := 0; i < 2; i++ {
+		select {
+		case res := <-results:
+			if res.err != nil {
+				t.Errorf("a concurrent repair failed: %v", res.err)
+			} else if !fileExists(res.bin) {
+				t.Errorf("a concurrent repair returned a missing binary: %s", res.bin)
+			}
+		case <-time.After(30 * time.Second):
+			t.Fatal("a concurrent repair never finished")
+		}
+	}
+	if !fileExists(filepath.Join(cacheDir, "100.0.0", "chrome-testplat", "chrome")) {
+		t.Error("the cache entry should be complete afterwards")
 	}
 }

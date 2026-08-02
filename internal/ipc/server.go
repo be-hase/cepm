@@ -69,20 +69,32 @@ func serveConn(ctx context.Context, conn net.Conn, h Handler) {
 	// Generous: an uninstall request waits for the user to answer Chrome's
 	// confirmation dialog.
 	_ = conn.SetDeadline(time.Now().Add(5 * time.Minute))
-	line, err := bufio.NewReader(conn).ReadBytes('\n')
-	if err != nil {
-		return
+	r := bufio.NewReader(conn)
+	// A connection carries at most a protocol handshake (a ping) and then
+	// one command: the client needs both to reach the same host process, or
+	// a leader handoff in between could route the command to a host it
+	// never verified. Anything after a non-ping command ends the loop.
+	for {
+		line, err := r.ReadBytes('\n')
+		if err != nil {
+			return
+		}
+		var req Request
+		var resp Response
+		if err := json.Unmarshal(line, &req); err != nil {
+			resp = Response{Error: "invalid request: " + err.Error()}
+		} else {
+			resp = h(ctx, req)
+		}
+		enc, err := json.Marshal(resp)
+		if err != nil {
+			return
+		}
+		if _, err := conn.Write(append(enc, '\n')); err != nil {
+			return
+		}
+		if req.Cmd != CmdPing {
+			return
+		}
 	}
-	var req Request
-	var resp Response
-	if err := json.Unmarshal(line, &req); err != nil {
-		resp = Response{Error: "invalid request: " + err.Error()}
-	} else {
-		resp = h(ctx, req)
-	}
-	enc, err := json.Marshal(resp)
-	if err != nil {
-		return
-	}
-	_, _ = conn.Write(append(enc, '\n'))
 }
