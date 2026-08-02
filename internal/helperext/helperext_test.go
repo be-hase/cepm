@@ -103,3 +103,39 @@ func TestInstalledMatchesDetectsCorruption(t *testing.T) {
 		t.Error("an edited manifest must not match")
 	}
 }
+
+// The READMEs promise which permissions the helper requests; the list must
+// track the generated manifest, in both languages.
+func TestReadmesListEveryHelperPermission(t *testing.T) {
+	files, err := renderFiles()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m struct {
+		Permissions []string `json:"permissions"`
+	}
+	for _, f := range files {
+		if f.name == "manifest.json" {
+			if err := json.Unmarshal(f.content, &m); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if len(m.Permissions) == 0 {
+		t.Fatal("no permissions found in the generated manifest")
+	}
+	for _, readme := range []string{
+		filepath.Join("..", "..", "README.md"),
+		filepath.Join("..", "..", "docs", "README.ja.md"),
+	} {
+		b, err := os.ReadFile(readme)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, p := range m.Permissions {
+			if !strings.Contains(string(b), "`"+p+"`") {
+				t.Errorf("%s does not document the %q permission", readme, p)
+			}
+		}
+	}
+}

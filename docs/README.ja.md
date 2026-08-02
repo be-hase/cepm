@@ -35,8 +35,9 @@ Chrome ── cepm helper 拡張(cepm setup が生成、最初に一度だけ読
 ```
 
 - 常駐デーモンの設定は不要です。native host は Chrome が起動・終了させます。
-- Chrome が起動していなくても `cepm update` は pull できます。unpacked 拡張は
-  次の Chrome 起動時にディスクから読み直されるためです。
+- Chrome が起動していなくても `cepm update` は pull できます。Chrome は
+  キャッシュしたコード(特に service worker)を使い続けることがあるため、
+  次の Chrome 起動時に host が catch-up reload を実行して反映します。
 - 1 つのリポジトリに拡張がいくつ入っていても構いません(`manifest.json` の
   あるディレクトリを自動的に検出します)。
 - cepm 自身の更新も手間なく反映されます。Chrome は安定したパスの launcher
@@ -238,7 +239,9 @@ host は Chrome が起動している間だけ存在します。また pull を�
   この登録を共有するため、2 つ目のプロファイルに helper を入れないことは利用者側の
   責任になります。
 - helper 拡張には `management` 権限(他の拡張の有効・無効を切り替えるため)、
-  `nativeMessaging`、`alarms` が必要です。ページのデータには一切触れません。
+  `nativeMessaging`、`alarms`、`storage`(reload 中に service worker が落ちても
+  拡張が無効のまま残らないようにするための復旧マーカー)が必要です。
+  ページのデータには一切触れません。
 - すべて `~/.cepm/` 配下に置かれます(clone、state、ログは
   `~/.cepm/logs/host.log`)。パーミッションは所有者のみです。clone は社内拡張の
   ソースそのものなので、同じマシンの他ユーザーからは読めません。
