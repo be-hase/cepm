@@ -46,19 +46,81 @@ Chrome ── cepm helper 拡張(cepm setup が生成、最初に一度だけ読
   mise の shim、ファイルの差し替えのいずれでも動きます)。helper 拡張の
   ファイルも host の接続時に更新され、次回の Chrome 起動から有効になります。
 
-## セットアップ
+## はじめかた
+
+**1. cepm をインストールします。**
 
 ```console
 $ brew install --cask be-hase/tap/cepm                 # macOS
 $ # または: go install github.com/be-hase/cepm/cmd/cepm@latest、リリースバイナリの取得でも可
-$ cepm setup
-$ # 一度だけ: chrome://extensions → デベロッパーモード →
-$ #           「パッケージ化されていない拡張機能を読み込む」→ ~/.cepm/helper
-$ cepm doctor        # すべて緑になっていることを確認
 ```
+
+**2. Chrome と接続します**(マシンごとに一度だけ):
+
+```console
+$ cepm setup
+```
+
+helper 拡張が `~/.cepm/helper` に生成され、Native Messaging host が Chrome に
+登録されます。続いて helper を読み込みます。ここだけは Chrome の仕様上、人間の
+操作が必要です: *chrome://extensions* を開き、*デベロッパーモード*をオンにして
+「パッケージ化されていない拡張機能を読み込む」で `~/.cepm/helper` を選びます。
+最後に一連の流れを確認します:
+
+```console
+$ cepm doctor
+```
+
+(Chrome を終了した状態では「Chrome is not reachable」と出ますが、これは正常
+です。それ以外が緑になっていれば OK です。)
+
+**3. 拡張のリポジトリをインストールします:**
+
+```console
+$ cepm install git@github.example.com:team/internal-extensions.git
+```
+
+cepm がリポジトリを clone し、含まれる拡張(`manifest.json` のあるディレクトリ)
+をすべて検出してどれを使うか尋ね、読み込み操作まで誘導します。ディレクトリの
+パスがクリップボードに入り、chrome://extensions が開き、Chrome が実際に
+読み込んだことを cepm が確認します。
+
+**4. ステップ 4 はありません。** Chrome が起動している間、cepm は 1 時間ごとに
+pull して変更のあった拡張を再読み込みします。任意のタイミングなら
+`cepm update`、登録内容と読み込み状況の確認は `cepm list` です。
 
 対応 OS は macOS と Linux です(Windows はレジストリによる host 登録と、
 拡張 ID の算出方式が異なるため未対応です)。
+
+### 拡張のライフサイクル
+
+cepm が管理する拡張は必ず次の 3 つの状態のどれかにあり、状態が変わるのは
+あなたが指示したときだけです。
+
+```
+                cepm install で選択           「読み込む」を一度だけ
+┌───────────┐   または cepm enable  ┌─────────┐   (cepm が誘導)   ┌────────┐
+│ available │ ────────────────────► │ enabled │ ────────────────► │ loaded │
+└───────────┘ ◄──────────────────── └─────────┘                   └────────┘
+                cepm disable
+```
+
+- **available(利用可能)** — 登録されているだけの状態です。`cepm install` で
+  選ばなかった拡張や、あとからリポジトリに追加された拡張はここに入ります。
+  あなたがオプトインするまで、読み込まれることも、更新されることも、催促される
+  こともありません。
+- **enabled(有効)** — 使うと決めた状態です。cepm は更新を適用し、Chrome に
+  読み込まれていることを期待します。残っているのは一度だけの手動読み込みです。
+- **loaded(読み込み済み)** — Chrome に入っている状態で、以降の更新は全自動
+  です。pull でファイルが変わればすぐ再読み込みされます。唯一の例外は
+  `manifest.json` の変更で、これだけは Chrome の再起動後に反映されます
+  (該当したときは cepm が知らせます)。
+
+やめるときは同じ道を逆に戻ります。`cepm disable` は拡張を *available* に戻し
+(Chrome からの削除も提案します)、`cepm uninstall <repo>` はリポジトリごと
+登録解除して clone をゴミ箱ディレクトリへ移動します(削除はしません)。
+リポジトリ側で拡張のディレクトリが改名・削除された場合は、Chrome に残った
+エントリを `cepm cleanup` が(Chrome 自身の確認ダイアログを通して)削除します。
 
 ## コマンド
 
