@@ -65,15 +65,22 @@ func newUninstallCmd() *cobra.Command {
 
 			// Local edits are precious everywhere else (update skips dirty
 			// trees; stash-pop failures halt with recovery steps), so they
-			// must not vanish silently here either. A fingerprint error is
-			// left alone: the clone may be gone or corrupt, which uninstall
-			// exists to clean up. The fingerprint is content-level, kept for
-			// the re-check before the delete: the confirmation covers the
-			// changes as they are now, and "git status" alone cannot tell
-			// them from a rewrite of the same file while a dialog is open.
-			approvedFingerprint := ""
+			// must not vanish silently here either. The fingerprint is
+			// content-level, kept for the re-check before the delete: the
+			// confirmation covers the changes as they are now, and "git
+			// status" alone cannot tell them from a rewrite of the same
+			// file while a dialog is open.
+			//
+			// A tree whose state cannot be identified fails closed. It may
+			// be the corrupt clone uninstall exists to clean up — but it
+			// may equally be a healthy tree the fingerprint has no answer
+			// for, still holding the user's work, so "could not check"
+			// must never quietly become "nothing to lose". It is its own
+			// question instead.
+			approvedFingerprint, unverifiable := "", false
 			if !keepFiles {
-				if fp, derr := (gitx.Repo{Dir: dir}).ChangeFingerprint(cmd.Context()); derr == nil && fp != "" {
+				switch fp, derr := (gitx.Repo{Dir: dir}).ChangeFingerprint(cmd.Context()); {
+				case derr == nil && fp != "":
 					if !assist.IsTTY() {
 						return fmt.Errorf("%s has uncommitted local changes; commit or stash them first, or re-run with --keep-files to keep the clone", dir)
 					}
@@ -81,6 +88,14 @@ func newUninstallCmd() *cobra.Command {
 						return errors.New("aborted; nothing was changed (--keep-files uninstalls but keeps the clone)")
 					}
 					approvedFingerprint = fp
+				case derr != nil:
+					if !assist.IsTTY() {
+						return fmt.Errorf("cannot check %s for local changes (%w); re-run with --keep-files to keep the clone, or interactively to decide", dir, derr)
+					}
+					if !confirm(cmd, fmt.Sprintf("cannot check %s for local changes (it may be corrupt) — delete it anyway?", dir)) {
+						return errors.New("aborted; nothing was changed (--keep-files uninstalls but keeps the clone)")
+					}
+					unverifiable = true
 				}
 			}
 
@@ -167,17 +182,21 @@ func newUninstallCmd() *cobra.Command {
 				if !keepFiles {
 					// The tree may have changed while the dialogs were
 					// open, and the confirmation covered only what existed
-					// then. A fingerprint error still reads as "delete" — a
-					// gone or corrupt clone is what uninstall cleans up —
-					// with one exception: a cancelled caller. Cancellation
-					// surfaces as an error from every command run here, and
-					// swallowing it would carry a Ctrl-C straight into the
-					// delete it was pressed to stop.
+					// then. What was approved must still be what is there:
+					// a fingerprint that no longer matches — including one
+					// that failed where it succeeded before, or succeeds
+					// where it failed — is a tree the user never saw. Only
+					// an unverifiable tree the user explicitly approved as
+					// such stays deletable through a repeated error. And a
+					// cancelled caller stops regardless: the Ctrl-C was
+					// pressed to stop this delete, not to authorise it.
 					fp, derr := (gitx.Repo{Dir: dir}).ChangeFingerprint(cmd.Context())
 					if cerr := cmd.Context().Err(); cerr != nil {
 						return cerr
 					}
-					if derr == nil && fp != approvedFingerprint {
+					sameAsApproved := (derr == nil && !unverifiable && fp == approvedFingerprint) ||
+						(derr != nil && unverifiable)
+					if !sameAsApproved {
 						return fmt.Errorf("%s changed while cepm was waiting for your answers; "+
 							"nothing was unregistered — review the changes and run cepm uninstall %s again",
 							dir, term.Quote(name))

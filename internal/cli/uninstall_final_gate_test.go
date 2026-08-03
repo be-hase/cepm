@@ -228,6 +228,41 @@ func TestUninstallStopsWhenCancelledBeforeTheDelete(t *testing.T) {
 	}
 }
 
+// A tree whose local-change state cannot be checked may be the corrupt
+// clone uninstall exists to clean up — or a healthy tree the fingerprint
+// has no answer for, still holding work. "Could not check" therefore never
+// quietly becomes "nothing to lose": headless it refuses, and interactively
+// it is its own explicit question.
+func TestUninstallFailsClosedOnAnUncheckableClone(t *testing.T) {
+	startFakeHost(t)
+	seedRepo(t, "tools", state.Extension{Dir: "ext", Name: "Ext", ID: idA, Key: keyA})
+	dir, err := updaterRepoDir("tools")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Breaking the repository is what makes the state uncheckable.
+	if err := os.RemoveAll(filepath.Join(dir, ".git")); err != nil {
+		t.Fatal(err)
+	}
+
+	if out, err := run(t, "", "uninstall", "tools"); err == nil {
+		t.Fatalf("headless, an uncheckable clone must not be deleted:\n%s", out)
+	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("the clone must survive the refusal: %v", err)
+	}
+
+	// Interactively it is an explicit question, and "y" really does delete.
+	interactive(t)
+	out, err := run(t, "y\n", "uninstall", "tools")
+	if err != nil {
+		t.Fatalf("an explicitly approved delete must proceed: %v\n%s", err, out)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Errorf("the approved delete should have happened, stat err = %v", err)
+	}
+}
+
 // With --keep-files nothing is destroyed after the save, so a save that is
 // live but not yet flushed is the same situation install and enable carry on
 // through: reporting it as failure leaves the user re-running a command that

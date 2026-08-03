@@ -96,6 +96,30 @@ func run(ctx context.Context, dir string, args ...string) (string, error) {
 	return strings.TrimSpace(stdout.String()), nil
 }
 
+// runRaw is run without the TrimSpace on stdout, for output where leading
+// or trailing blanks are data: porcelain status columns, NUL-separated file
+// lists whose names can start with a space.
+func runRaw(ctx context.Context, dir string, args ...string) (string, error) {
+	cmdArgs := append([]string{"-c", "core.quotePath=false"}, args...)
+	if dir != "" {
+		cmdArgs = append([]string{"-C", dir}, cmdArgs...)
+	}
+	cmd := exec.CommandContext(ctx, "git", cmdArgs...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		msg := strings.TrimSpace(stderr.String())
+		if msg == "" {
+			msg = err.Error()
+		}
+		return "", fmt.Errorf("git %s: %s",
+			term.SafeLines(RedactURL(strings.Join(args, " "))),
+			term.SafeLines(RedactURL(msg)))
+	}
+	return stdout.String(), nil
+}
+
 // Clone clones url into dir. branch may be empty (remote default branch).
 func Clone(ctx context.Context, url, dir, branch string) error {
 	args := []string{"clone"}
@@ -145,58 +169,92 @@ func (r Repo) IsDirty(ctx context.Context) (bool, error) {
 // arrived while the question was open — "git status" alone shows the same
 // " M file" line no matter how many times the file was rewritten since.
 //
-// Tracked changes are covered by the diff against HEAD (staged and
-// unstaged); untracked files do not appear in any diff, so their bytes are
-// hashed directly.
+// Tracked changes are covered by the diff against HEAD, with
+// --submodule=diff so a rewrite inside a submodule changes the diff text
+// rather than hiding behind an unchanged "-dirty" line. Untracked entries
+// do not appear in any diff, so they are recorded directly: type, mode and
+// symlink target from Lstat, bytes for regular files, every field length-
+// prefixed so contents cannot shift across record boundaries and compare
+// equal. What stays invisible: untracked files *inside* a submodule, whose
+// content git reports only as the submodule being dirty.
+//
+// An error means the state could not be identified — a caller about to
+// destroy the tree must treat that as "do not", not as "nothing to lose":
+// the tree that cannot be fingerprinted can still hold the user's work.
 func (r Repo) ChangeFingerprint(ctx context.Context) (string, error) {
-	porcelain, err := run(ctx, r.Dir, "status", "--porcelain", "-uall")
+	// Raw output, not run(): TrimSpace would eat the leading space of the
+	// first porcelain status column and of an untracked name that starts
+	// with a blank, making two different states print the same.
+	porcelain, err := runRaw(ctx, r.Dir, "status", "--porcelain", "-uall")
 	if err != nil {
 		return "", err
 	}
-	if porcelain == "" {
+	if strings.TrimSpace(porcelain) == "" {
 		return "", nil
 	}
-	// Against HEAD when there is one — that covers staged and unstaged
-	// content in a single diff. A tree with no commits yet (a clone broken
-	// mid-setup, which uninstall still has to handle politely) has no HEAD
-	// to diff against; there the index-vs-worktree and empty-tree-vs-index
-	// diffs together cover the same ground.
 	var diff string
 	if _, herr := run(ctx, r.Dir, "rev-parse", "--verify", "HEAD"); herr == nil {
-		diff, err = run(ctx, r.Dir, "diff", "HEAD", "--")
+		diff, err = runRaw(ctx, r.Dir, "diff", "--submodule=diff", "HEAD", "--")
 		if err != nil {
 			return "", err
 		}
 	} else {
-		staged, serr := run(ctx, r.Dir, "diff", "--cached", "--")
+		// No commits yet (a clone broken mid-setup): the empty-tree-vs-
+		// index and index-vs-worktree diffs together cover the same ground.
+		staged, serr := runRaw(ctx, r.Dir, "diff", "--cached", "--")
 		if serr != nil {
 			return "", serr
 		}
-		unstaged, uerr := run(ctx, r.Dir, "diff", "--")
+		unstaged, uerr := runRaw(ctx, r.Dir, "diff", "--")
 		if uerr != nil {
 			return "", uerr
 		}
 		diff = staged + "\x00" + unstaged
 	}
-	untracked, err := run(ctx, r.Dir, "ls-files", "--others", "--exclude-standard", "-z")
+	untracked, err := runRaw(ctx, r.Dir, "ls-files", "--others", "--exclude-standard", "-z")
 	if err != nil {
 		return "", err
 	}
 	h := sha256.New()
-	for _, part := range []string{porcelain, diff, untracked} {
-		h.Write([]byte(part))
-		h.Write([]byte{0})
+	record := func(field string) {
+		fmt.Fprintf(h, "%d:", len(field))
+		h.Write([]byte(field))
 	}
+	record(porcelain)
+	record(diff)
+	record(untracked)
 	for _, p := range strings.Split(untracked, "\x00") {
 		if p == "" {
 			continue
 		}
-		b, err := os.ReadFile(filepath.Join(r.Dir, p))
+		full := filepath.Join(r.Dir, p)
+		fi, err := os.Lstat(full)
 		if err != nil {
 			return "", fmt.Errorf("fingerprint %s: %w", p, err)
 		}
-		h.Write(b)
-		h.Write([]byte{0})
+		record(p)
+		record(fi.Mode().String())
+		switch {
+		case fi.Mode()&os.ModeSymlink != 0:
+			// Readlink, not ReadFile: the link itself is the entry, and a
+			// dangling target is a perfectly healthy thing to have lying
+			// around — it must neither fail the fingerprint nor read as
+			// whatever it happens to point at.
+			target, err := os.Readlink(full)
+			if err != nil {
+				return "", fmt.Errorf("fingerprint %s: %w", p, err)
+			}
+			record(target)
+		case fi.Mode().IsRegular():
+			b, err := os.ReadFile(full)
+			if err != nil {
+				return "", fmt.Errorf("fingerprint %s: %w", p, err)
+			}
+			record(string(b))
+		default:
+			// Sockets, fifos, devices: the type in the mode string above
+			// is all the identity they have.
+		}
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
 }

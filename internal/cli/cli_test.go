@@ -240,6 +240,19 @@ func seedRepo(t *testing.T, name string, exts ...state.Extension) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	// A real, clean git repository, not a bare directory: uninstall now
+	// refuses to silently delete a tree whose local-change state it cannot
+	// check, and a directory with no .git is exactly that. Tests that want
+	// an unverifiable clone break the repo deliberately.
+	if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
+		return // re-seeded over an existing clone
+	}
+	gitCmd(t, dir, "init", "-q", "-b", "main")
+	if err := os.WriteFile(filepath.Join(dir, ".cepm-test-keep"), []byte("seed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", "-A")
+	gitCmd(t, dir, "commit", "-qm", "seed")
 }
 
 // updaterRepoDir avoids an import cycle in the test helper above.
