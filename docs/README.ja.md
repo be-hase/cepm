@@ -6,21 +6,19 @@
 > この文書は [README.md](../README.md) の日本語版です。内容が食い違っていた
 > 場合は英語版が正となります。
 
-社内向けの Chrome 拡張は、Chrome Web Store が使えないため git リポジトリで
-配布されることがよくあります。利用者は各自 clone して *chrome://extensions*
-の「パッケージ化されていない拡張機能を読み込む」で読み込みますが、面倒なのは
-その後です。更新のたびに `git pull` して、さらに拡張ごとに再読み込みボタンを
-押す必要があります。cepm はこの両方を自動化します。
+社内向けの Chrome 拡張(Web Store が使えないもの)は git リポジトリで配布
+されることが多く、利用者は clone して *chrome://extensions* の「パッケージ化
+されていない拡張機能を読み込む」で読み込みます。面倒なのはその後で、更新の
+たびに `git pull` **と**拡張ごとの再読み込みが必要です。cepm はこの両方を
+自動化します。
 
 ```console
 $ cepm install git@github.example.com:team/internal-extensions.git
 ```
 
-拡張ごとに一度だけ「パッケージ化されていない拡張機能を読み込む」を行えば、
-あとは自動です。Chrome が起動している間、cepm は 1 時間ごとに pull し、
-ファイルが変わった拡張だけを再読み込みします(Chrome 起動の 1〜2 分後にも
-一度走るので、起動直後から最新の状態になります)。任意のタイミングで実行
-したいときは `cepm update` です。
+拡張ごとに一度だけ「読み込む」を行えば、あとは自動です。Chrome の起動中は
+1 時間ごと(および起動直後にも一度)に pull し、ファイルが変わった拡張だけを
+再読み込みします。任意のタイミングで実行したいときは `cepm update` です。
 
 ## 仕組み
 
@@ -36,15 +34,13 @@ Chrome ── cepm helper 拡張(cepm setup が生成、最初に一度だけ読
 
 - 常駐デーモンの設定は不要です。native host は Chrome が起動・終了させます。
 - Chrome が起動していなくても `cepm update` は pull できます。Chrome は
-  キャッシュしたコード(特に service worker)を使い続けることがあるため、
-  次の Chrome 起動時に host が catch-up reload を実行して反映します。
+  キャッシュしたコード(特に service worker)を使い続けるため、次の Chrome
+  起動時に catch-up reload で反映されます。
 - 1 つのリポジトリに拡張がいくつ入っていても構いません(`manifest.json` の
-  あるディレクトリを自動的に検出します)。
-- cepm 自身の更新も手間なく反映されます。Chrome は安定したパスの launcher
-  スクリプト(`~/.cepm/bin/cepm-host`)経由で host を起動し、cepm を実行する
-  たびにその参照先が現在のバイナリへ更新されます(Homebrew、`go install`、
-  mise の shim、ファイルの差し替えのいずれでも動きます)。helper 拡張の
-  ファイルも host の接続時に更新され、次回の Chrome 起動から有効になります。
+  あるディレクトリを自動検出)。
+- cepm 自身の更新も自動で反映されます。Chrome は安定したパスの launcher
+  スクリプト(`~/.cepm/bin/cepm-host`)経由で host を起動し、helper 拡張の
+  ファイルも接続時に更新されます(次回の Chrome 起動から有効)。
 
 ## はじめかた
 
@@ -59,20 +55,15 @@ $ # または: go install github.com/be-hase/cepm/cmd/cepm@latest、リリース
 
 ```console
 $ cepm setup
-```
-
-helper 拡張が `~/.cepm/helper` に生成され、Native Messaging host が Chrome に
-登録されます。続いて helper を読み込みます。ここだけは Chrome の仕様上、人間の
-操作が必要です: *chrome://extensions* を開き、*デベロッパーモード*をオンにして
-「パッケージ化されていない拡張機能を読み込む」で `~/.cepm/helper` を選びます。
-最後に一連の流れを確認します:
-
-```console
+$ # chrome://extensions → デベロッパーモード →
+$ #   「パッケージ化されていない拡張機能を読み込む」→ ~/.cepm/helper
 $ cepm doctor
 ```
 
-(Chrome を終了した状態では「Chrome is not reachable」と出ますが、これは正常
-です。それ以外が緑になっていれば OK です。)
+`setup` は helper 拡張を `~/.cepm/helper` に生成し、Native Messaging host を
+Chrome に登録します。helper の読み込みだけは Chrome の仕様上、手動です。
+`doctor` はすべて緑になるはずです(Chrome 終了中の「Chrome is not
+reachable」だけは正常です)。
 
 **3. 拡張のリポジトリをインストールします:**
 
@@ -80,22 +71,14 @@ $ cepm doctor
 $ cepm install git@github.example.com:team/internal-extensions.git
 ```
 
-cepm がリポジトリを clone し、含まれる拡張(`manifest.json` のあるディレクトリ)
-をすべて検出してどれを使うか尋ね、読み込み操作まで誘導します。ディレクトリの
-パスがクリップボードに入り、chrome://extensions が開き、Chrome が実際に
-読み込んだことを cepm が確認します。
+どの拡張を使うか尋ねたあと、読み込み操作まで誘導します。パスがクリップ
+ボードに入り、chrome://extensions が開き、読み込みを cepm が確認します。
 
-**4. ステップ 4 はありません。** Chrome が起動している間、cepm は 1 時間ごとに
-pull して変更のあった拡張を再読み込みします。任意のタイミングなら
-`cepm update`、登録内容と読み込み状況の確認は `cepm list` です。
+**4. ステップ 4 はありません。** 以降の更新は自動です。
 
-対応 OS は macOS と Linux です(Windows はレジストリによる host 登録と、
-拡張 ID の算出方式が異なるため未対応です)。
+対応 OS は macOS と Linux です(Windows は contributions welcome)。
 
 ### 拡張のライフサイクル
-
-cepm が管理する拡張は必ず次の 3 つの状態のどれかにあり、状態が変わるのは
-あなたが指示したときだけです。
 
 ```
                 cepm install で選択           「読み込む」を一度だけ
@@ -105,22 +88,19 @@ cepm が管理する拡張は必ず次の 3 つの状態のどれかにあり、
                 cepm disable
 ```
 
-- **available(利用可能)** — 登録されているだけの状態です。`cepm install` で
-  選ばなかった拡張や、あとからリポジトリに追加された拡張はここに入ります。
-  あなたがオプトインするまで、読み込まれることも、更新されることも、催促される
-  こともありません。
-- **enabled(有効)** — 使うと決めた状態です。cepm は更新を適用し、Chrome に
-  読み込まれていることを期待します。残っているのは一度だけの手動読み込みです。
-- **loaded(読み込み済み)** — Chrome に入っている状態で、以降の更新は全自動
-  です。pull でファイルが変わればすぐ再読み込みされます。唯一の例外は
-  `manifest.json` の変更で、これだけは Chrome の再起動後に反映されます
-  (該当したときは cepm が知らせます)。
+- **available(利用可能)** — 登録されているだけの状態。install で選ばな
+  かった拡張や、あとからリポジトリに追加された拡張は、オプトインするまで
+  ここで待ちます。
+- **enabled(有効)** — 使うと決めた状態。cepm が更新を適用し、Chrome に
+  あることを期待します。残るは一度だけの手動読み込みです。
+- **loaded(読み込み済み)** — 以降は全自動です。唯一の例外は
+  `manifest.json` の変更で、Chrome の再起動後に反映されます(cepm が知らせ
+  ます)。
 
-やめるときは同じ道を逆に戻ります。`cepm disable` は拡張を *available* に戻し
-(Chrome からの削除も提案します)、`cepm uninstall <repo>` はリポジトリごと
-登録解除して clone をゴミ箱ディレクトリへ移動します(削除はしません)。
-リポジトリ側で拡張のディレクトリが改名・削除された場合は、Chrome に残った
-エントリを `cepm cleanup` が(Chrome 自身の確認ダイアログを通して)削除します。
+戻り道: `cepm disable` は *available* に戻し(Chrome からの削除も提案)、
+`cepm uninstall <repo>` はリポジトリごと登録解除して clone をゴミ箱ディレク
+トリへ移動、リポジトリ側の改名・削除で残った Chrome のエントリは
+`cepm cleanup` が削除します。
 
 ## コマンド
 
@@ -138,33 +118,22 @@ $ cepm reset                      # state が壊れたとき、state と clone �
 $ cepm id <path>                  # ディレクトリに対応する拡張 ID を表示
 ```
 
-覚えておくと便利なフラグ: `cepm update --no-reload`(pull のみ)、
-`cepm update --force`(ローカル変更を stash して pull)、
-`cepm uninstall --keep-files`(登録解除するが clone は残す)、
-`cepm list --json` / `cepm doctor --json`(スクリプト向け)、
-任意のコマンドに `-v`(実行した git コマンドや host との通信を表示)。
+便利なフラグ: `cepm update --no-reload`(pull のみ)、`cepm update --force`
+(ローカル変更を stash して pull)、`cepm uninstall --keep-files`、
+`cepm list --json` / `cepm doctor --json`、任意のコマンドの `-v`。
 
 ### 複数の拡張を含むリポジトリ
 
-リポジトリに複数の拡張が含まれる場合、`cepm install` はどれを使うか尋ねます
-(Enter で全部。スクリプトからは `--only dir,dir` や `--all`)。選ばなかった
-ものは「利用可能(available)」として登録されるだけで、更新や診断の対象には
-なりません。あとから `cepm enable` で使い始められます。
-
-手動での読み込みが必要な一箇所についても cepm が誘導します。ディレクトリの
-パスがクリップボードに入り、chrome://extensions が開き、Chrome が実際に正しい
-ディレクトリを読み込んだことを cepm が確認します。
-
-あとからリポジトリに追加された拡張も「利用可能」として登録されるので、
-勝手に読み込まれたり、催促されたりすることはありません。拡張のディレクトリが
-改名・削除された場合は cepm がそれを報告し、有効にしていたという選択は新しい
-パスへ引き継がれます。壊れた Chrome 側のエントリは `cepm cleanup` が
-(Chrome 自身の確認ダイアログを通して)削除します。
+`cepm install` はどれを使うか尋ねます(Enter で全部。スクリプトからは
+`--only dir,dir` や `--all`)。選ばなかったものは「利用可能」のままで、
+オプトインなしに読み込まれたり催促されたりはしません。リポジトリ側で拡張の
+ディレクトリが改名・削除されたときは cepm が報告し、有効の選択は新しい
+パスへ引き継がれ、壊れた Chrome 側のエントリは `cepm cleanup` が削除します。
 
 ### ブランチではなくバージョンタグを追う
 
-リポジトリのデフォルトブランチに開発中のコードが入る場合は、タグを追う設定に
-できます。この場合 cepm は常に最新のリリースバージョンだけを checkout します。
+デフォルトブランチに開発中のコードが入る場合はタグ追従にできます。cepm は
+常に最新のリリースバージョンだけを checkout します。
 
 ```console
 $ cepm install <git-url> --track tag                  # 最新の安定版
@@ -172,26 +141,15 @@ $ cepm install <git-url> --track tag --prerelease     # v2.0.0-rc1 なども含�
 $ cepm install <git-url> --track tag --tag-pattern "v1.*"   # 1.x 系に留まる
 ```
 
-`--tag-pattern` は「どのタグを候補にするか」を絞るものです。候補に残ったタグは
-バージョン番号(`v1.2.3`)である必要があります。cepm はそれを比較するためです。
+比較は semver です(`v1.10.0` は `v1.9.0` より新しい)。プレリリースは
+`--prerelease` なしでは無視され、バージョン番号でないタグ(`nightly` など)
+も無視されます。一致するタグがなければ、推測せずエラーとして報告します。
 
-比較は semver で行うので `v1.10.0` は `v1.9.0` より新しく扱われます。
-プレリリース(`v2.0.0-rc1`)は `--prerelease` を付けない限り無視され、
-バージョン番号でないタグ(`nightly` など)も無視されます。一致する
-バージョンタグが 1 つもない場合は、最後に打たれたタグを勝手に追うのではなく
-エラーとして報告します。
-
-**GitHub Releases との関係。** cepm は Releases API ではなくタグを見ます。
-そのため利用者の端末に GitHub のトークンは不要で、`api.github.com` に
-アクセスできない環境でも更新は動きます。実運用ではほぼ一致します(リリースを
-公開するとタグが push され、下書きのリリースはタグを作らないので見えません)が、
-次の 2 点だけ違います。
-
-- リリースを作らずにタグだけ push した場合も、通常のタグとして追われます。
-  配布する意図のあるものにだけタグを打ってください。
-- リリースの「プレリリース」チェックボックスは cepm からは見えません。判断は
-  タグ名で行うので、プレリリースは `v2.0.0` ではなく `v2.0.0-rc1` のように
-  命名してください。
+cepm が見るのは GitHub Releases API ではなくタグです(トークン不要、
+`api.github.com` に届かない環境でも動きます)。帰結は 2 つ: リリースを
+作らずに push したタグも追われる(配布するものにだけタグを打つ)、
+「プレリリース」チェックボックスは見えない(`v2.0.0` ではなく
+`v2.0.0-rc1` と命名する)。
 
 ### リポジトリ側の設定(`cepm.toml`、任意)
 
@@ -208,11 +166,10 @@ tag_pattern = "v*"
 # prerelease = true   # 利用者にリリース候補も配る場合
 ```
 
-作者向けの注意: 拡張ディレクトリの改名は、利用者全員にとって破壊的な変更です。
-Chrome は拡張 ID をパスから導出するため、利用者は新しいディレクトリを一度
-読み込み直す必要があります(cepm が手順を案内します)。ディレクトリ名は安定
-させるか、`manifest.json` に `key` を入れて ID を固定してください。cepm は
-`key` を尊重するので、移動しても ID が変わりません。
+作者向けの注意: 拡張ディレクトリの改名は破壊的変更です。Chrome は ID を
+パスから導出するため、利用者全員が一度読み込み直すことになります(cepm が
+案内します)。ディレクトリ名は安定させるか、`manifest.json` の `key` で
+ID を固定してください(移動しても ID が変わりません)。
 
 ### 利用者側の設定(`~/.cepm/config.toml`、任意)
 
@@ -225,98 +182,64 @@ auto     = true    # false にすると "cepm update" 実行時のみ更新
 stash_dirty = false  # ローカル変更を stash して pull(自動更新にも適用)
 ```
 
-既定では、ローカルに変更のあるリポジトリは警告つきで skip されます。作業中の
-内容が失われることはありません。`cepm update --force` を使うと、pull の前後で
-stash と復元を行います。なお cepm が stash エントリを削除することはありません
-(git は位置指定でしか削除できず、同じタイミングであなたが積んだエントリを
-消しかねないためです)。cepm が残したエントリは警告で報告されるので、都合の
-よいときに削除してください(`git -C <clone> stash list`)。`git.stash_dirty = true`
-は自動更新にも適用されるため、ローカル変更を残したままの clone では更新ごとに
-1件ずつ溜まります(host は毎回 `~/.cepm/logs/host.log` に記録します)。
+ローカルに変更のあるリポジトリは警告つきで skip され、作業中の内容が失われる
+ことはありません。`cepm update --force` は pull の前後で stash と復元を行い
+ます。cepm が stash エントリを削除することはなく、残したエントリは報告される
+ので都合のよいときに削除してください(`git -C <clone> stash list`)。
+`git.stash_dirty = true` の場合、変更を残したままの clone には自動更新ごとに
+1 件ずつ溜まります(`~/.cepm/logs/host.log` に記録されます)。
 
 ## 困ったときは
 
-**まず `cepm doctor` を実行してください。** git、helper のファイル、
-Native Messaging の登録、Chrome が現在接続しているか、登録された各拡張が実際に
-読み込まれているか、という一連の流れをすべて確認します。失敗として報告される
-項目には、必ず対処コマンドが添えられます。以下はその「なぜ」を知りたいときの
-説明です。
+**まず `cepm doctor` を実行してください。** 一連の流れをすべて確認し、失敗
+には必ず対処コマンドが添えられます。要点だけまとめると:
 
-**拡張に変更が反映されない。** `cepm list` で読み込み済みと表示され、
-`cepm update` も再読み込みしたと言っているのに挙動が古いままなら、変更箇所は
-おそらく `manifest.json` です。Chrome は拡張を読み込んだ時点の manifest を
-キャッシュし続けるため、これだけは Chrome の再起動が必要です。該当する変更が
-あったときは cepm がその旨を表示し、再起動するまで doctor が指摘し続けます。
-
-**「Chrome is not reachable」と出る。** 異常ではありません。helper は Chrome が
-起動している間しか接続しないため、Chrome を終了していれば当然この表示になります。
-pull 自体は `cepm update` で動き、新しいコードは次の Chrome 起動時に反映されます。
-Chrome が起動しているのにこの表示が出る場合は、chrome://extensions で helper が
-読み込まれ有効になっているかを確認し、もう一度 `cepm doctor` を実行してください。
-
-**Chrome から拡張が消えた、またはエラー表示になっている。** リポジトリ側で拡張の
-ディレクトリが改名・削除されたときに起こります。ID はパスから導出されるため、
-古いエントリが宙に浮いた状態です。`cepm cleanup` がそれらを削除し(Chrome が
-1 つずつ確認を求めます)、改名の場合は代わりに読み込むべきディレクトリを
-cepm が教えます。
-
-**「cepm cannot use this state file」と出る。** `~/.cepm/state.json` が cepm 以外に
-書き換えられたか、書き込みが中断された状態です。解釈できない state を推測で
-扱うことはせず、Chrome にもディスクにも一切触れずに停止します。`cepm reset` を
-実行すると、state ファイルと clone を `~/.cepm/` 配下のタイムスタンプ付き
-バックアップへ**移動**します(削除はしません)。そのうえで、使っている
-リポジトリを `cepm install` し直してください。元の URL はバックアップ内の
-`state.json` から、あるいは各 clone から
-`git -C <backup>/repos/<name> remote get-url origin` で確認できます。
-
-**「exists but no repository is registered for it」と出る。** clone の配置と登録の
-あいだで install が中断された状態です。そのディレクトリを削除するか
-`cepm reset` を実行してから、もう一度 install してください。
-
-**特に問題はないのに自動更新されない。** 自動更新は native host の中で動き、
-host は Chrome が起動している間だけ存在します。また pull を行うのは 1 プロセス
-だけです。`~/.cepm/config.toml` の `[update] auto` を確認してください。間隔は
-既定で 1 時間です(Chrome 起動直後に一度走ります)。詳細は
-`~/.cepm/logs/host.log` に記録されています。
+- **拡張に変更が反映されない**(update は再読み込みしたと言っている)—
+  変更箇所は `manifest.json` です。Chrome を再起動してください。
+- **「Chrome is not reachable」** — Chrome 終了中は正常です(pull は動き
+  ます)。起動中に出る場合は、chrome://extensions で helper が読み込まれ
+  有効になっているかを確認してください。
+- **Chrome から拡張が消えた・エラー表示になっている** — リポジトリ側の
+  改名・削除が原因です。`cepm cleanup` が宙に浮いたエントリを削除し、改名
+  なら代わりに読み込むディレクトリを案内します。
+- **「cepm cannot use this state file」** — `~/.cepm/state.json` が外部に
+  書き換えられたか、書き込みが中断されました。cepm は推測せず停止します。
+  `cepm reset` が state と clone をタイムスタンプ付きバックアップへ移動する
+  ので(削除はしません)、`cepm install` し直してください。元の URL は
+  バックアップの `state.json` か
+  `git -C <backup>/repos/<name> remote get-url origin` で確認できます。
+- **「exists but no repository is registered for it」** — install が途中で
+  中断された状態です。そのディレクトリを削除して install し直してください。
+- **自動更新されない** — 自動更新は host の中で動き、host は Chrome の起動
+  中しか存在しません。`~/.cepm/config.toml` の `[update] auto` と、間隔の
+  既定が 1 時間であることを確認し、`~/.cepm/logs/host.log` を見てください。
 
 ## 注意事項・制限
 
-- 拡張を最初に読み込む操作だけは必ず手動です。Chrome に「unpacked を読み込む」
-  API がないためです。cepm は読み込むべきディレクトリを正確に表示します。
-  表示されるのは新規の拡張のときだけです。
-- **`manifest.json` の変更には Chrome の再起動が必要です。** unpacked 拡張の
-  再読み込みはディスクからコードを読み直しますが、manifest は読み込み時に
-  キャッシュしたものが使われ続けます。したがってコードの更新は即座に反映され、
-  バージョンの変更・新しい権限・新規に宣言したファイルは Chrome の再起動後に
-  反映されます。cepm は pull した変更が `manifest.json` に及んだときにそれを
-  伝え、`cepm doctor` は反映されるまで指摘し続けます。
-- Chrome の終了中に更新を pull した場合、コードはディスクに置かれますが Chrome は
-  キャッシュしたものを実行している可能性があります。そのため cepm は、Chrome が
-  接続した直後に、有効な拡張をすべて一度再読み込みします。
-- cepm を更新すると helper 拡張のファイルも自動的に書き換わりますが、動作中の
-  helper は次の Chrome 起動まで現在のバージョンのままです(自分自身を再読み込み
-  すると cepm との接続が切れてしまうためです)。
+- 拡張の最初の読み込みだけは必ず手動です(Chrome に「unpacked を読み込む」
+  API がないため)。cepm は新規の拡張についてのみ、読み込むディレクトリを
+  表示します。
+- **`manifest.json` の変更には Chrome の再起動が必要です。** 再読み込みで
+  読み直されるのはコードだけで、manifest はキャッシュが使われ続けます。
+  該当したときは cepm が伝え、反映まで doctor が指摘し続けます。
+- Chrome の終了中に pull された更新は、次に Chrome が接続した直後、有効な
+  拡張をすべて一度再読み込みすることで反映されます。
+- cepm を更新すると helper のファイルも書き換わりますが、動作中の helper は
+  次の Chrome 起動まで現在のバージョンのままです。
 - **helper を読み込むのは 1 つの Chrome プロファイルだけにしてください。**
-  自動再読み込みは、最初に helper が接続したプロファイルに対して行われます。
-  2 つ目のプロファイルはファイルこそ更新されますが、再起動するまで古いコードを
-  実行し続けます。Chrome の**種別**(Stable、Beta、Canary、Chromium)については
-  cepm が管理します。`cepm setup --chrome-variant <x>` は指定した Chrome だけを
-  登録し、他からは登録を削除するので、切り替えはコマンド 1 つで済みます
-  (加えて、以前の Chrome を終了してください。終了するまでは既存の接続が
-  残ります。setup はそれを検出すると警告します)。同一 Chrome 内のプロファイルは
-  この登録を共有するため、2 つ目のプロファイルに helper を入れないことは利用者側の
-  責任になります。
-- helper 拡張には `management` 権限(他の拡張の有効・無効を切り替えるため)、
-  `nativeMessaging`、`alarms`、`storage`(reload 中に service worker が落ちても
-  拡張が無効のまま残らないようにするための復旧マーカー)が必要です。
-  ページのデータには一切触れません。
-- すべて `~/.cepm/` 配下に置かれます(clone、state、ログは
-  `~/.cepm/logs/host.log`)。パーミッションは所有者のみです。clone は社内拡張の
-  ソースそのものなので、同じマシンの他ユーザーからは読めません。
+  自動再読み込みは最初に接続した helper のプロファイルに届きます。Chrome の
+  **種別**(Stable/Beta/Canary/Chromium)は `cepm setup --chrome-variant <x>`
+  が登録を移してくれます(あとは以前の Chrome を終了するだけ。setup が警告
+  します)。同一 Chrome 内で 2 つ目のプロファイルに入れないのは利用者側の
+  責任です。
+- helper 拡張に必要な権限は `management`(他の拡張の切り替え)、
+  `nativeMessaging`、`alarms`、`storage`(reload 中のクラッシュ復旧マーカー)
+  です。ページのデータには一切触れません。
+- すべて `~/.cepm/` 配下(clone、state、ログは `~/.cepm/logs/host.log`)、
+  パーミッションは所有者のみです。
 - cepm はユーザーのデータを削除しません。`uninstall` は clone をゴミ箱
-  ディレクトリへ**移動**し(場所を表示します。不要と確信したら手で削除して
-  ください。`--keep-files` ならその場に残します)、`reset` は移動のみ、
-  Chrome からの削除は必ず Chrome 自身の確認ダイアログを通します。
+  ディレクトリへ**移動**(`--keep-files` でその場に残す)、`reset` も移動
+  のみ、Chrome からの削除は必ず Chrome 自身の確認ダイアログを通します。
 
 ## 開発
 
@@ -327,16 +250,12 @@ $ make e2e     # 実際の Chrome を操作(初回は Chrome for Testing を取�
 $ make lint    # gofmt check + go vet + staticcheck (both build tags)
 ```
 
-`make e2e` は本物です。使い捨てプロファイルで Chrome を起動し、helper と
-テスト用拡張を読み込み、`git push` が Chrome の実行しているコードを実際に
-変えることを検証します(自動更新の経路、Chrome 停止中に適用された更新、
-helper の更新も含みます)。`CEPM_E2E_HEADED=1` を付けると動作を目視できます。
-
-`docs/e2e-checklist.md` には、人間が確認する必要のある項目(対話プロンプト、
-クリップボード、Chrome 自身の確認ダイアログ)がまとまっています。
-
-コードに手を入れる場合は [AGENTS.md](../AGENTS.md) も参照してください。設計上の
-不変条件(ロックの取り方、state 保存とファイル操作の順序など)が書かれています。
+`make e2e` は使い捨てプロファイルで Chrome を起動し、helper とテスト用拡張を
+読み込み、`git push` が Chrome の実行コードを実際に変えることを検証します
+(自動更新、Chrome 停止中の更新、helper の更新も含む)。
+`CEPM_E2E_HEADED=1` で目視できます。人間が確認する項目は
+`docs/e2e-checklist.md` に、設計上の不変条件は [AGENTS.md](../AGENTS.md) に
+あります。
 
 ## ライセンス
 
