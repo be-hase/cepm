@@ -128,11 +128,20 @@ func (r Repo) CurrentBranch(ctx context.Context) (string, error) {
 }
 
 func (r Repo) IsDirty(ctx context.Context) (bool, error) {
-	out, err := run(ctx, r.Dir, "status", "--porcelain")
+	out, err := r.DirtyStatus(ctx)
 	if err != nil {
 		return false, err
 	}
 	return out != "", nil
+}
+
+// DirtyStatus returns the porcelain status itself, empty for a clean tree.
+// For callers that ask a person before acting on local changes: the answer
+// covers the changes that were shown, and comparing the status — not just
+// its non-emptiness — is what tells an approved change apart from one that
+// arrived while the question was open.
+func (r Repo) DirtyStatus(ctx context.Context) (string, error) {
+	return run(ctx, r.Dir, "status", "--porcelain")
 }
 
 // Fetch fetches the remote, including tags and pruning deleted refs.

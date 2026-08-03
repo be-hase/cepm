@@ -21,7 +21,7 @@ var assets embed.FS
 // Version is the helper extension version. Bump it whenever assets change;
 // setup and the native host re-install the helper when it differs from the
 // marker file.
-const Version = "0.5.0"
+const Version = "0.6.0"
 
 // Protocol is the helper⇄host wire generation, embedded into the generated
 // background.js from here so the running code announces what it actually

@@ -253,8 +253,17 @@ async function reloadOneLocked(id) {
       m[id] = true;
     });
   } catch (e) {
-    // Reload without crash cover rather than not at all (the pre-marker
-    // behaviour).
+    // Refuse rather than reload without crash cover. An unmarked disable
+    // that then fails to re-enable (a broken manifest in the pulled
+    // commit, a worker death) is indistinguishable from the user's own
+    // choice, so every later attempt would answer "skipped_disabled" and
+    // the extension would stay off for good. Nothing has been touched
+    // yet; failing here is the safe direction.
+    return {
+      id,
+      status: "error",
+      error: "could not record the reload in chrome.storage; not touching the extension: " + String((e && e.message) || e),
+    };
   }
   try {
     // Disabling and re-enabling an unpacked extension makes Chrome re-read
@@ -302,6 +311,13 @@ async function finishEnable(id) {
   }
 }
 
+// clearInflight is best-effort by design, which leaves one known gap: if
+// only this delete fails, a marker outlives its reload, and should the user
+// then disable the extension by hand, the next worker start reads the stale
+// marker as "we disabled it" and switches it back on. Telling that stale
+// marker apart from a real half-done reload would need information storage
+// cannot promise to hold — the same storage that just failed — so the gap
+// is accepted rather than half-closed.
 async function clearInflight(id) {
   try {
     await updateInflight((m) => {

@@ -33,6 +33,11 @@ func snapshot(r *state.Repo) string {
 	return s
 }
 
+// removeClone deletes a clone. A variable so a test can prove the delete
+// happens while the update lock is held — the only observable difference
+// between deleting inside the lock and just after it.
+var removeClone = os.RemoveAll
+
 func newUninstallCmd() *cobra.Command {
 	var keepFiles bool
 	cmd := &cobra.Command{
@@ -60,17 +65,22 @@ func newUninstallCmd() *cobra.Command {
 
 			// Local edits are precious everywhere else (update skips dirty
 			// trees; stash-pop failures halt with recovery steps), so they
-			// must not vanish silently here either. An IsDirty error is left
+			// must not vanish silently here either. A status error is left
 			// alone: the clone may be gone or corrupt, which uninstall exists
-			// to clean up.
+			// to clean up. The status itself is kept, not just its verdict:
+			// the confirmation below covers the changes that were shown, and
+			// re-checking against it before the delete is what tells those
+			// apart from changes that arrive while the dialogs are open.
+			approvedStatus := ""
 			if !keepFiles {
-				if dirty, derr := (gitx.Repo{Dir: dir}).IsDirty(cmd.Context()); derr == nil && dirty {
+				if status, derr := (gitx.Repo{Dir: dir}).DirtyStatus(cmd.Context()); derr == nil && status != "" {
 					if !assist.IsTTY() {
 						return fmt.Errorf("%s has uncommitted local changes; commit or stash them first, or re-run with --keep-files to keep the clone", dir)
 					}
 					if !confirm(cmd, fmt.Sprintf("%s has uncommitted local changes — delete them anyway?", dir)) {
 						return errors.New("aborted; nothing was changed (--keep-files uninstalls but keeps the clone)")
 					}
+					approvedStatus = status
 				}
 			}
 
@@ -154,25 +164,47 @@ func newUninstallCmd() *cobra.Command {
 						})
 					}
 				}
+				if !keepFiles {
+					// The tree may have changed while the dialogs were
+					// open, and the confirmation covered only what was
+					// shown then. A status error still reads as "delete":
+					// a gone or corrupt clone is what uninstall cleans up.
+					if status, derr := (gitx.Repo{Dir: dir}).DirtyStatus(cmd.Context()); derr == nil && status != approvedStatus {
+						return fmt.Errorf("%s changed while cepm was waiting for your answers; "+
+							"nothing was unregistered — review the changes and run cepm uninstall %s again",
+							dir, term.Quote(name))
+					}
+				}
 				delete(st.Repos, name)
 				st.AddOrphans(orphans)
-				// Deliberately not saveState: this is the one caller that
-				// destroys something afterwards. "The new state is live"
-				// is not enough when the next step deletes the clone — a
-				// crash before the flush lands brings the registration
-				// back with its files already gone.
-				return st.Save()
+				if err := st.Save(); err != nil {
+					// With the clone about to be deleted, "the new state is
+					// live" is not enough: a crash before the flush lands
+					// brings the registration back with its files already
+					// gone. Keeping the files has no such step, so there a
+					// durability-only failure must not report an uninstall
+					// that did happen as failed.
+					if keepFiles && state.Committed(err) {
+						fmt.Fprintf(out, "Warning: %v\n", err)
+						return nil
+					}
+					return err
+				}
+				// Deleting inside the lock, deliberately. Between a save
+				// and a delete outside it, a reset plus an install can put
+				// a brand-new clone at this same logical path — and the
+				// delete would then take that clone, from a registration
+				// this command never saw. The lock is what makes
+				// "the path still means what the save said" true.
+				if !keepFiles {
+					if err := removeClone(dir); err != nil {
+						return fmt.Errorf("unregistered, but failed to delete %s: %w", dir, err)
+					}
+				}
+				return nil
 			})
 			if err != nil {
 				return err
-			}
-			// Only once the state is safely on disk: a failed save with the
-			// files already gone would leave a repository registered with
-			// nothing behind it.
-			if !keepFiles {
-				if err := os.RemoveAll(dir); err != nil {
-					return fmt.Errorf("unregistered, but failed to delete %s: %w", dir, err)
-				}
 			}
 			fmt.Fprintf(out, "Uninstalled %q (%d extension(s)).\n", name, len(repo.Extensions))
 			if len(orphans) > 0 {

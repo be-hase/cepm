@@ -135,7 +135,10 @@ func runInstall(cmd *cobra.Command, url string, flags installFlags) error {
 	defer os.RemoveAll(staging)
 	stagingClone := filepath.Join(staging, name)
 
-	fmt.Fprintf(out, "Cloning %s ...\n", gitx.RedactURL(url))
+	// Safe as well as redacted: the URL is a raw argument, and an SCP-form
+	// one ("git@host:path") passes through RedactURL untouched — with
+	// whatever control characters it carries.
+	fmt.Fprintf(out, "Cloning %s ...\n", term.Safe(gitx.RedactURL(url)))
 	if err := gitx.Clone(ctx, url, stagingClone, branch); err != nil {
 		return err
 	}
@@ -147,7 +150,7 @@ func runInstall(cmd *cobra.Command, url string, flags installFlags) error {
 	}
 	if len(repo.Extensions) == 0 {
 		return fmt.Errorf("no Chrome extensions found in %s (no manifest.json; repo authors can declare directories in cepm.toml)",
-			gitx.RedactURL(url))
+			term.Safe(gitx.RedactURL(url)))
 	}
 	if err := applySelection(cmd, name, repo, flags); err != nil {
 		return err

@@ -195,6 +195,9 @@ func TestGeneratedHelperKeepsTheInvariantsGoCannotTest(t *testing.T) {
 		{"await withExtension(id, async () => {", "recovery no longer serializes against reloads"},
 		{"if (!(await isInflight(id))) return;", "recovery no longer re-checks the marker it is about to delete"},
 		{`post({ type: "uninstallPending"`, "the uninstall dialog no longer reports that it is open"},
+		{"could not record the reload in chrome.storage; not touching the extension",
+			"a reload no longer refuses to disable what it cannot cover with a marker — " +
+				"an unmarked disable that fails to re-enable reads as the user's own choice forever"},
 	} {
 		if !strings.Contains(string(js), want.snippet) {
 			t.Errorf("%s (looked for %q)", want.why, want.snippet)
