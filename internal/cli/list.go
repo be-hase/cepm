@@ -2,9 +2,12 @@ package cli
 
 import (
 	"context"
+	"encoding/csv"
 	"encoding/json"
 	"fmt"
+	neturl "net/url"
 	"path/filepath"
+	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -18,7 +21,7 @@ import (
 )
 
 func newListCmd() *cobra.Command {
-	var asJSON bool
+	var asJSON, share bool
 	cmd := &cobra.Command{
 		Use:     "list",
 		Short:   "List registered repositories and extensions",
@@ -29,6 +32,11 @@ func newListCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if share {
+				// No Chrome round-trip: what you share must not depend on
+				// whether Chrome happens to be running.
+				return printListShare(cmd, st)
+			}
 			chromeStatus := fetchChromeStatus(cmd.Context())
 			if asJSON {
 				return printListJSON(cmd, st, chromeStatus)
@@ -37,7 +45,117 @@ func newListCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&asJSON, "json", false, "output as JSON")
+	cmd.Flags().BoolVar(&share, "share", false, "print install commands for the enabled extensions, ready to paste")
+	cmd.MarkFlagsMutuallyExclusive("json", "share")
 	return cmd
+}
+
+// printListShare prints one paste-ready install command per repository,
+// covering only the enabled extensions: the answer to "which extensions do
+// you run, and how do I get them?".
+func printListShare(cmd *cobra.Command, st *state.State) error {
+	out := cmd.OutOrStdout()
+	shared := 0
+	for _, name := range st.RepoNames() {
+		r := st.Repos[name]
+		var names, dirs []string
+		for _, e := range r.Extensions {
+			if e.Enabled() {
+				names = append(names, term.Safe(e.Name))
+				dirs = append(dirs, e.Dir)
+			}
+		}
+		if len(names) == 0 {
+			continue
+		}
+		shared++
+		fmt.Fprintf(out, "# %s\n", strings.Join(names, ", "))
+		// list renders broken states, but a paste-ready command must not
+		// convert one into a plausible different setup on another machine:
+		// no runnable URL or no nameable tracking fails closed.
+		url, urlOK := shareURL(r.URL)
+		track, trackOK := shareTrackFlags(r)
+		if !urlOK || !trackOK {
+			fmt.Fprintln(out, "# (not shareable: this repository's recorded URL or tracking is unusable)")
+			continue
+		}
+		fmt.Fprintf(out, "cepm install %s", term.Quote(url))
+		// The name matters when it does not match what install would derive:
+		// a colleague installing two shared repos whose URLs end in the same
+		// path segment would otherwise collide on the derived name.
+		if name != repoNameFromURL(url) {
+			fmt.Fprintf(out, " --name %s", term.Quote(name))
+		}
+		fmt.Fprint(out, track)
+		// A single-extension repo installs without a prompt; only a repo
+		// with more needs --only to reproduce this selection.
+		if len(r.Extensions) > 1 {
+			fmt.Fprintf(out, " --only %s", term.Quote(csvJoin(dirs)))
+		}
+		fmt.Fprintln(out)
+	}
+	if shared == 0 {
+		fmt.Fprintln(out, "No enabled extensions to share. See: cepm list")
+	}
+	return nil
+}
+
+// shareTrackFlags builds the explicit tracking flags for an install command.
+// Always explicit: install resolves an omitted flag from the repo's
+// cepm.toml before falling back to its default, so omission does not mean
+// "same as mine" on the receiving side. ok=false when the state does not
+// name a complete tracking setup.
+func shareTrackFlags(r *state.Repo) (string, bool) {
+	switch r.Track {
+	case state.TrackTag:
+		if r.TagPattern == "" {
+			return "", false
+		}
+		return fmt.Sprintf(" --track tag --tag-pattern %s --prerelease=%t",
+			term.Quote(r.TagPattern), r.Prerelease), true
+	case state.TrackBranch:
+		if r.Branch == "" {
+			return "", false
+		}
+		return fmt.Sprintf(" --track branch --branch %s", term.Quote(r.Branch)), true
+	default:
+		return "", false
+	}
+}
+
+// shareURL rebuilds the repository URL without its secret-bearing parts —
+// userinfo, query, fragment — as something a colleague can actually run,
+// where RedactURL's "***" form is display-only. ok=false when no runnable
+// URL can be built; like RedactURL, an unparsable URL fails closed.
+func shareURL(raw string) (string, bool) {
+	if raw == "" {
+		return "", false
+	}
+	// SCP form ("git@host:path") and local paths: the user part is an
+	// account name, not a credential — RedactURL passes them through too.
+	if !strings.Contains(raw, "://") {
+		return raw, true
+	}
+	u, err := neturl.Parse(raw)
+	if err != nil {
+		return "", false
+	}
+	u.User = nil
+	u.ForceQuery = false
+	u.RawQuery = ""
+	u.Fragment = ""
+	u.RawFragment = ""
+	return u.String(), true
+}
+
+// csvJoin encodes dirs the way pflag decodes a --only value: as one CSV
+// record, so a directory name containing a comma survives the trip.
+func csvJoin(dirs []string) string {
+	var b strings.Builder
+	w := csv.NewWriter(&b)
+	_ = w.Write(dirs) // strings.Builder cannot fail
+	w.Flush()
+	return strings.TrimSuffix(b.String(), "\n")
 }
 
 // fetchChromeStatus returns loaded-extension info by ID, or nil when the host
@@ -96,12 +214,15 @@ func printListTable(cmd *cobra.Command, st *state.State, chromeStatus map[string
 		fmt.Fprintln(cmd.OutOrStdout(), "No repositories registered.")
 	}
 	w := tabwriter.NewWriter(cmd.OutOrStdout(), 2, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "REPO\tTRACK\tEXTENSION\tID\tDIR\tSTATUS")
+	fmt.Fprintln(w, "REPO\tTRACK\tEXTENSION\tID\tDIR\tSTATUS\tURL")
 	for _, name := range st.RepoNames() {
 		r := st.Repos[name]
+		// The URL is what a colleague needs to install the same extension;
+		// last column, so its length does not push the narrow ones apart.
 		for _, e := range r.Extensions {
-			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
-				name, trackRef(r), e.Name, e.ID, term.Safe(e.Dir), extStatus(chromeStatus, e))
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+				name, trackRef(r), e.Name, e.ID, term.Safe(e.Dir), extStatus(chromeStatus, e),
+				term.Safe(gitx.RedactURL(r.URL)))
 		}
 		for _, s := range r.Stale {
 			fmt.Fprintf(w, "%s\t\t%s\t%s\t(%s)\tstale — run: cepm cleanup\n", name, s.Name, s.ID, term.Safe(s.Reason))

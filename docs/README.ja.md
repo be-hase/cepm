@@ -118,7 +118,8 @@ $ cepm id <path>                  # ディレクトリに対応する拡張 ID �
 
 便利なフラグ: `cepm update --no-reload`(pull のみ)、`cepm update --force`
 (ローカル変更を stash して pull)、`cepm uninstall --keep-files`、
-`cepm list --json` / `cepm doctor --json`、任意のコマンドの `-v`。
+`cepm list --share`(有効化中の拡張の install コマンドを、そのまま同僚に
+渡せる形で出力)、`cepm list --json` / `cepm doctor --json`、任意のコマンドの `-v`。
 
 ### 複数の拡張を含むリポジトリ
 

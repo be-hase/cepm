@@ -1104,6 +1104,194 @@ func TestEnableDisableRoundTrip(t *testing.T) {
 	}
 }
 
+// The table is what people paste into chat to share an extension; without
+// the git URL the recipient has nothing to `cepm install` from.
+func TestListTableShowsRepoURL(t *testing.T) {
+	startFakeHost(t)
+	seedRepo(t, "tools", state.Extension{Dir: "ext", Name: "Ext", ID: idA, Key: keyA})
+	out, err := run(t, "", "list")
+	if err != nil {
+		t.Fatalf("list: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "https://***@example.com/t/r.git") {
+		t.Errorf("table should carry the (redacted) repo URL:\n%s", out)
+	}
+}
+
+// --share exists to be pasted to a colleague: install commands for what is
+// enabled, nothing about what is not, and no ids or Chrome status.
+func TestListShare(t *testing.T) {
+	host := startFakeHost(t)
+	// What you share must not depend on whether Chrome is running.
+	host.onList = func() { t.Error("--share must not contact the host") }
+	keyC, idC := fixtureKey("share-c")
+	keyD, idD := fixtureKey("share-d")
+	keyE, idE := fixtureKey("share-e")
+	seedRepo(t, "tools",
+		state.Extension{Dir: "a", Name: "Enabled A", ID: idA, Key: keyA},
+		state.Extension{Dir: "b", Name: "Enabled B", ID: idB, Key: keyB},
+		state.Extension{Dir: "c", Name: "Off", ID: idC, Key: keyC, Disabled: true},
+	)
+	seedRepo(t, "unused", state.Extension{Dir: ".", Name: "Idle", ID: idD, Key: keyD, Disabled: true})
+	st, err := state.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.Repos["tagged"] = &state.Repo{
+		URL: "https://example.com/t/tagged.git", Track: state.TrackTag,
+		Tag: "v1.2.3", TagPattern: "v*", Head: strings.Repeat("b", 40),
+		Extensions: []state.Extension{{Dir: ".", Name: "Tagged", ID: idE, Key: keyE}},
+	}
+	if err := st.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := run(t, "", "list", "--share")
+	if err != nil {
+		t.Fatalf("list --share: %v\n%s", err, out)
+	}
+	for _, want := range []string{
+		"# Enabled A, Enabled B\n",
+		"cepm install 'https://example.com/t/r.git' --name 'tools' --track branch --branch 'main' --only 'a,b'\n",
+		"# Tagged\n",
+		"cepm install 'https://example.com/t/tagged.git' --track tag --tag-pattern 'v*' --prerelease=false\n",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+	for _, leak := range []string{"Off", "Idle", "unused", idA, "loaded", "available", "TOKEN"} {
+		if strings.Contains(out, leak) {
+			t.Errorf("share output should not mention %q:\n%s", leak, out)
+		}
+	}
+}
+
+// The share output's contract is executable: what --share prints, a real
+// shell plus a fresh cepm must accept and reproduce — same URL, tracking,
+// name, and selection. String checks alone cannot notice a flag whose
+// omission install resolves differently than share assumed.
+func TestListShareRoundTrip(t *testing.T) {
+	startFakeHost(t)
+	src := t.TempDir()
+	origin := filepath.Join(src, "origin.git")
+	work := filepath.Join(src, "work")
+	gitCmd(t, src, "init", "-q", "--bare", "--initial-branch=main", origin)
+	gitCmd(t, src, "clone", "-q", origin, work)
+	gitCmd(t, work, "checkout", "-q", "-b", "main")
+	// A dir with a comma (--only is CSV) and a cepm.toml whose track
+	// contradicts the sharer's choice: exactly the values an install with an
+	// under-specified command line would resolve differently.
+	for _, d := range []string{"one", "two,three", "off"} {
+		if err := os.MkdirAll(filepath.Join(work, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		manifest := fmt.Sprintf(`{"manifest_version":3,"name":"Ext %s","version":"1.0"}`, d)
+		if err := os.WriteFile(filepath.Join(work, d, "manifest.json"), []byte(manifest), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(work, "cepm.toml"), []byte("track = \"tag\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, work, "add", "-A")
+	gitCmd(t, work, "commit", "-qm", "init")
+	gitCmd(t, work, "push", "-q", "origin", "main")
+
+	// "tools" does not match the URL-derived name, so share must carry it.
+	if out, err := run(t, "", "install", origin, "--name", "tools", "--track", "branch",
+		"--only", `one,"two,three"`); err != nil {
+		t.Fatalf("install: %v\n%s", err, out)
+	}
+	before, err := state.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	shareOut, err := run(t, "", "list", "--share")
+	if err != nil {
+		t.Fatalf("list --share: %v\n%s", err, shareOut)
+	}
+	var cmdLine string
+	for _, l := range strings.Split(shareOut, "\n") {
+		if rest, ok := strings.CutPrefix(l, "cepm "); ok {
+			cmdLine = rest
+		}
+	}
+	if cmdLine == "" {
+		t.Fatalf("no command in share output:\n%s", shareOut)
+	}
+	// A real shell does the word splitting: the quoting contract is with
+	// sh, not with a reimplementation of it in this test.
+	split, err := exec.Command("sh", "-c", "printf '%s\\n' "+cmdLine).Output()
+	if err != nil {
+		t.Fatalf("sh rejected the command line %q: %v", cmdLine, err)
+	}
+	argv := strings.Split(strings.TrimSuffix(string(split), "\n"), "\n")
+
+	startFakeHost(t) // a fresh CEPM_HOME: the colleague's machine
+	if out, err := run(t, "", argv...); err != nil {
+		t.Fatalf("replaying %q failed: %v\n%s", argv, err, out)
+	}
+	after, err := state.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, want := after.Repos["tools"], before.Repos["tools"]
+	if got == nil {
+		t.Fatalf("replay did not register \"tools\"; registered: %v", after.RepoNames())
+	}
+	if got.URL != origin || got.Track != want.Track || got.Branch != want.Branch {
+		t.Errorf("replayed tracking differs:\ngot  %+v\nwant %+v", got, want)
+	}
+	enabledOf := func(r *state.Repo) (ds []string) {
+		for _, e := range r.Extensions {
+			if e.Enabled() {
+				ds = append(ds, e.Dir)
+			}
+		}
+		return ds
+	}
+	if g, w := enabledOf(got), enabledOf(want); strings.Join(g, "\x00") != strings.Join(w, "\x00") {
+		t.Errorf("replayed selection differs: got %v, want %v", g, w)
+	}
+}
+
+// list renders broken states (that is how you inspect them), but --share
+// must not translate one into a plausible-looking command: an unknown track
+// or a missing branch would silently become a different setup on the
+// colleague's machine.
+func TestListShareFailsClosedOnBrokenState(t *testing.T) {
+	startFakeHost(t)
+	writeRawState(t, fmt.Sprintf(`{"version":6,"repos":{
+      "typo":{"url":"https://example.com/t/r.git","track":"typo","head":"%s",
+              "extensions":[{"dir":"ext","name":"Typo","id":%q,"key":%q}]},
+      "blank":{"url":"https://example.com/t/b.git","track":"branch","branch":"","head":"%s",
+              "extensions":[{"dir":"ext","name":"Blank","id":%q,"key":%q}]}}}`,
+		strings.Repeat("a", 40), idA, keyA, strings.Repeat("b", 40), idB, keyB))
+	out, err := run(t, "", "list", "--share")
+	if err != nil {
+		t.Fatalf("list --share: %v\n%s", err, out)
+	}
+	if strings.Contains(out, "cepm install") {
+		t.Errorf("broken tracking must not produce an install command:\n%s", out)
+	}
+	if !strings.Contains(out, "not shareable") {
+		t.Errorf("expected the not-shareable note:\n%s", out)
+	}
+}
+
+func TestListShareEmpty(t *testing.T) {
+	startFakeHost(t)
+	seedRepo(t, "tools", state.Extension{Dir: ".", Name: "Idle", ID: idA, Key: keyA, Disabled: true})
+	out, err := run(t, "", "list", "--share")
+	if err != nil {
+		t.Fatalf("list --share: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "No enabled extensions to share") {
+		t.Errorf("expected the empty-share notice, got:\n%s", out)
+	}
+}
+
 // Repository URLs can carry a token — in the userinfo, the query, or the
 // fragment; no command may print any of them.
 func TestListDoesNotLeakCredentials(t *testing.T) {
@@ -1118,7 +1306,7 @@ func TestListDoesNotLeakCredentials(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for _, args := range [][]string{{"list"}, {"list", "--json"}} {
+	for _, args := range [][]string{{"list"}, {"list", "--json"}, {"list", "--share"}} {
 		out, err := run(t, "", args...)
 		if err != nil {
 			t.Fatalf("%v: %v\n%s", args, err, out)
