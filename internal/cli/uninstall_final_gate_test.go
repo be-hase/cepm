@@ -275,6 +275,59 @@ func TestUninstallRefusesARegistrationSwappedDuringTheDialogs(t *testing.T) {
 	}
 }
 
+// A reset plus a re-install of the *same* URL reproduces every attribute
+// the state records — same name, same tracking, same path-derived ids. What
+// it cannot reproduce is the directory instance: the new clone is a new
+// inode, and that is what tells the answer's registration from the one that
+// replaced it.
+func TestUninstallRefusesAReinstalledCloneDuringTheDialogs(t *testing.T) {
+	interactive(t)
+	host := startFakeHost(t)
+	seedRepo(t, "tools", state.Extension{Dir: "ext", Name: "Ext", ID: idA, Key: keyA})
+	dir := mustRepoDir(t, "tools")
+	host.mu.Lock()
+	host.loaded[idA] = true // so the Chrome question is asked
+	host.mu.Unlock()
+
+	// While the question is open, the clone is rebuilt in place — the
+	// filesystem shape of "reset, then reinstall the same URL". The state's
+	// attributes stay identical on purpose: only the instance differs.
+	rebuilt := false
+	origIsTTY := assist.IsTTY
+	t.Cleanup(func() { assist.IsTTY = origIsTTY })
+	assist.IsTTY = func() bool {
+		if !rebuilt {
+			rebuilt = true
+			if err := os.RemoveAll(dir); err != nil {
+				t.Error(err)
+			}
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Error(err)
+			}
+			gitCmd(t, dir, "init", "-q", "-b", "main")
+		}
+		return true
+	}
+
+	out, err := run(t, "n\n", "uninstall", "tools")
+	if err == nil {
+		t.Fatalf("an answer about one clone instance must not act on its replacement:\n%s", out)
+	}
+	if !strings.Contains(err.Error(), "changed while") {
+		t.Errorf("the error should say what happened: %v", err)
+	}
+	st, lerr := state.Load()
+	if lerr != nil {
+		t.Fatal(lerr)
+	}
+	if st.Repos["tools"] == nil {
+		t.Error("the replacement registration must survive untouched")
+	}
+	if _, serr := os.Stat(dir); serr != nil {
+		t.Errorf("the replacement clone must stay in place: %v", serr)
+	}
+}
+
 func mustRepoDir(t *testing.T, name string) string {
 	t.Helper()
 	dir, err := updaterRepoDir(name)

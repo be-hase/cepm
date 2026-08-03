@@ -46,7 +46,11 @@ remove it from Chrome too (Chrome shows its own confirmation dialog).`,
 				dirs[i] = e.Dir
 				asked[i] = *e
 			}
-			before := snapshot(r)
+			cloneDir, err := updater.RepoDir(repoName)
+			if err != nil {
+				return err
+			}
+			before := snapshot(r) + "\x00" + cloneIdentity(cloneDir)
 			approved := askChromeRemoval(cmd, asked)
 
 			var disabled []state.Extension
@@ -59,7 +63,7 @@ remove it from Chrome too (Chrome shows its own confirmation dialog).`,
 				if !ok {
 					return fmt.Errorf("repository %q is no longer registered", repoName)
 				}
-				if snapshot(r) != before {
+				if snapshot(r)+"\x00"+cloneIdentity(cloneDir) != before {
 					// Another cepm ran while we were asking: the extensions
 					// we asked about are not the ones registered now. Nothing
 					// has been touched yet, so stopping here really does undo

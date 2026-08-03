@@ -39,6 +39,27 @@ func snapshot(r *state.Repo) string {
 	return s
 }
 
+// cloneIdentity names this clone directory *instance* — device and inode —
+// so that two registrations alike in every attribute are still told apart.
+// A reset plus a re-install of the same URL under the same name reproduces
+// every attribute the state records, but it cannot reproduce the inode: the
+// new clone is a new directory. "" when the clone is absent or the platform
+// keeps its counsel; two absents compare equal, which is right — an
+// uninstall of a registration whose clone is already gone is legitimate
+// state cleanup.
+func cloneIdentity(dir string) string {
+	fi, err := os.Stat(dir)
+	if err != nil {
+		return ""
+	}
+	dev, okD := deviceOf(fi)
+	ino, okI := inodeOf(fi)
+	if !okD || !okI {
+		return ""
+	}
+	return fmt.Sprintf("%d:%d", dev, ino)
+}
+
 // trashClone moves a clone into a freshly created trash directory and
 // returns where it went. A move, never a delete, on principle: everything
 // else in cepm that could destroy a user's work refuses to (stash entries
@@ -121,14 +142,14 @@ func newUninstallCmd() *cobra.Command {
 			for _, s := range repo.Stale {
 				candidates = append(candidates, state.Extension{Name: s.Name, ID: s.ID})
 			}
-			before := snapshot(repo)
+			before := snapshot(repo) + "\x00" + cloneIdentity(dir)
 			approved := askChromeRemoval(cmd, candidates)
 
 			changed := func(fresh *state.Repo, ok bool) error {
 				if !ok {
 					return fmt.Errorf("repository %q is no longer registered", name)
 				}
-				if snapshot(fresh) != before {
+				if snapshot(fresh)+"\x00"+cloneIdentity(dir) != before {
 					// An update ran while we were asking: the extensions we
 					// asked about are not the ones registered now.
 					return fmt.Errorf("%q changed while waiting for your answer; run cepm uninstall %s again",

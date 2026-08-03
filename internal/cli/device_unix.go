@@ -16,3 +16,12 @@ func deviceOf(info fs.FileInfo) (uint64, bool) {
 	}
 	return uint64(st.Dev), true
 }
+
+// inodeOf returns the file's inode, or false when the platform does not say.
+func inodeOf(info fs.FileInfo) (uint64, bool) {
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0, false
+	}
+	return st.Ino, true
+}
