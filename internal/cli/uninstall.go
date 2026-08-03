@@ -49,23 +49,54 @@ func snapshot(r *state.Repo) string {
 // Comparing generations therefore answers "did anyone save state while the
 // dialogs were open" — including a periodic update, which is also a state
 // this command's answers were not about.
-// A variable so a test can prove it is only consulted while the update
-// lock is held: the token is only meaningful as part of an atomic look at
-// the state, never on its own. Errors are returned, not blanked — a
-// generation that cannot be read must fail the comparison, not match
-// another unreadable one.
-var stateGeneration = func() (string, error) {
+// stateWitness pins the state file instance an answer was about. It holds
+// state.json open for as long as the dialogs are: an open file's inode
+// cannot be freed, so no later save can ever hand the path an inode that
+// compares equal to this one — the ABA a bare (device, inode, mtime, size)
+// tuple cannot rule out, since a second save can be handed the freed inode
+// back and mtime granularity is the filesystem's business. Save replaces
+// state.json by rename, so "the path still leads to this very file" is
+// exactly "nobody saved state while we were asking".
+type stateWitness struct {
+	f  *os.File
+	fi os.FileInfo
+}
+
+// openStateWitness is a variable so a test can prove it is only consulted
+// while the update lock is held: the witness is only meaningful as part of
+// an atomic look at the state, never on its own.
+var openStateWitness = func() (*stateWitness, error) {
 	path, err := paths.StateFile()
 	if err != nil {
-		return "", err
+		return nil, err
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("pin the state file: %w", err)
+	}
+	fi, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, fmt.Errorf("pin the state file: %w", err)
+	}
+	return &stateWitness{f: f, fi: fi}, nil
+}
+
+func (w *stateWitness) Close() { _ = w.f.Close() }
+
+// unchanged reports whether the path still leads to the pinned file.
+// Errors are returned, not blanked: a state that cannot be re-checked must
+// fail the comparison, not pass it.
+func (w *stateWitness) unchanged() (bool, error) {
+	path, err := paths.StateFile()
+	if err != nil {
+		return false, err
 	}
 	fi, err := os.Stat(path)
 	if err != nil {
-		return "", fmt.Errorf("read the state generation: %w", err)
+		return false, fmt.Errorf("re-check the state file: %w", err)
 	}
-	dev, _ := deviceOf(fi)
-	ino, _ := inodeOf(fi)
-	return fmt.Sprintf("%d:%d:%d:%d", dev, ino, fi.ModTime().UnixNano(), fi.Size()), nil
+	return os.SameFile(w.fi, fi), nil
 }
 
 // trashClone moves a clone into a freshly created trash directory and
@@ -127,6 +158,7 @@ func newUninstallCmd() *cobra.Command {
 			// states. The lock is released before any question is asked.
 			var repo *state.Repo
 			var before string
+			var witness *stateWitness
 			if err := updater.WithLock(cmd.Context(), func() error {
 				st, err := state.Load()
 				if err != nil {
@@ -136,16 +168,18 @@ func newUninstallCmd() *cobra.Command {
 				if !ok {
 					return fmt.Errorf("repository %q is not registered (see cepm list)", name)
 				}
-				gen, gerr := stateGeneration()
-				if gerr != nil {
-					return gerr
+				w, werr := openStateWitness()
+				if werr != nil {
+					return werr
 				}
 				repo = r
-				before = snapshot(r) + "\x00" + gen
+				witness = w
+				before = snapshot(r)
 				return nil
 			}); err != nil {
 				return err
 			}
+			defer witness.Close()
 
 			dir, err := updater.RepoDir(name)
 			if err != nil {
@@ -174,11 +208,11 @@ func newUninstallCmd() *cobra.Command {
 				if !ok {
 					return fmt.Errorf("repository %q is no longer registered", name)
 				}
-				gen, gerr := stateGeneration()
-				if gerr != nil {
-					return gerr
+				same, werr := witness.unchanged()
+				if werr != nil {
+					return werr
 				}
-				if snapshot(fresh)+"\x00"+gen != before {
+				if !same || snapshot(fresh) != before {
 					// An update ran while we were asking: the extensions we
 					// asked about are not the ones registered now.
 					return fmt.Errorf("%q changed while waiting for your answer; run cepm uninstall %s again",

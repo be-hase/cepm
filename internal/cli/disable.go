@@ -35,6 +35,7 @@ remove it from Chrome too (Chrome shows its own confirmation dialog).`,
 			// states.
 			var r *state.Repo
 			var before string
+			var witness *stateWitness
 			if err := updater.WithLock(cmd.Context(), func() error {
 				st, err := state.Load()
 				if err != nil {
@@ -44,16 +45,18 @@ remove it from Chrome too (Chrome shows its own confirmation dialog).`,
 				if !ok {
 					return fmt.Errorf("repository %q is not registered (see cepm list)", repoName)
 				}
-				gen, gerr := stateGeneration()
-				if gerr != nil {
-					return gerr
+				w, werr := openStateWitness()
+				if werr != nil {
+					return werr
 				}
 				r = repo
-				before = snapshot(repo) + "\x00" + gen
+				witness = w
+				before = snapshot(repo)
 				return nil
 			}); err != nil {
 				return err
 			}
+			defer witness.Close()
 			picked, err := pickExtensions(cmd, r, dir, true)
 			if err != nil {
 				return err
@@ -76,11 +79,11 @@ remove it from Chrome too (Chrome shows its own confirmation dialog).`,
 				if !ok {
 					return fmt.Errorf("repository %q is no longer registered", repoName)
 				}
-				gen, gerr := stateGeneration()
-				if gerr != nil {
-					return gerr
+				same, werr := witness.unchanged()
+				if werr != nil {
+					return werr
 				}
-				if snapshot(r)+"\x00"+gen != before {
+				if !same || snapshot(r) != before {
 					// Another cepm ran while we were asking: the extensions
 					// we asked about are not the ones registered now. Nothing
 					// has been touched yet, so stopping here really does undo

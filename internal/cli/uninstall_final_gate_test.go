@@ -277,9 +277,9 @@ func TestUninstallRefusesARegistrationSwappedDuringTheDialogs(t *testing.T) {
 
 // A reset plus a re-install of the *same* URL reproduces every attribute
 // the state records — same name, same tracking, same path-derived ids. What
-// it cannot reproduce is the directory instance: the new clone is a new
-// inode, and that is what tells the answer's registration from the one that
-// replaced it.
+// it cannot avoid is saving state, and the pinned state file is what
+// notices: after the save, the path no longer leads to the file the answer
+// was about.
 func TestUninstallRefusesAReinstalledCloneDuringTheDialogs(t *testing.T) {
 	interactive(t)
 	host := startFakeHost(t)
@@ -356,13 +356,13 @@ func TestSnapshotGenerationIsTakenUnderTheLock(t *testing.T) {
 		t.Fatal(err)
 	}
 	calls := 0
-	prev := stateGeneration
-	t.Cleanup(func() { stateGeneration = prev })
-	stateGeneration = func() (string, error) {
+	prev := openStateWitness
+	t.Cleanup(func() { openStateWitness = prev })
+	openStateWitness = func() (*stateWitness, error) {
 		calls++
 		f := flock.New(lockPath)
 		if ok, lerr := f.TryLock(); lerr == nil && ok {
-			t.Error("the state generation was read with the update lock free")
+			t.Error("the state witness was pinned with the update lock free")
 			// Release, or the command under test deadlocks against us and
 			// the failure takes the lock timeout to report.
 			_ = f.Unlock()
@@ -376,8 +376,8 @@ func TestSnapshotGenerationIsTakenUnderTheLock(t *testing.T) {
 	if out, err := run(t, "n\n", "uninstall", "tools"); err != nil {
 		t.Fatalf("uninstall: %v\n%s", err, out)
 	}
-	if calls < 4 { // before + re-check, in each command
-		t.Fatalf("fixture: expected the generation to be consulted in both commands, got %d calls", calls)
+	if calls < 2 { // one pin per command
+		t.Fatalf("fixture: expected the witness to be pinned in both commands, got %d calls", calls)
 	}
 }
 
