@@ -22,14 +22,13 @@ $ cepm install git@github.example.com:team/internal-extensions.git
 
 ## 仕組み
 
-```
-Chrome ── cepm helper 拡張(cepm setup が生成、最初に一度だけ読み込む)
-             │  Native Messaging(stdio。Chrome がプロセスを起動・管理)
-             ▼
-        cepm native host ── 定期的な git pull ── 変更された拡張を再読み込み
-             ▲                                    (management.setEnabled の
-             │  Unix socket                        off→on = ディスクから再読込)
-        cepm CLI(install / update / list / doctor)
+```mermaid
+flowchart TD
+    chrome["Chrome — cepm helper 拡張<br/>(cepm setup が生成、最初に一度だけ読み込む)"]
+    host["cepm native host<br/>定期的な git pull、変更された拡張を再読み込み<br/>(management.setEnabled の off→on = ディスクから再読込)"]
+    cli["cepm CLI(install / update / list / doctor)"]
+    chrome <-->|"Native Messaging<br/>(stdio。Chrome がプロセスを起動・管理)"| host
+    cli <-->|"Unix socket"| host
 ```
 
 - 常駐デーモンの設定は不要です。native host は Chrome が起動・終了させます。
@@ -80,12 +79,11 @@ $ cepm install git@github.example.com:team/internal-extensions.git
 
 ### 拡張のライフサイクル
 
-```
-                cepm install で選択           「読み込む」を一度だけ
-┌───────────┐   または cepm enable  ┌─────────┐   (cepm が誘導)   ┌────────┐
-│ available │ ────────────────────► │ enabled │ ────────────────► │ loaded │
-└───────────┘ ◄──────────────────── └─────────┘                   └────────┘
-                cepm disable
+```mermaid
+flowchart LR
+    available -->|"cepm install で選択<br/>または cepm enable"| enabled
+    enabled -->|"cepm disable"| available
+    enabled -->|"「読み込む」を一度だけ<br/>(cepm が誘導)"| loaded
 ```
 
 - **available(利用可能)** — 登録されているだけの状態。install で選ばな
