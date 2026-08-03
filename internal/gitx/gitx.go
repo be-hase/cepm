@@ -7,11 +7,14 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"net/url"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -128,20 +131,74 @@ func (r Repo) CurrentBranch(ctx context.Context) (string, error) {
 }
 
 func (r Repo) IsDirty(ctx context.Context) (bool, error) {
-	out, err := r.DirtyStatus(ctx)
+	out, err := run(ctx, r.Dir, "status", "--porcelain")
 	if err != nil {
 		return false, err
 	}
 	return out != "", nil
 }
 
-// DirtyStatus returns the porcelain status itself, empty for a clean tree.
-// For callers that ask a person before acting on local changes: the answer
-// covers the changes that were shown, and comparing the status — not just
-// its non-emptiness — is what tells an approved change apart from one that
-// arrived while the question was open.
-func (r Repo) DirtyStatus(ctx context.Context) (string, error) {
-	return run(ctx, r.Dir, "status", "--porcelain")
+// ChangeFingerprint identifies the tree's uncommitted state by content,
+// returning "" for a clean tree. For callers that ask a person before
+// destroying local changes: the answer covers the changes as they were
+// then, and only a content-level comparison can tell those from what
+// arrived while the question was open — "git status" alone shows the same
+// " M file" line no matter how many times the file was rewritten since.
+//
+// Tracked changes are covered by the diff against HEAD (staged and
+// unstaged); untracked files do not appear in any diff, so their bytes are
+// hashed directly.
+func (r Repo) ChangeFingerprint(ctx context.Context) (string, error) {
+	porcelain, err := run(ctx, r.Dir, "status", "--porcelain", "-uall")
+	if err != nil {
+		return "", err
+	}
+	if porcelain == "" {
+		return "", nil
+	}
+	// Against HEAD when there is one — that covers staged and unstaged
+	// content in a single diff. A tree with no commits yet (a clone broken
+	// mid-setup, which uninstall still has to handle politely) has no HEAD
+	// to diff against; there the index-vs-worktree and empty-tree-vs-index
+	// diffs together cover the same ground.
+	var diff string
+	if _, herr := run(ctx, r.Dir, "rev-parse", "--verify", "HEAD"); herr == nil {
+		diff, err = run(ctx, r.Dir, "diff", "HEAD", "--")
+		if err != nil {
+			return "", err
+		}
+	} else {
+		staged, serr := run(ctx, r.Dir, "diff", "--cached", "--")
+		if serr != nil {
+			return "", serr
+		}
+		unstaged, uerr := run(ctx, r.Dir, "diff", "--")
+		if uerr != nil {
+			return "", uerr
+		}
+		diff = staged + "\x00" + unstaged
+	}
+	untracked, err := run(ctx, r.Dir, "ls-files", "--others", "--exclude-standard", "-z")
+	if err != nil {
+		return "", err
+	}
+	h := sha256.New()
+	for _, part := range []string{porcelain, diff, untracked} {
+		h.Write([]byte(part))
+		h.Write([]byte{0})
+	}
+	for _, p := range strings.Split(untracked, "\x00") {
+		if p == "" {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(r.Dir, p))
+		if err != nil {
+			return "", fmt.Errorf("fingerprint %s: %w", p, err)
+		}
+		h.Write(b)
+		h.Write([]byte{0})
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // Fetch fetches the remote, including tags and pruning deleted refs.

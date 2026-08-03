@@ -65,22 +65,22 @@ func newUninstallCmd() *cobra.Command {
 
 			// Local edits are precious everywhere else (update skips dirty
 			// trees; stash-pop failures halt with recovery steps), so they
-			// must not vanish silently here either. A status error is left
-			// alone: the clone may be gone or corrupt, which uninstall exists
-			// to clean up. The status itself is kept, not just its verdict:
-			// the confirmation below covers the changes that were shown, and
-			// re-checking against it before the delete is what tells those
-			// apart from changes that arrive while the dialogs are open.
-			approvedStatus := ""
+			// must not vanish silently here either. A fingerprint error is
+			// left alone: the clone may be gone or corrupt, which uninstall
+			// exists to clean up. The fingerprint is content-level, kept for
+			// the re-check before the delete: the confirmation covers the
+			// changes as they are now, and "git status" alone cannot tell
+			// them from a rewrite of the same file while a dialog is open.
+			approvedFingerprint := ""
 			if !keepFiles {
-				if status, derr := (gitx.Repo{Dir: dir}).DirtyStatus(cmd.Context()); derr == nil && status != "" {
+				if fp, derr := (gitx.Repo{Dir: dir}).ChangeFingerprint(cmd.Context()); derr == nil && fp != "" {
 					if !assist.IsTTY() {
 						return fmt.Errorf("%s has uncommitted local changes; commit or stash them first, or re-run with --keep-files to keep the clone", dir)
 					}
 					if !confirm(cmd, fmt.Sprintf("%s has uncommitted local changes — delete them anyway?", dir)) {
 						return errors.New("aborted; nothing was changed (--keep-files uninstalls but keeps the clone)")
 					}
-					approvedStatus = status
+					approvedFingerprint = fp
 				}
 			}
 
@@ -166,10 +166,18 @@ func newUninstallCmd() *cobra.Command {
 				}
 				if !keepFiles {
 					// The tree may have changed while the dialogs were
-					// open, and the confirmation covered only what was
-					// shown then. A status error still reads as "delete":
-					// a gone or corrupt clone is what uninstall cleans up.
-					if status, derr := (gitx.Repo{Dir: dir}).DirtyStatus(cmd.Context()); derr == nil && status != approvedStatus {
+					// open, and the confirmation covered only what existed
+					// then. A fingerprint error still reads as "delete" — a
+					// gone or corrupt clone is what uninstall cleans up —
+					// with one exception: a cancelled caller. Cancellation
+					// surfaces as an error from every command run here, and
+					// swallowing it would carry a Ctrl-C straight into the
+					// delete it was pressed to stop.
+					fp, derr := (gitx.Repo{Dir: dir}).ChangeFingerprint(cmd.Context())
+					if cerr := cmd.Context().Err(); cerr != nil {
+						return cerr
+					}
+					if derr == nil && fp != approvedFingerprint {
 						return fmt.Errorf("%s changed while cepm was waiting for your answers; "+
 							"nothing was unregistered — review the changes and run cepm uninstall %s again",
 							dir, term.Quote(name))

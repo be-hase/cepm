@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -110,6 +112,119 @@ func TestUninstallRefusesChangesThatArrivedDuringTheDialogs(t *testing.T) {
 	}
 	if st.Repos["tools"] == nil {
 		t.Error("nothing may be unregistered when the delete was refused")
+	}
+}
+
+// "git status" shows the same " M file" line no matter how many times the
+// file has been rewritten since, so a status-level comparison would wave
+// through a rewrite of an already-dirty file. The user approved deleting the
+// content they were shown, not whatever the file holds by the time the
+// dialogs close — only a content-level fingerprint can tell those apart.
+func TestUninstallRefusesARewriteOfAnAlreadyDirtyFile(t *testing.T) {
+	interactive(t)
+	startFakeHost(t, idA)
+	seedRepo(t, "tools", state.Extension{Dir: "ext", Name: "Ext", ID: idA, Key: keyA})
+	dir, err := updaterRepoDir("tools")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, filepath.Dir(dir), "init", "-q", "-b", "main", dir)
+	file := filepath.Join(dir, "file.txt")
+	if err := os.WriteFile(file, []byte("committed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", "-A")
+	gitCmd(t, dir, "commit", "-qm", "init")
+	// Dirty from the start — the porcelain line is " M file.txt" and stays
+	// exactly that through the rewrite below.
+	if err := os.WriteFile(file, []byte("edit-one\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	edited := false
+	origIsTTY := assist.IsTTY
+	t.Cleanup(func() { assist.IsTTY = origIsTTY })
+	assist.IsTTY = func() bool {
+		if !edited {
+			edited = true
+			if werr := os.WriteFile(file, []byte("edit-two\n"), 0o644); werr != nil {
+				t.Error(werr)
+			}
+		}
+		return true
+	}
+
+	// "y" approves deleting edit-one; "n" declines the Chrome removal.
+	out, err := run(t, "y\nn\n", "uninstall", "tools")
+	if err == nil {
+		t.Fatalf("content the user never saw must not be deleted on an old approval:\n%s", out)
+	}
+	b, rerr := os.ReadFile(file)
+	if rerr != nil {
+		t.Fatalf("the clone must survive: %v", rerr)
+	}
+	if string(b) != "edit-two\n" {
+		t.Errorf("the rewritten content must survive, got %q", b)
+	}
+}
+
+// A Ctrl-C during the dialogs or the final checks surfaces as an error from
+// whatever git command was running — and a fingerprint error normally reads
+// as "delete", because a corrupt clone is what uninstall cleans up. A
+// cancelled caller is the exception: the Ctrl-C was pressed to stop the
+// delete, not to authorise it.
+func TestUninstallStopsWhenCancelledBeforeTheDelete(t *testing.T) {
+	interactive(t)
+	host := startFakeHost(t, idA)
+	seedRepo(t, "tools", state.Extension{Dir: "ext", Name: "Ext", ID: idA, Key: keyA})
+	dir, err := updaterRepoDir("tools")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// The Ctrl-C lands inside the final lock — after the lock was won, while
+	// the host is being asked what Chrome still has. Cancelling any earlier
+	// stops the command at the lock acquisition, which would pass with or
+	// without the check under test.
+	ctx, cancel := context.WithCancel(context.Background())
+	lists := 0
+	cancelled := false
+	host.mu.Lock()
+	host.onList = func() {
+		lists++
+		if lists == 2 { // 1st: preparing the question; 2nd: inside the lock
+			cancelled = true
+			cancel()
+		}
+	}
+	host.mu.Unlock()
+
+	resetPromptReader()
+	var out bytes.Buffer
+	root := newRootCmd()
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetIn(strings.NewReader("n\n"))
+	root.SetArgs([]string{"uninstall", "tools"})
+	err = root.ExecuteContext(ctx)
+	if err == nil {
+		t.Fatalf("a cancelled uninstall must not report success:\n%s", out.String())
+	}
+	if !cancelled {
+		t.Fatal("the test never reached a dialog")
+	}
+	if _, serr := os.Stat(dir); serr != nil {
+		t.Errorf("the clone must survive a cancellation: %v", serr)
+	}
+	st, lerr := state.Load()
+	if lerr != nil {
+		t.Fatal(lerr)
+	}
+	if st.Repos["tools"] == nil {
+		t.Error("nothing may be unregistered after a cancellation")
 	}
 }
 
