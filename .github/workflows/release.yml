@@ -55,6 +55,7 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # A tap in another repository needs a token that can push there;
-          # see the brews section in .goreleaser.yaml.
-          # TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
+          # The tap is another repository, which GITHUB_TOKEN cannot reach:
+          # a fine-grained PAT scoped to be-hase/homebrew-tap with contents
+          # read/write, stored as this secret. See brews in .goreleaser.yaml.
+          TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}

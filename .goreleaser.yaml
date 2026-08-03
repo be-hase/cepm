@@ -35,17 +35,25 @@ changelog:
   filters:
     exclude: ["^docs:", "^test:", "^chore:"]
 
-# Homebrew tap for internal distribution. Create the tap repository, add a
-# token that can push to it as the TAP_GITHUB_TOKEN secret (see
-# .github/workflows/release.yml), then uncomment.
-# brews:
-#   - repository:
-#       owner: your-org
-#       name: homebrew-tap
-#       token: "{{ .Env.TAP_GITHUB_TOKEN }}"
-#     homepage: https://github.com/be-hase/cepm
-#     description: Keep git-distributed unpacked Chrome extensions up to date
-#     install: |
-#       bin.install "cepm"
-#     caveats: |
-#       Run "cepm setup" once, then load ~/.cepm/helper in chrome://extensions.
+# A cask, not a formula: GoReleaser deprecated "brews" for prebuilt
+# binaries. Casks are macOS-only — Linux keeps the tar.gz above. The tap
+# lives in its own repository, so pushing the cask needs a token that can
+# reach it; GITHUB_TOKEN cannot. See TAP_GITHUB_TOKEN in
+# .github/workflows/release.yml.
+homebrew_casks:
+  - repository:
+      owner: be-hase
+      name: homebrew-tap
+      token: "{{ .Env.TAP_GITHUB_TOKEN }}"
+    homepage: https://github.com/be-hase/cepm
+    description: Keep git-distributed unpacked Chrome extensions up to date
+    caveats: |
+      Run "cepm setup" once, then load ~/.cepm/helper in chrome://extensions.
+    # The binaries are not notarized, and Homebrew's own download carries
+    # the quarantine flag — without this, Gatekeeper refuses to run cepm.
+    hooks:
+      post:
+        install: |
+          if system_command("/usr/bin/xattr", args: ["-h"]).exit_status == 0
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/cepm"]
+          end
