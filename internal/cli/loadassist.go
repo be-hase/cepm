@@ -147,6 +147,7 @@ func runLoadCeremony(ctx context.Context, cmd *cobra.Command, targets []loadTarg
 		copied := assist.CopyToClipboard(t.AbsDir) == nil
 		if copied {
 			fmt.Fprintf(out, "  %d. Click \"Load unpacked\", press ⌘⇧G, paste (path copied!), Enter\n", step)
+			fmt.Fprintf(out, "     Path (in case the clipboard gets overwritten): %s\n", term.Quote(t.AbsDir))
 		} else {
 			fmt.Fprintf(out, "  %d. Click \"Load unpacked\" and select: %s\n", step, term.Quote(t.AbsDir))
 		}

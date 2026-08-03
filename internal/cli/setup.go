@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/be-hase/cepm/internal/assist"
 	"github.com/be-hase/cepm/internal/helperext"
 	"github.com/be-hase/cepm/internal/ipc"
 	"github.com/be-hase/cepm/internal/launcher"
@@ -129,14 +130,20 @@ func runSetup(cmd *cobra.Command, variant string, force bool) error {
 		}
 	}
 
+	// Interactive runs get the path on the clipboard too (best-effort, like
+	// the install ceremony); piped/scripted runs must not touch it.
+	clipNote := ""
+	if assist.IsTTY() && assist.CopyToClipboard(helperDir) == nil {
+		clipNote = " (path copied to clipboard)"
+	}
 	fmt.Fprintf(out, `
 One-time step (skip if already done):
   1. Open chrome://extensions
   2. Turn on "Developer mode" (top right)
-  3. Click "Load unpacked" and select: %s
+  3. Click "Load unpacked" and select: %s%s
      (extension ID will be %s)
 
 Then verify with: cepm doctor
-`, helperDir, helperext.ExtensionID())
+`, helperDir, clipNote, helperext.ExtensionID())
 	return nil
 }
