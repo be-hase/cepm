@@ -72,7 +72,7 @@ $ cepm install git@github.example.com:team/internal-extensions.git
 cepm asks which extensions you want, then walks you through loading each
 one: path on your clipboard, chrome://extensions opened, load confirmed.
 
-**4. There is no step 4.** Updates are automatic from here.
+That's it — from here on, updates are automatic.
 
 macOS and Linux are supported (Windows contributions welcome).
 

@@ -74,7 +74,7 @@ $ cepm install git@github.example.com:team/internal-extensions.git
 どの拡張を使うか尋ねたあと、読み込み操作まで誘導します。パスがクリップ
 ボードに入り、chrome://extensions が開き、読み込みを cepm が確認します。
 
-**4. ステップ 4 はありません。** 以降の更新は自動です。
+セットアップは以上です。以降の更新は自動で行われます。
 
 対応 OS は macOS と Linux です(Windows は contributions welcome)。
 
