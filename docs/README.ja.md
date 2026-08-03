@@ -70,7 +70,7 @@ $ cepm enable <repo>[/<dir>]      # リポジトリ内の拡張を使い始め�
 $ cepm disable <repo>[/<dir>]     # 使うのをやめる(登録は「利用可能」として残る)
 $ cepm reload                     # pull せず再読み込みだけ(ローカルでの開発用)
 $ cepm cleanup                    # 改名・削除で壊れた Chrome 側のエントリを削除
-$ cepm uninstall <name>           # 登録解除して clone を削除
+$ cepm uninstall <name>           # 登録解除。clone はゴミ箱ディレクトリへ移動
 $ cepm doctor                     # セットアップと接続状況の診断
 $ cepm reset                      # state が壊れたとき、state と clone を退避してやり直す
 $ cepm id <path>                  # ディレクトリに対応する拡張 ID を表示
@@ -251,9 +251,10 @@ host は Chrome が起動している間だけ存在します。また pull を�
 - すべて `~/.cepm/` 配下に置かれます(clone、state、ログは
   `~/.cepm/logs/host.log`)。パーミッションは所有者のみです。clone は社内拡張の
   ソースそのものなので、同じマシンの他ユーザーからは読めません。
-- cepm は指示されていないものを削除しません。`uninstall` は自身が作成した clone を
-  削除し(`--keep-files` で残せます)、`reset` は移動のみ、Chrome からの削除は
-  必ず Chrome 自身の確認ダイアログを通します。
+- cepm はユーザーのデータを削除しません。`uninstall` は clone をゴミ箱
+  ディレクトリへ**移動**し(場所を表示します。不要と確信したら手で削除して
+  ください。`--keep-files` ならその場に残します)、`reset` は移動のみ、
+  Chrome からの削除は必ず Chrome 自身の確認ダイアログを通します。
 
 ## 開発
 

@@ -68,7 +68,7 @@ $ cepm enable <repo>[/<dir>]      # start using an extension of a repo
 $ cepm disable <repo>[/<dir>]     # stop using one (kept as "available")
 $ cepm reload                     # reload without pulling (local hacking)
 $ cepm cleanup                    # remove broken Chrome entries after renames/deletes
-$ cepm uninstall <name>           # unregister + delete the clone
+$ cepm uninstall <name>           # unregister; the clone moves to a trash dir
 $ cepm doctor                     # diagnose setup / connectivity
 $ cepm reset                      # unusable state? move it + clones to a backup, start over
 $ cepm id <path>                  # print the extension ID for a directory
@@ -247,10 +247,10 @@ after Chrome starts). `~/.cepm/logs/host.log` has the whole story.
   `~/.cepm/logs/host.log`), owner-only: the clones are your internal
   extensions' source, so nothing there is readable by other users on the
   machine.
-- cepm never deletes anything you did not ask it to. `uninstall` removes the
-  clone it created (`--keep-files` to keep it), `reset` only *moves* things
-  into a backup, and removals from Chrome always go through Chrome's own
-  confirmation dialog.
+- cepm never deletes your data. `uninstall` *moves* the clone into a trash
+  directory it names (delete it yourself when sure; `--keep-files` leaves it
+  in place), `reset` only moves things into a backup, and removals from
+  Chrome always go through Chrome's own confirmation dialog.
 
 ## Development
 

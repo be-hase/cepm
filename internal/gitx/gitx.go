@@ -7,16 +7,11 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"io"
-	"io/fs"
 	"log/slog"
 	"net/url"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -98,30 +93,6 @@ func run(ctx context.Context, dir string, args ...string) (string, error) {
 	return strings.TrimSpace(stdout.String()), nil
 }
 
-// runRaw is run without the TrimSpace on stdout, for output where leading
-// or trailing blanks are data: porcelain status columns, NUL-separated file
-// lists whose names can start with a space.
-func runRaw(ctx context.Context, dir string, args ...string) (string, error) {
-	cmdArgs := append([]string{"-c", "core.quotePath=false"}, args...)
-	if dir != "" {
-		cmdArgs = append([]string{"-C", dir}, cmdArgs...)
-	}
-	cmd := exec.CommandContext(ctx, "git", cmdArgs...)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		msg := strings.TrimSpace(stderr.String())
-		if msg == "" {
-			msg = err.Error()
-		}
-		return "", fmt.Errorf("git %s: %s",
-			term.SafeLines(RedactURL(strings.Join(args, " "))),
-			term.SafeLines(RedactURL(msg)))
-	}
-	return stdout.String(), nil
-}
-
 // Clone clones url into dir. branch may be empty (remote default branch).
 func Clone(ctx context.Context, url, dir, branch string) error {
 	args := []string{"clone"}
@@ -162,204 +133,6 @@ func (r Repo) IsDirty(ctx context.Context) (bool, error) {
 		return false, err
 	}
 	return out != "", nil
-}
-
-// ChangeFingerprint identifies the tree's uncommitted state by content,
-// returning "" for a clean tree. For callers that ask a person before
-// destroying local changes: the answer covers the changes as they were
-// then, and only a content-level comparison can tell those from what
-// arrived while the question was open — "git status" alone shows the same
-// " M file" line no matter how many times the file was rewritten since.
-//
-// Tracked changes are covered by the diff against HEAD, with
-// --submodule=diff so a rewrite inside a submodule changes the diff text
-// rather than hiding behind an unchanged "-dirty" line. Untracked entries
-// do not appear in any diff, so they are recorded directly: type, mode and
-// symlink target from Lstat, bytes for regular files, every field length-
-// prefixed so contents cannot shift across record boundaries and compare
-// equal. Submodules are fingerprinted recursively, because their untracked
-// files appear in no diff or listing of the parent. The diff representation
-// is pinned with --no-ext-diff/--no-textconv: an external driver decides
-// what the diff *shows*, and this needs what the tree *is*.
-//
-// An error means the state could not be identified — a caller about to
-// destroy the tree must treat that as "do not", not as "nothing to lose":
-// the tree that cannot be fingerprinted can still hold the user's work.
-func (r Repo) ChangeFingerprint(ctx context.Context) (string, error) {
-	// Raw output, not run(): TrimSpace would eat the leading space of the
-	// first porcelain status column and of an untracked name that starts
-	// with a blank, making two different states print the same.
-	porcelain, err := runRaw(ctx, r.Dir, "status", "--porcelain", "-uall", "--ignore-submodules=none")
-	if err != nil {
-		return "", err
-	}
-	if strings.TrimSpace(porcelain) == "" {
-		return "", nil
-	}
-	var diff string
-	if _, herr := run(ctx, r.Dir, "rev-parse", "--verify", "HEAD"); herr == nil {
-		diff, err = runRaw(ctx, r.Dir, "diff", "--no-ext-diff", "--no-textconv", "--full-index", "--ignore-submodules=none", "--submodule=diff", "HEAD", "--")
-		if err != nil {
-			return "", err
-		}
-	} else {
-		// No commits yet (a clone broken mid-setup): the empty-tree-vs-
-		// index and index-vs-worktree diffs together cover the same ground.
-		staged, serr := runRaw(ctx, r.Dir, "diff", "--no-ext-diff", "--no-textconv", "--full-index", "--ignore-submodules=none", "--cached", "--")
-		if serr != nil {
-			return "", serr
-		}
-		unstaged, uerr := runRaw(ctx, r.Dir, "diff", "--no-ext-diff", "--no-textconv", "--full-index", "--ignore-submodules=none", "--")
-		if uerr != nil {
-			return "", uerr
-		}
-		diff = staged + "\x00" + unstaged
-	}
-	untracked, err := runRaw(ctx, r.Dir, "ls-files", "--others", "--exclude-standard", "-z")
-	if err != nil {
-		return "", err
-	}
-	h := sha256.New()
-	record := func(field string) {
-		fmt.Fprintf(h, "%d:", len(field))
-		h.Write([]byte(field))
-	}
-	record(porcelain)
-	record(diff)
-	record(untracked)
-	for _, p := range strings.Split(untracked, "\x00") {
-		if p == "" {
-			continue
-		}
-		if cerr := ctx.Err(); cerr != nil {
-			return "", cerr
-		}
-		full := filepath.Join(r.Dir, p)
-		fi, err := os.Lstat(full)
-		if err != nil {
-			return "", fmt.Errorf("fingerprint %s: %w", p, err)
-		}
-		record(p)
-		record(fi.Mode().String())
-		switch {
-		case fi.Mode()&os.ModeSymlink != 0:
-			// Readlink, not ReadFile: the link itself is the entry, and a
-			// dangling target is a perfectly healthy thing to have lying
-			// around — it must neither fail the fingerprint nor read as
-			// whatever it happens to point at.
-			target, err := os.Readlink(full)
-			if err != nil {
-				return "", fmt.Errorf("fingerprint %s: %w", p, err)
-			}
-			record(target)
-		case fi.Mode().IsRegular():
-			if err := hashFile(h, full, fi.Size()); err != nil {
-				return "", fmt.Errorf("fingerprint %s: %w", p, err)
-			}
-		case fi.IsDir():
-			// A directory in the untracked listing is a nested git
-			// repository: ordinary untracked files are listed one by one,
-			// but git will not descend into a repo-within-the-repo, so
-			// everything under this entry — working files and the .git
-			// with its commits and stashes — is invisible to every git
-			// command run on the parent. Hash the bytes wholesale instead
-			// of interpreting them: completeness matters here, cleverness
-			// does not.
-			if err := hashDirectory(ctx, h, full); err != nil {
-				return "", fmt.Errorf("fingerprint %s: %w", p, err)
-			}
-		default:
-			// Sockets, fifos, devices: the type in the mode string above
-			// is all the identity they have.
-		}
-	}
-	// Submodules, recursively. Their untracked files appear in no diff and
-	// no listing of the parent — the parent's status only says the
-	// submodule is dirty — so without descending, two different states
-	// would fingerprint identically and "identified" would be a lie. An
-	// error inside a submodule propagates: a state that cannot be fully
-	// identified must not pretend it was.
-	subs, err := runRaw(ctx, r.Dir, "submodule", "--quiet", "foreach", `printf '%s\0' "$sm_path"`)
-	if err != nil {
-		return "", err
-	}
-	for _, p := range strings.Split(subs, "\x00") {
-		if p == "" {
-			continue
-		}
-		subFP, err := (Repo{Dir: filepath.Join(r.Dir, p)}).ChangeFingerprint(ctx)
-		if err != nil {
-			return "", fmt.Errorf("fingerprint submodule %s: %w", p, err)
-		}
-		record(p)
-		record(subFP)
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
-}
-
-// hashFile streams one file into the hash with its size as the length
-// prefix, so a multi-gigabyte untracked artifact costs a read buffer, not
-// its own size in memory — an OOM kill is the one failure fail-closed can
-// never catch, because it never returns as an error. A short or long read
-// means the file changed mid-read, which is exactly a state the caller must
-// not call identified.
-func hashFile(h io.Writer, path string, size int64) error {
-	f, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	fmt.Fprintf(h, "%d:", size)
-	n, err := io.Copy(h, f)
-	if err != nil {
-		return err
-	}
-	if n != size {
-		return fmt.Errorf("%s changed while being read", path)
-	}
-	return nil
-}
-
-// hashDirectory records a directory tree byte for byte — path, type, mode,
-// and symlink target or file content per entry, in WalkDir's deterministic
-// order, every field length-prefixed. Used for untracked nested
-// repositories, where no git interpretation of the parent reaches.
-func hashDirectory(ctx context.Context, h io.Writer, root string) error {
-	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if cerr := ctx.Err(); cerr != nil {
-			return cerr
-		}
-		rel, err := filepath.Rel(root, path)
-		if err != nil {
-			return err
-		}
-		fi, err := os.Lstat(path)
-		if err != nil {
-			return err
-		}
-		field := func(f string) {
-			fmt.Fprintf(h, "%d:", len(f))
-			io.WriteString(h, f)
-		}
-		field(rel)
-		field(fi.Mode().String())
-		switch {
-		case fi.Mode()&os.ModeSymlink != 0:
-			target, err := os.Readlink(path)
-			if err != nil {
-				return err
-			}
-			field(target)
-		case fi.Mode().IsRegular():
-			if err := hashFile(h, path, fi.Size()); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
 }
 
 // Fetch fetches the remote, including tags and pruning deleted refs.

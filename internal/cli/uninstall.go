@@ -2,16 +2,16 @@ package cli
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/spf13/cobra"
 
-	"github.com/be-hase/cepm/internal/assist"
 	"github.com/be-hase/cepm/internal/gitx"
 	"github.com/be-hase/cepm/internal/ipc"
+	"github.com/be-hase/cepm/internal/paths"
 	"github.com/be-hase/cepm/internal/state"
 	"github.com/be-hase/cepm/internal/term"
 	"github.com/be-hase/cepm/internal/updater"
@@ -33,16 +33,52 @@ func snapshot(r *state.Repo) string {
 	return s
 }
 
-// removeClone deletes a clone. A variable so a test can prove the delete
-// happens while the update lock is held — the only observable difference
-// between deleting inside the lock and just after it.
-var removeClone = os.RemoveAll
+// trashClone moves a clone into a freshly created trash directory and
+// returns where it went. A move, never a delete, on principle: everything
+// else in cepm that could destroy a user's work refuses to (stash entries
+// are never dropped, reset renames into a backup), and deleting here would
+// otherwise demand proving that nothing in the clone changed between the
+// user's answer and the delete — an arms race against every place git can
+// hold work. A rename needs no such proof: whatever changed is still there.
+//
+// The trash lives next to the staging area (see stagingParentFor): normally
+// the cepm home, but inside repos/ when that is another filesystem, because
+// a rename cannot cross devices. Dot-prefixed so nothing that scans
+// directories mistakes it for content.
+//
+// A variable so a test can prove the move happens while the update lock is
+// held — between a save and a move outside the lock, a reset plus an
+// install could put a brand-new clone at this same logical path.
+var trashClone = func(dir, name string) (string, error) {
+	home, err := paths.CepmDir()
+	if err != nil {
+		return "", err
+	}
+	reposDir, err := paths.ReposDir()
+	if err != nil {
+		return "", err
+	}
+	parent := stagingParentFor(home, reposDir)
+	if resolved, rerr := filepath.EvalSymlinks(parent); rerr == nil {
+		parent = resolved
+	}
+	trash, err := os.MkdirTemp(parent, ".trash-")
+	if err != nil {
+		return "", err
+	}
+	dst := filepath.Join(trash, name)
+	if err := os.Rename(dir, dst); err != nil {
+		_ = os.Remove(trash)
+		return "", err
+	}
+	return dst, nil
+}
 
 func newUninstallCmd() *cobra.Command {
 	var keepFiles bool
 	cmd := &cobra.Command{
 		Use:     "uninstall <name>",
-		Short:   "Unregister a repository and delete its clone",
+		Short:   "Unregister a repository and move its clone to the trash",
 		GroupID: "ext",
 		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -63,64 +99,13 @@ func newUninstallCmd() *cobra.Command {
 				return err
 			}
 
-			// Local edits are precious everywhere else (update skips dirty
-			// trees; stash-pop failures halt with recovery steps), so they
-			// must not vanish silently here either. The fingerprint is
-			// content-level, kept for the re-check before the delete: the
-			// confirmation covers the changes as they are now, and "git
-			// status" alone cannot tell them from a rewrite of the same
-			// file while a dialog is open.
-			//
-			// A tree whose state cannot be identified fails closed. It may
-			// be the corrupt clone uninstall exists to clean up — but it
-			// may equally be a healthy tree the fingerprint has no answer
-			// for, still holding the user's work, so "could not check"
-			// must never quietly become "nothing to lose". It is its own
-			// question instead.
-			// The identity is HEAD plus the uncommitted fingerprint, not
-			// the fingerprint alone. Committing during a dialog returns
-			// the worktree to clean — "" == "" — while the clone now holds
-			// work that was never shown to anyone; the moved HEAD is what
-			// records that. A missing HEAD (an unborn repo) reads as "",
-			// which still compares correctly: gaining a first commit
-			// changes it.
-			identityOf := func() (identity, uncommitted string, err error) {
-				repo := gitx.Repo{Dir: dir}
-				fp, err := repo.ChangeFingerprint(cmd.Context())
-				if err != nil {
-					return "", "", err
-				}
-				head, herr := repo.Head(cmd.Context())
-				if herr != nil {
-					head = ""
-				}
-				return head + "\x00" + fp, fp, nil
-			}
-			approvedIdentity, unverifiable := "", false
-			if !keepFiles {
-				switch ident, fp, derr := identityOf(); {
-				case derr == nil && fp != "":
-					if !assist.IsTTY() {
-						return fmt.Errorf("%s has uncommitted local changes; commit or stash them first, or re-run with --keep-files to keep the clone", dir)
-					}
-					if !confirm(cmd, fmt.Sprintf("%s has uncommitted local changes — delete them anyway?", dir)) {
-						return errors.New("aborted; nothing was changed (--keep-files uninstalls but keeps the clone)")
-					}
-					approvedIdentity = ident
-				case derr == nil:
-					// A clean tree still has an identity — its HEAD — and
-					// the delete is approved for exactly that state.
-					approvedIdentity = ident
-				case derr != nil:
-					if !assist.IsTTY() {
-						return fmt.Errorf("cannot check %s for local changes (%w); re-run with --keep-files to keep the clone, or interactively to decide", dir, derr)
-					}
-					if !confirm(cmd, fmt.Sprintf("cannot check %s for local changes (it may be corrupt) — delete it anyway?", dir)) {
-						return errors.New("aborted; nothing was changed (--keep-files uninstalls but keeps the clone)")
-					}
-					unverifiable = true
-				}
-			}
+			// For the report only. Local edits are precious everywhere else
+			// in cepm, and here they need no gate at all: the clone is
+			// moved, not deleted, so nothing that happens between this look
+			// and the move can be lost. "Cannot tell" points the caution
+			// the same way as "dirty".
+			dirty, derr := (gitx.Repo{Dir: dir}).IsDirty(cmd.Context())
+			mentionChanges := derr != nil || dirty
 
 			// Ask first, act later. The question waits for a human, which the
 			// update lock must not, so only the answer is collected here —
@@ -175,6 +160,7 @@ func newUninstallCmd() *cobra.Command {
 			}
 
 			var orphans []state.StaleExtension
+			trashed := ""
 			err = updater.WithLock(cmd.Context(), func() error {
 				st, err := state.Load()
 				if err != nil {
@@ -202,54 +188,37 @@ func newUninstallCmd() *cobra.Command {
 						})
 					}
 				}
-				if !keepFiles {
-					// The tree may have changed while the dialogs were
-					// open, and the confirmation covered only what existed
-					// then. What was approved must still be what is there:
-					// a fingerprint that no longer matches — including one
-					// that failed where it succeeded before, or succeeds
-					// where it failed — is a tree the user never saw. Only
-					// an unverifiable tree the user explicitly approved as
-					// such stays deletable through a repeated error. And a
-					// cancelled caller stops regardless: the Ctrl-C was
-					// pressed to stop this delete, not to authorise it.
-					ident, _, derr := identityOf()
-					if cerr := cmd.Context().Err(); cerr != nil {
-						return cerr
-					}
-					sameAsApproved := (derr == nil && !unverifiable && ident == approvedIdentity) ||
-						(derr != nil && unverifiable)
-					if !sameAsApproved {
-						return fmt.Errorf("%s changed while cepm was waiting for your answers; "+
-							"nothing was unregistered — review the changes and run cepm uninstall %s again",
-							dir, term.Quote(name))
-					}
+				// A cancelled caller stops before anything is written: the
+				// Ctrl-C was pressed to stop this, not to hurry it.
+				if cerr := cmd.Context().Err(); cerr != nil {
+					return cerr
 				}
 				delete(st.Repos, name)
 				st.AddOrphans(orphans)
 				if err := st.Save(); err != nil {
-					// With the clone about to be deleted, "the new state is
+					// With the clone about to be moved, "the new state is
 					// live" is not enough: a crash before the flush lands
-					// brings the registration back with its files already
-					// gone. Keeping the files has no such step, so there a
-					// durability-only failure must not report an uninstall
-					// that did happen as failed.
+					// brings the registration back with its clone already
+					// elsewhere. Keeping the files has no such step, so
+					// there a durability-only failure must not report an
+					// uninstall that did happen as failed.
 					if keepFiles && state.Committed(err) {
 						fmt.Fprintf(out, "Warning: %v\n", err)
 						return nil
 					}
 					return err
 				}
-				// Deleting inside the lock, deliberately. Between a save
-				// and a delete outside it, a reset plus an install can put
-				// a brand-new clone at this same logical path — and the
-				// delete would then take that clone, from a registration
-				// this command never saw. The lock is what makes
-				// "the path still means what the save said" true.
+				// Moving inside the lock, deliberately. Between a save and
+				// a move outside it, a reset plus an install can put a
+				// brand-new clone at this same logical path — and the move
+				// would then take a clone belonging to a registration this
+				// command never saw.
 				if !keepFiles {
-					if err := removeClone(dir); err != nil {
-						return fmt.Errorf("unregistered, but failed to delete %s: %w", dir, err)
+					dst, err := trashClone(dir, name)
+					if err != nil {
+						return fmt.Errorf("unregistered, but could not move %s to the trash: %w — remove it yourself", dir, err)
 					}
+					trashed = dst
 				}
 				return nil
 			})
@@ -257,6 +226,12 @@ func newUninstallCmd() *cobra.Command {
 				return err
 			}
 			fmt.Fprintf(out, "Uninstalled %q (%d extension(s)).\n", name, len(repo.Extensions))
+			if trashed != "" {
+				fmt.Fprintf(out, "The clone was moved to %s — delete it whenever you like.\n", term.Quote(trashed))
+				if mentionChanges {
+					fmt.Fprintf(out, "  (it contains, or may contain, uncommitted local changes)\n")
+				}
+			}
 			if len(orphans) > 0 {
 				fmt.Fprintf(out, "%d entr%s still in Chrome; remove them there, or run: cepm cleanup\n",
 					len(orphans), pluralY(len(orphans)))
@@ -264,6 +239,6 @@ func newUninstallCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().BoolVar(&keepFiles, "keep-files", false, "keep the cloned directory on disk")
+	cmd.Flags().BoolVar(&keepFiles, "keep-files", false, "keep the cloned directory where it is")
 	return cmd
 }
