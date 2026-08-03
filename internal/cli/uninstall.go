@@ -39,25 +39,28 @@ func snapshot(r *state.Repo) string {
 	return s
 }
 
-// cloneIdentity names this clone directory *instance* — device and inode —
-// so that two registrations alike in every attribute are still told apart.
-// A reset plus a re-install of the same URL under the same name reproduces
-// every attribute the state records, but it cannot reproduce the inode: the
-// new clone is a new directory. "" when the clone is absent or the platform
-// keeps its counsel; two absents compare equal, which is right — an
-// uninstall of a registration whose clone is already gone is legitimate
-// state cleanup.
-func cloneIdentity(dir string) string {
-	fi, err := os.Stat(dir)
+// stateGeneration identifies the state file *instance*, so that two
+// registrations alike in every attribute are still told apart: a reset plus
+// a re-install of the same URL reproduces every attribute, but both pass
+// through state.Save, and Save replaces state.json by rename — new inode,
+// new mtime, new size. The clone directory's own inode is useless for this:
+// ext4 reuses a just-freed inode immediately (the Linux CI proved it), and
+// nothing recreates state.json in place the way a directory can be.
+// Comparing generations therefore answers "did anyone save state while the
+// dialogs were open" — including a periodic update, which is also a state
+// this command's answers were not about.
+func stateGeneration() string {
+	path, err := paths.StateFile()
 	if err != nil {
 		return ""
 	}
-	dev, okD := deviceOf(fi)
-	ino, okI := inodeOf(fi)
-	if !okD || !okI {
+	fi, err := os.Stat(path)
+	if err != nil {
 		return ""
 	}
-	return fmt.Sprintf("%d:%d", dev, ino)
+	dev, _ := deviceOf(fi)
+	ino, _ := inodeOf(fi)
+	return fmt.Sprintf("%d:%d:%d:%d", dev, ino, fi.ModTime().UnixNano(), fi.Size())
 }
 
 // trashClone moves a clone into a freshly created trash directory and
@@ -142,14 +145,14 @@ func newUninstallCmd() *cobra.Command {
 			for _, s := range repo.Stale {
 				candidates = append(candidates, state.Extension{Name: s.Name, ID: s.ID})
 			}
-			before := snapshot(repo) + "\x00" + cloneIdentity(dir)
+			before := snapshot(repo) + "\x00" + stateGeneration()
 			approved := askChromeRemoval(cmd, candidates)
 
 			changed := func(fresh *state.Repo, ok bool) error {
 				if !ok {
 					return fmt.Errorf("repository %q is no longer registered", name)
 				}
-				if snapshot(fresh)+"\x00"+cloneIdentity(dir) != before {
+				if snapshot(fresh)+"\x00"+stateGeneration() != before {
 					// An update ran while we were asking: the extensions we
 					// asked about are not the ones registered now.
 					return fmt.Errorf("%q changed while waiting for your answer; run cepm uninstall %s again",

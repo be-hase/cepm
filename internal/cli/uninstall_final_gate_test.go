@@ -289,9 +289,13 @@ func TestUninstallRefusesAReinstalledCloneDuringTheDialogs(t *testing.T) {
 	host.loaded[idA] = true // so the Chrome question is asked
 	host.mu.Unlock()
 
-	// While the question is open, the clone is rebuilt in place — the
-	// filesystem shape of "reset, then reinstall the same URL". The state's
-	// attributes stay identical on purpose: only the instance differs.
+	// While the question is open, the registration is re-made — the shape
+	// of "reset, then reinstall the same URL". Its attributes are identical
+	// on purpose; what a real reinstall cannot avoid is writing state.json,
+	// and that save is what must be noticed. (The clone directory's inode
+	// is deliberately not the token: ext4 reuses a just-freed inode
+	// immediately, so the rebuilt clone below can come back numerically
+	// identical.)
 	rebuilt := false
 	origIsTTY := assist.IsTTY
 	t.Cleanup(func() { assist.IsTTY = origIsTTY })
@@ -305,6 +309,14 @@ func TestUninstallRefusesAReinstalledCloneDuringTheDialogs(t *testing.T) {
 				t.Error(err)
 			}
 			gitCmd(t, dir, "init", "-q", "-b", "main")
+			st, err := state.Load()
+			if err != nil {
+				t.Error(err)
+				return true
+			}
+			if err := st.Save(); err != nil { // the reinstall's save, contents unchanged
+				t.Error(err)
+			}
 		}
 		return true
 	}
