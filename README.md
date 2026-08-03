@@ -114,7 +114,9 @@ $ cepm id <path>                  # print the extension ID for a directory
 
 Flags worth knowing: `cepm update --no-reload` (pull only), `cepm update
 --force` (stash local edits around the pull), `cepm uninstall --keep-files`,
-`cepm list --json` / `cepm doctor --json`, and `-v` on any command.
+`cepm list --share` (install commands for your enabled extensions, ready to
+paste to a colleague), `cepm list --json` / `cepm doctor --json`, and `-v`
+on any command.
 
 ### Multi-extension repos
 
