@@ -220,6 +220,70 @@ func TestUninstallTrashesAnUncheckableCloneToo(t *testing.T) {
 	}
 }
 
+// An answer is about a registration, not a name. While a dialog is open, a
+// reset plus an install can put a different repository — another URL — under
+// the same name with the same path-derived ids, and the snapshot re-check
+// has to notice the swap: acting would carry an answer about one
+// registration onto another. The clone would survive in the trash, but
+// "nothing was lost" is not "the right thing was done".
+func TestUninstallRefusesARegistrationSwappedDuringTheDialogs(t *testing.T) {
+	interactive(t)
+	host := startFakeHost(t)
+	seedRepo(t, "tools", state.Extension{Dir: "ext", Name: "Ext", ID: idA, Key: keyA})
+	if err := os.MkdirAll(filepath.Join(mustRepoDir(t, "tools"), "ext"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	host.mu.Lock()
+	host.loaded[idA] = true // so the Chrome question is asked
+	host.mu.Unlock()
+
+	// While the question is open: the registration is replaced wholesale —
+	// same name, same extension ids (seeded directly, as a reset+install
+	// would produce them path-derived), different URL.
+	swapped := false
+	origIsTTY := assist.IsTTY
+	t.Cleanup(func() { assist.IsTTY = origIsTTY })
+	assist.IsTTY = func() bool {
+		if !swapped {
+			swapped = true
+			st, err := state.Load()
+			if err != nil {
+				t.Error(err)
+				return true
+			}
+			st.Repos["tools"].URL = "https://elsewhere.example.com/other/tools.git"
+			if err := st.Save(); err != nil {
+				t.Error(err)
+			}
+		}
+		return true
+	}
+
+	out, err := run(t, "n\n", "uninstall", "tools")
+	if err == nil {
+		t.Fatalf("an answer about one registration must not act on another:\n%s", out)
+	}
+	if !strings.Contains(err.Error(), "changed while") {
+		t.Errorf("the error should say what happened: %v", err)
+	}
+	st, lerr := state.Load()
+	if lerr != nil {
+		t.Fatal(lerr)
+	}
+	if st.Repos["tools"] == nil {
+		t.Error("the swapped-in registration must survive untouched")
+	}
+}
+
+func mustRepoDir(t *testing.T, name string) string {
+	t.Helper()
+	dir, err := updaterRepoDir(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
 // With --keep-files nothing moves after the save, so a save that is live
 // but not yet flushed is the same situation install and enable carry on
 // through: reporting it as failure leaves the user re-running a command

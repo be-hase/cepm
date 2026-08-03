@@ -413,3 +413,28 @@ func TestStashPopReportsNothingWhenTheEntryIsGone(t *testing.T) {
 		t.Errorf("the change was not restored: %q", b)
 	}
 }
+
+// The dirty verdict decides whether an update skips a clone and whether an
+// uninstall warns about the trash's contents; repository configuration must
+// not get to flip it to "clean" while work is present.
+func TestIsDirtySeesThroughSilencingConfiguration(t *testing.T) {
+	dir := t.TempDir()
+	gitIn(t, dir, "init", "--initial-branch=main")
+	if err := os.WriteFile(filepath.Join(dir, "base.txt"), []byte("committed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitIn(t, dir, "add", "-A")
+	gitIn(t, dir, "commit", "-m", "base")
+	gitIn(t, dir, "config", "status.showUntrackedFiles", "no")
+
+	if err := os.WriteFile(filepath.Join(dir, "local.txt"), []byte("work\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dirty, err := (Repo{Dir: dir}).IsDirty(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !dirty {
+		t.Error("untracked work must count as dirty even with status.showUntrackedFiles=no")
+	}
+}

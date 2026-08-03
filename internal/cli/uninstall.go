@@ -20,9 +20,15 @@ import (
 // snapshot captures what a decision about a repository was based on, so a
 // change made between reading it and acting can be noticed. The disabled
 // bit is part of it: an enable answered mid-prompt changes what a removal
-// would mean.
+// would mean. So is the registration's provenance — URL and tracking: a
+// reset plus an install can put a *different* repository under the same
+// name with the same path-derived ids while a dialog is open, and acting
+// on it then would carry an answer about one registration onto another.
+// Head is deliberately absent: the periodic updater moves it, and an
+// update does not change which registration this is.
 func snapshot(r *state.Repo) string {
-	s := ""
+	s := r.URL + "\x00" + r.Track + "\x00" + r.Branch + "\x00" +
+		r.TagPattern + "\x00" + r.Tag + "\x00" + fmt.Sprint(r.Prerelease) + "\x00|"
 	for _, e := range r.Extensions {
 		s += e.Dir + "\x00" + e.ID + "\x00" + fmt.Sprint(e.Disabled) + "\x00"
 	}

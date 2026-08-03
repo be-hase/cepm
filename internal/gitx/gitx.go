@@ -127,8 +127,13 @@ func (r Repo) CurrentBranch(ctx context.Context) (string, error) {
 	return out, nil
 }
 
+// IsDirty reports whether the tree holds uncommitted work. The flags pin
+// the answer against repository configuration: status.showUntrackedFiles=no
+// would hide untracked work and submodule.<name>.ignore=all would hide a
+// dirty submodule — and both a skipped update and an uninstall report rest
+// on this verdict, so the clone must not get to choose it.
 func (r Repo) IsDirty(ctx context.Context) (bool, error) {
-	out, err := run(ctx, r.Dir, "status", "--porcelain")
+	out, err := run(ctx, r.Dir, "status", "--porcelain", "-uall", "--ignore-submodules=none")
 	if err != nil {
 		return false, err
 	}
