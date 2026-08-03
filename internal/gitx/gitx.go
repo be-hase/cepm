@@ -175,8 +175,10 @@ func (r Repo) IsDirty(ctx context.Context) (bool, error) {
 // do not appear in any diff, so they are recorded directly: type, mode and
 // symlink target from Lstat, bytes for regular files, every field length-
 // prefixed so contents cannot shift across record boundaries and compare
-// equal. What stays invisible: untracked files *inside* a submodule, whose
-// content git reports only as the submodule being dirty.
+// equal. Submodules are fingerprinted recursively, because their untracked
+// files appear in no diff or listing of the parent. The diff representation
+// is pinned with --no-ext-diff/--no-textconv: an external driver decides
+// what the diff *shows*, and this needs what the tree *is*.
 //
 // An error means the state could not be identified — a caller about to
 // destroy the tree must treat that as "do not", not as "nothing to lose":
@@ -194,18 +196,18 @@ func (r Repo) ChangeFingerprint(ctx context.Context) (string, error) {
 	}
 	var diff string
 	if _, herr := run(ctx, r.Dir, "rev-parse", "--verify", "HEAD"); herr == nil {
-		diff, err = runRaw(ctx, r.Dir, "diff", "--submodule=diff", "HEAD", "--")
+		diff, err = runRaw(ctx, r.Dir, "diff", "--no-ext-diff", "--no-textconv", "--submodule=diff", "HEAD", "--")
 		if err != nil {
 			return "", err
 		}
 	} else {
 		// No commits yet (a clone broken mid-setup): the empty-tree-vs-
 		// index and index-vs-worktree diffs together cover the same ground.
-		staged, serr := runRaw(ctx, r.Dir, "diff", "--cached", "--")
+		staged, serr := runRaw(ctx, r.Dir, "diff", "--no-ext-diff", "--no-textconv", "--cached", "--")
 		if serr != nil {
 			return "", serr
 		}
-		unstaged, uerr := runRaw(ctx, r.Dir, "diff", "--")
+		unstaged, uerr := runRaw(ctx, r.Dir, "diff", "--no-ext-diff", "--no-textconv", "--")
 		if uerr != nil {
 			return "", uerr
 		}
@@ -255,6 +257,27 @@ func (r Repo) ChangeFingerprint(ctx context.Context) (string, error) {
 			// Sockets, fifos, devices: the type in the mode string above
 			// is all the identity they have.
 		}
+	}
+	// Submodules, recursively. Their untracked files appear in no diff and
+	// no listing of the parent — the parent's status only says the
+	// submodule is dirty — so without descending, two different states
+	// would fingerprint identically and "identified" would be a lie. An
+	// error inside a submodule propagates: a state that cannot be fully
+	// identified must not pretend it was.
+	subs, err := runRaw(ctx, r.Dir, "submodule", "--quiet", "foreach", `printf '%s\0' "$sm_path"`)
+	if err != nil {
+		return "", err
+	}
+	for _, p := range strings.Split(subs, "\x00") {
+		if p == "" {
+			continue
+		}
+		subFP, err := (Repo{Dir: filepath.Join(r.Dir, p)}).ChangeFingerprint(ctx)
+		if err != nil {
+			return "", fmt.Errorf("fingerprint submodule %s: %w", p, err)
+		}
+		record(p)
+		record(subFP)
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
 }

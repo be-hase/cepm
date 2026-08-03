@@ -111,6 +111,60 @@ func TestFingerprintSeesWhatStatusCannot(t *testing.T) {
 		// rule the ambiguity out structurally rather than case by case.
 	})
 
+	t.Run("untracked file inside a submodule rewritten", func(t *testing.T) {
+		sub := t.TempDir()
+		gitIn(t, sub, "init", "--initial-branch=main")
+		if err := os.WriteFile(filepath.Join(sub, "file.txt"), []byte("committed\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		gitIn(t, sub, "add", "-A")
+		gitIn(t, sub, "commit", "-m", "sub base")
+
+		dir, fp := fingerprintRepo(t)
+		gitIn(t, dir, "-c", "protocol.file.allow=always", "submodule", "add", sub, "vendor")
+		gitIn(t, dir, "commit", "-m", "add submodule")
+
+		// Untracked inside the submodule: the parent's diff is empty and
+		// its untracked listing does not descend, so only recursing into
+		// the submodule can see this content at all.
+		inner := filepath.Join(dir, "vendor", "local.txt")
+		if err := os.WriteFile(inner, []byte("edit-one\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		one := fp()
+		if err := os.WriteFile(inner, []byte("edit-two\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if fp() == one {
+			t.Error("rewriting an untracked file inside a submodule must change the fingerprint")
+		}
+	})
+
+	t.Run("external diff driver hiding the change", func(t *testing.T) {
+		dir, fp := fingerprintRepo(t)
+		// A driver that reports nothing, wired exactly as a repository (or
+		// the user's config) could wire it. The fingerprint needs what the
+		// tree is, not what a driver chooses to show.
+		if err := os.WriteFile(filepath.Join(dir, ".gitattributes"), []byte("*.txt diff=opaque\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		gitIn(t, dir, "config", "diff.opaque.command", "true")
+		gitIn(t, dir, "add", "-A")
+		gitIn(t, dir, "commit", "-m", "attributes")
+
+		file := filepath.Join(dir, "base.txt")
+		if err := os.WriteFile(file, []byte("edit-one\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		one := fp()
+		if err := os.WriteFile(file, []byte("edit-two\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if fp() == one {
+			t.Error("an external diff driver must not decide what the fingerprint sees")
+		}
+	})
+
 	t.Run("rewrite inside a tracked submodule", func(t *testing.T) {
 		sub := t.TempDir()
 		gitIn(t, sub, "init", "--initial-branch=main")
