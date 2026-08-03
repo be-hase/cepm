@@ -340,6 +340,47 @@ func TestUninstallRefusesAReinstalledCloneDuringTheDialogs(t *testing.T) {
 	}
 }
 
+// The snapshot and the state generation are one observation: read outside a
+// lock, a save landing between them composes old attributes with a new
+// generation, and the final re-check then compares halves of two different
+// states — waving a swapped registration through. Holding the lock is the
+// whole guarantee, so that is what the seam asserts, for both commands that
+// share the machinery.
+func TestSnapshotGenerationIsTakenUnderTheLock(t *testing.T) {
+	interactive(t)
+	startFakeHost(t)
+	seedRepo(t, "tools", state.Extension{Dir: "ext", Name: "Ext", ID: idA, Key: keyA})
+
+	lockPath, err := paths.UpdateLockPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	prev := stateGeneration
+	t.Cleanup(func() { stateGeneration = prev })
+	stateGeneration = func() (string, error) {
+		calls++
+		f := flock.New(lockPath)
+		if ok, lerr := f.TryLock(); lerr == nil && ok {
+			t.Error("the state generation was read with the update lock free")
+			// Release, or the command under test deadlocks against us and
+			// the failure takes the lock timeout to report.
+			_ = f.Unlock()
+		}
+		return prev()
+	}
+
+	if out, err := run(t, "", "disable", "tools"); err != nil {
+		t.Fatalf("disable: %v\n%s", err, out)
+	}
+	if out, err := run(t, "n\n", "uninstall", "tools"); err != nil {
+		t.Fatalf("uninstall: %v\n%s", err, out)
+	}
+	if calls < 4 { // before + re-check, in each command
+		t.Fatalf("fixture: expected the generation to be consulted in both commands, got %d calls", calls)
+	}
+}
+
 func mustRepoDir(t *testing.T, name string) string {
 	t.Helper()
 	dir, err := updaterRepoDir(name)

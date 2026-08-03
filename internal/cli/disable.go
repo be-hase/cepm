@@ -27,14 +27,32 @@ remove it from Chrome too (Chrome shows its own confirmation dialog).`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			repoName, dir := parseExtRef(args[0])
 			// Choose and ask before locking (see the note in cepm enable):
-			// both wait for a human, which the lock must not.
-			st, err := state.Load()
-			if err != nil {
+			// both wait for a human, which the lock must not. But the state
+			// and its generation are one observation, made under a short
+			// lock released before any question: taken separately, a save
+			// landing in between composes old attributes with a new
+			// generation, and the re-check compares halves of different
+			// states.
+			var r *state.Repo
+			var before string
+			if err := updater.WithLock(cmd.Context(), func() error {
+				st, err := state.Load()
+				if err != nil {
+					return err
+				}
+				repo, ok := st.Repos[repoName]
+				if !ok {
+					return fmt.Errorf("repository %q is not registered (see cepm list)", repoName)
+				}
+				gen, gerr := stateGeneration()
+				if gerr != nil {
+					return gerr
+				}
+				r = repo
+				before = snapshot(repo) + "\x00" + gen
+				return nil
+			}); err != nil {
 				return err
-			}
-			r, ok := st.Repos[repoName]
-			if !ok {
-				return fmt.Errorf("repository %q is not registered (see cepm list)", repoName)
 			}
 			picked, err := pickExtensions(cmd, r, dir, true)
 			if err != nil {
@@ -46,7 +64,6 @@ remove it from Chrome too (Chrome shows its own confirmation dialog).`,
 				dirs[i] = e.Dir
 				asked[i] = *e
 			}
-			before := snapshot(r) + "\x00" + stateGeneration()
 			approved := askChromeRemoval(cmd, asked)
 
 			var disabled []state.Extension
@@ -59,7 +76,11 @@ remove it from Chrome too (Chrome shows its own confirmation dialog).`,
 				if !ok {
 					return fmt.Errorf("repository %q is no longer registered", repoName)
 				}
-				if snapshot(r)+"\x00"+stateGeneration() != before {
+				gen, gerr := stateGeneration()
+				if gerr != nil {
+					return gerr
+				}
+				if snapshot(r)+"\x00"+gen != before {
 					// Another cepm ran while we were asking: the extensions
 					// we asked about are not the ones registered now. Nothing
 					// has been touched yet, so stopping here really does undo

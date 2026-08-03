@@ -49,18 +49,23 @@ func snapshot(r *state.Repo) string {
 // Comparing generations therefore answers "did anyone save state while the
 // dialogs were open" — including a periodic update, which is also a state
 // this command's answers were not about.
-func stateGeneration() string {
+// A variable so a test can prove it is only consulted while the update
+// lock is held: the token is only meaningful as part of an atomic look at
+// the state, never on its own. Errors are returned, not blanked — a
+// generation that cannot be read must fail the comparison, not match
+// another unreadable one.
+var stateGeneration = func() (string, error) {
 	path, err := paths.StateFile()
 	if err != nil {
-		return ""
+		return "", err
 	}
 	fi, err := os.Stat(path)
 	if err != nil {
-		return ""
+		return "", fmt.Errorf("read the state generation: %w", err)
 	}
 	dev, _ := deviceOf(fi)
 	ino, _ := inodeOf(fi)
-	return fmt.Sprintf("%d:%d:%d:%d", dev, ino, fi.ModTime().UnixNano(), fi.Size())
+	return fmt.Sprintf("%d:%d:%d:%d", dev, ino, fi.ModTime().UnixNano(), fi.Size()), nil
 }
 
 // trashClone moves a clone into a freshly created trash directory and
@@ -115,13 +120,31 @@ func newUninstallCmd() *cobra.Command {
 			name := args[0]
 			out := cmd.OutOrStdout()
 
-			st, err := state.Load()
-			if err != nil {
+			// The snapshot and the state generation are one observation,
+			// made under the lock: taken separately, a save landing in
+			// between composes old attributes with a new generation, and
+			// the final re-check then compares two halves of different
+			// states. The lock is released before any question is asked.
+			var repo *state.Repo
+			var before string
+			if err := updater.WithLock(cmd.Context(), func() error {
+				st, err := state.Load()
+				if err != nil {
+					return err
+				}
+				r, ok := st.Repos[name]
+				if !ok {
+					return fmt.Errorf("repository %q is not registered (see cepm list)", name)
+				}
+				gen, gerr := stateGeneration()
+				if gerr != nil {
+					return gerr
+				}
+				repo = r
+				before = snapshot(r) + "\x00" + gen
+				return nil
+			}); err != nil {
 				return err
-			}
-			repo, ok := st.Repos[name]
-			if !ok {
-				return fmt.Errorf("repository %q is not registered (see cepm list)", name)
 			}
 
 			dir, err := updater.RepoDir(name)
@@ -145,14 +168,17 @@ func newUninstallCmd() *cobra.Command {
 			for _, s := range repo.Stale {
 				candidates = append(candidates, state.Extension{Name: s.Name, ID: s.ID})
 			}
-			before := snapshot(repo) + "\x00" + stateGeneration()
 			approved := askChromeRemoval(cmd, candidates)
 
 			changed := func(fresh *state.Repo, ok bool) error {
 				if !ok {
 					return fmt.Errorf("repository %q is no longer registered", name)
 				}
-				if snapshot(fresh)+"\x00"+stateGeneration() != before {
+				gen, gerr := stateGeneration()
+				if gerr != nil {
+					return gerr
+				}
+				if snapshot(fresh)+"\x00"+gen != before {
 					// An update ran while we were asking: the extensions we
 					// asked about are not the ones registered now.
 					return fmt.Errorf("%q changed while waiting for your answer; run cepm uninstall %s again",
