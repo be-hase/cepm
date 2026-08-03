@@ -26,9 +26,12 @@ checksum:
 release:
   draft: false
 
+# No "sort:". GoReleaser sorts by commit subject, not by time, so "asc"
+# produced an alphabetical list with "Initial commit" in the middle of it —
+# see the v0.0.1 release notes. Left unset, git's own order (chronological)
+# survives, which is what a reader of release notes expects.
 changelog:
   use: github
-  sort: asc
   filters:
     exclude: ["^docs:", "^test:", "^chore:"]
 
