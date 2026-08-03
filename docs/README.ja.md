@@ -49,7 +49,8 @@ Chrome ── cepm helper 拡張(cepm setup が生成、最初に一度だけ読
 ## セットアップ
 
 ```console
-$ go install github.com/be-hase/cepm/cmd/cepm@latest   # またはリリースバイナリを取得
+$ brew install --cask be-hase/tap/cepm                 # macOS
+$ # または: go install github.com/be-hase/cepm/cmd/cepm@latest、リリースバイナリの取得でも可
 $ cepm setup
 $ # 一度だけ: chrome://extensions → デベロッパーモード →
 $ #           「パッケージ化されていない拡張機能を読み込む」→ ~/.cepm/helper
