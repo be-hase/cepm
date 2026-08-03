@@ -2,10 +2,36 @@ package gitx
 
 import (
 	"context"
+	"crypto/sha1"
+	"encoding/hex"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+// collidingBlobs finds, deterministically, two different binary contents
+// whose git blob ids share their first four hex digits — the collision an
+// abbreviated index line cannot see past. ~2^16 prefixes means a birthday
+// hit after a few hundred candidates.
+func collidingBlobs(t *testing.T) (a, b []byte) {
+	t.Helper()
+	blobID := func(content []byte) string {
+		sum := sha1.Sum(append([]byte(fmt.Sprintf("blob %d\x00", len(content))), content...))
+		return hex.EncodeToString(sum[:2])
+	}
+	seen := map[string]int{}
+	for i := 0; i < 1<<20; i++ {
+		content := []byte(fmt.Sprintf("\x00payload%d", i))
+		prefix := blobID(content)
+		if j, ok := seen[prefix]; ok {
+			return []byte(fmt.Sprintf("\x00payload%d", j)), content
+		}
+		seen[prefix] = i
+	}
+	t.Fatal("no colliding pair found")
+	return nil, nil
+}
 
 // fingerprintRepo builds a committed repository and returns it with a
 // fingerprint function that fails the test on error: every case here is a
@@ -162,6 +188,91 @@ func TestFingerprintSeesWhatStatusCannot(t *testing.T) {
 		}
 		if fp() == one {
 			t.Error("an external diff driver must not decide what the fingerprint sees")
+		}
+	})
+
+	t.Run("submodule silenced by submodule.ignore=all", func(t *testing.T) {
+		sub := t.TempDir()
+		gitIn(t, sub, "init", "--initial-branch=main")
+		if err := os.WriteFile(filepath.Join(sub, "file.txt"), []byte("committed\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		gitIn(t, sub, "add", "-A")
+		gitIn(t, sub, "commit", "-m", "sub base")
+
+		dir, fp := fingerprintRepo(t)
+		gitIn(t, dir, "-c", "protocol.file.allow=always", "submodule", "add", sub, "vendor")
+		gitIn(t, dir, "commit", "-m", "add submodule")
+		// The configuration a repository (or the user) can carry that makes
+		// "git status" pretend the submodule does not exist at all.
+		gitIn(t, dir, "config", "submodule.vendor.ignore", "all")
+
+		inner := filepath.Join(dir, "vendor", "file.txt")
+		if err := os.WriteFile(inner, []byte("edit-one\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		one := fp()
+		if one == "" {
+			t.Fatal("a dirty submodule must not fingerprint as a clean tree")
+		}
+		if err := os.WriteFile(inner, []byte("edit-two\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if fp() == one {
+			t.Error("submodule.ignore=all must not hide a rewrite from the fingerprint")
+		}
+	})
+
+	t.Run("untracked nested repository rewritten", func(t *testing.T) {
+		dir, fp := fingerprintRepo(t)
+		nested := filepath.Join(dir, "nested")
+		gitIn(t, dir, "init", "--initial-branch=main", "nested")
+		inner := filepath.Join(nested, "local.txt")
+		if err := os.WriteFile(inner, []byte("edit-one\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		one := fp()
+		if err := os.WriteFile(inner, []byte("edit-two\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if fp() == one {
+			t.Error("a rewrite inside an untracked nested repository must change the fingerprint: " +
+				"git lists it as one 'nested/' entry and never descends")
+		}
+		// Committing inside it is a state change too — the work moves into
+		// .git, which is equally part of what the delete would take.
+		gitIn(t, nested, "add", "-A")
+		gitIn(t, nested, "commit", "-m", "work")
+		if fp() == one {
+			t.Error("a commit inside an untracked nested repository must change the fingerprint")
+		}
+	})
+
+	t.Run("abbreviated binary blob ids colliding", func(t *testing.T) {
+		dir, fp := fingerprintRepo(t)
+		// core.abbrev is repository (or user) configuration; with binary
+		// content the shortened blob id is all the diff shows, so two
+		// different contents whose ids share a prefix print the same diff.
+		gitIn(t, dir, "config", "core.abbrev", "4")
+		file := filepath.Join(dir, "data.bin")
+		if err := os.WriteFile(file, []byte("base\x00"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		gitIn(t, dir, "add", "data.bin")
+		gitIn(t, dir, "commit", "-m", "binary base")
+		// Two different uncommitted contents whose blob ids share their
+		// first four hex digits: with core.abbrev=4 the "index" line — the
+		// only place a binary diff identifies content — prints identically.
+		a, b := collidingBlobs(t)
+		if err := os.WriteFile(file, a, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		one := fp()
+		if err := os.WriteFile(file, b, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if fp() == one {
+			t.Error("colliding abbreviated blob ids must not make two contents fingerprint the same")
 		}
 	})
 

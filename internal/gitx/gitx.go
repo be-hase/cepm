@@ -10,6 +10,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io"
+	"io/fs"
 	"log/slog"
 	"net/url"
 	"os"
@@ -187,7 +189,7 @@ func (r Repo) ChangeFingerprint(ctx context.Context) (string, error) {
 	// Raw output, not run(): TrimSpace would eat the leading space of the
 	// first porcelain status column and of an untracked name that starts
 	// with a blank, making two different states print the same.
-	porcelain, err := runRaw(ctx, r.Dir, "status", "--porcelain", "-uall")
+	porcelain, err := runRaw(ctx, r.Dir, "status", "--porcelain", "-uall", "--ignore-submodules=none")
 	if err != nil {
 		return "", err
 	}
@@ -196,18 +198,18 @@ func (r Repo) ChangeFingerprint(ctx context.Context) (string, error) {
 	}
 	var diff string
 	if _, herr := run(ctx, r.Dir, "rev-parse", "--verify", "HEAD"); herr == nil {
-		diff, err = runRaw(ctx, r.Dir, "diff", "--no-ext-diff", "--no-textconv", "--submodule=diff", "HEAD", "--")
+		diff, err = runRaw(ctx, r.Dir, "diff", "--no-ext-diff", "--no-textconv", "--full-index", "--ignore-submodules=none", "--submodule=diff", "HEAD", "--")
 		if err != nil {
 			return "", err
 		}
 	} else {
 		// No commits yet (a clone broken mid-setup): the empty-tree-vs-
 		// index and index-vs-worktree diffs together cover the same ground.
-		staged, serr := runRaw(ctx, r.Dir, "diff", "--no-ext-diff", "--no-textconv", "--cached", "--")
+		staged, serr := runRaw(ctx, r.Dir, "diff", "--no-ext-diff", "--no-textconv", "--full-index", "--ignore-submodules=none", "--cached", "--")
 		if serr != nil {
 			return "", serr
 		}
-		unstaged, uerr := runRaw(ctx, r.Dir, "diff", "--no-ext-diff", "--no-textconv", "--")
+		unstaged, uerr := runRaw(ctx, r.Dir, "diff", "--no-ext-diff", "--no-textconv", "--full-index", "--ignore-submodules=none", "--")
 		if uerr != nil {
 			return "", uerr
 		}
@@ -253,6 +255,18 @@ func (r Repo) ChangeFingerprint(ctx context.Context) (string, error) {
 				return "", fmt.Errorf("fingerprint %s: %w", p, err)
 			}
 			record(string(b))
+		case fi.IsDir():
+			// A directory in the untracked listing is a nested git
+			// repository: ordinary untracked files are listed one by one,
+			// but git will not descend into a repo-within-the-repo, so
+			// everything under this entry — working files and the .git
+			// with its commits and stashes — is invisible to every git
+			// command run on the parent. Hash the bytes wholesale instead
+			// of interpreting them: completeness matters here, cleverness
+			// does not.
+			if err := hashDirectory(h, full); err != nil {
+				return "", fmt.Errorf("fingerprint %s: %w", p, err)
+			}
 		default:
 			// Sockets, fifos, devices: the type in the mode string above
 			// is all the identity they have.
@@ -280,6 +294,47 @@ func (r Repo) ChangeFingerprint(ctx context.Context) (string, error) {
 		record(subFP)
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// hashDirectory records a directory tree byte for byte — path, type, mode,
+// and symlink target or file content per entry, in WalkDir's deterministic
+// order, every field length-prefixed. Used for untracked nested
+// repositories, where no git interpretation of the parent reaches.
+func hashDirectory(h io.Writer, root string) error {
+	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		fi, err := os.Lstat(path)
+		if err != nil {
+			return err
+		}
+		field := func(f string) {
+			fmt.Fprintf(h, "%d:", len(f))
+			io.WriteString(h, f)
+		}
+		field(rel)
+		field(fi.Mode().String())
+		switch {
+		case fi.Mode()&os.ModeSymlink != 0:
+			target, err := os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			field(target)
+		case fi.Mode().IsRegular():
+			b, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			field(string(b))
+		}
+		return nil
+	})
 }
 
 // Fetch fetches the remote, including tags and pruning deleted refs.
