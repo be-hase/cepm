@@ -228,6 +228,52 @@ func TestUninstallStopsWhenCancelledBeforeTheDelete(t *testing.T) {
 	}
 }
 
+// Committing during a dialog returns the worktree to clean, so a
+// fingerprint of uncommitted changes alone compares "" == "" — while the
+// clone now holds work nobody was shown. The approved identity includes
+// HEAD precisely so that a commit is a change like any other.
+func TestUninstallRefusesACommitMadeDuringTheDialogs(t *testing.T) {
+	interactive(t)
+	startFakeHost(t, idA)
+	seedRepo(t, "tools", state.Extension{Dir: "ext", Name: "Ext", ID: idA, Key: keyA})
+	dir, err := updaterRepoDir("tools")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	committed := false
+	origIsTTY := assist.IsTTY
+	t.Cleanup(func() { assist.IsTTY = origIsTTY })
+	assist.IsTTY = func() bool {
+		if !committed {
+			committed = true
+			// Clean before, clean after — the work moves into a commit
+			// while the Chrome question is open.
+			if werr := os.WriteFile(filepath.Join(dir, "work.txt"), []byte("precious\n"), 0o644); werr != nil {
+				t.Error(werr)
+			}
+			gitCmd(t, dir, "add", "-A")
+			gitCmd(t, dir, "commit", "-qm", "work done mid-dialog")
+		}
+		return true
+	}
+
+	out, err := run(t, "n\n", "uninstall", "tools")
+	if err == nil {
+		t.Fatalf("a commit made during the dialogs must stop the delete:\n%s", out)
+	}
+	if _, serr := os.Stat(filepath.Join(dir, "work.txt")); serr != nil {
+		t.Errorf("the committed work must survive: %v", serr)
+	}
+	st, lerr := state.Load()
+	if lerr != nil {
+		t.Fatal(lerr)
+	}
+	if st.Repos["tools"] == nil {
+		t.Error("nothing may be unregistered when the delete was refused")
+	}
+}
+
 // A tree whose local-change state cannot be checked may be the corrupt
 // clone uninstall exists to clean up — or a healthy tree the fingerprint
 // has no answer for, still holding work. "Could not check" therefore never

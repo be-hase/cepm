@@ -77,9 +77,28 @@ func newUninstallCmd() *cobra.Command {
 			// for, still holding the user's work, so "could not check"
 			// must never quietly become "nothing to lose". It is its own
 			// question instead.
-			approvedFingerprint, unverifiable := "", false
+			// The identity is HEAD plus the uncommitted fingerprint, not
+			// the fingerprint alone. Committing during a dialog returns
+			// the worktree to clean — "" == "" — while the clone now holds
+			// work that was never shown to anyone; the moved HEAD is what
+			// records that. A missing HEAD (an unborn repo) reads as "",
+			// which still compares correctly: gaining a first commit
+			// changes it.
+			identityOf := func() (identity, uncommitted string, err error) {
+				repo := gitx.Repo{Dir: dir}
+				fp, err := repo.ChangeFingerprint(cmd.Context())
+				if err != nil {
+					return "", "", err
+				}
+				head, herr := repo.Head(cmd.Context())
+				if herr != nil {
+					head = ""
+				}
+				return head + "\x00" + fp, fp, nil
+			}
+			approvedIdentity, unverifiable := "", false
 			if !keepFiles {
-				switch fp, derr := (gitx.Repo{Dir: dir}).ChangeFingerprint(cmd.Context()); {
+				switch ident, fp, derr := identityOf(); {
 				case derr == nil && fp != "":
 					if !assist.IsTTY() {
 						return fmt.Errorf("%s has uncommitted local changes; commit or stash them first, or re-run with --keep-files to keep the clone", dir)
@@ -87,7 +106,11 @@ func newUninstallCmd() *cobra.Command {
 					if !confirm(cmd, fmt.Sprintf("%s has uncommitted local changes — delete them anyway?", dir)) {
 						return errors.New("aborted; nothing was changed (--keep-files uninstalls but keeps the clone)")
 					}
-					approvedFingerprint = fp
+					approvedIdentity = ident
+				case derr == nil:
+					// A clean tree still has an identity — its HEAD — and
+					// the delete is approved for exactly that state.
+					approvedIdentity = ident
 				case derr != nil:
 					if !assist.IsTTY() {
 						return fmt.Errorf("cannot check %s for local changes (%w); re-run with --keep-files to keep the clone, or interactively to decide", dir, derr)
@@ -190,11 +213,11 @@ func newUninstallCmd() *cobra.Command {
 					// such stays deletable through a repeated error. And a
 					// cancelled caller stops regardless: the Ctrl-C was
 					// pressed to stop this delete, not to authorise it.
-					fp, derr := (gitx.Repo{Dir: dir}).ChangeFingerprint(cmd.Context())
+					ident, _, derr := identityOf()
 					if cerr := cmd.Context().Err(); cerr != nil {
 						return cerr
 					}
-					sameAsApproved := (derr == nil && !unverifiable && fp == approvedFingerprint) ||
+					sameAsApproved := (derr == nil && !unverifiable && ident == approvedIdentity) ||
 						(derr != nil && unverifiable)
 					if !sameAsApproved {
 						return fmt.Errorf("%s changed while cepm was waiting for your answers; "+

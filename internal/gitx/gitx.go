@@ -231,6 +231,9 @@ func (r Repo) ChangeFingerprint(ctx context.Context) (string, error) {
 		if p == "" {
 			continue
 		}
+		if cerr := ctx.Err(); cerr != nil {
+			return "", cerr
+		}
 		full := filepath.Join(r.Dir, p)
 		fi, err := os.Lstat(full)
 		if err != nil {
@@ -250,11 +253,9 @@ func (r Repo) ChangeFingerprint(ctx context.Context) (string, error) {
 			}
 			record(target)
 		case fi.Mode().IsRegular():
-			b, err := os.ReadFile(full)
-			if err != nil {
+			if err := hashFile(h, full, fi.Size()); err != nil {
 				return "", fmt.Errorf("fingerprint %s: %w", p, err)
 			}
-			record(string(b))
 		case fi.IsDir():
 			// A directory in the untracked listing is a nested git
 			// repository: ordinary untracked files are listed one by one,
@@ -264,7 +265,7 @@ func (r Repo) ChangeFingerprint(ctx context.Context) (string, error) {
 			// command run on the parent. Hash the bytes wholesale instead
 			// of interpreting them: completeness matters here, cleverness
 			// does not.
-			if err := hashDirectory(h, full); err != nil {
+			if err := hashDirectory(ctx, h, full); err != nil {
 				return "", fmt.Errorf("fingerprint %s: %w", p, err)
 			}
 		default:
@@ -296,14 +297,40 @@ func (r Repo) ChangeFingerprint(ctx context.Context) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
+// hashFile streams one file into the hash with its size as the length
+// prefix, so a multi-gigabyte untracked artifact costs a read buffer, not
+// its own size in memory — an OOM kill is the one failure fail-closed can
+// never catch, because it never returns as an error. A short or long read
+// means the file changed mid-read, which is exactly a state the caller must
+// not call identified.
+func hashFile(h io.Writer, path string, size int64) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	fmt.Fprintf(h, "%d:", size)
+	n, err := io.Copy(h, f)
+	if err != nil {
+		return err
+	}
+	if n != size {
+		return fmt.Errorf("%s changed while being read", path)
+	}
+	return nil
+}
+
 // hashDirectory records a directory tree byte for byte — path, type, mode,
 // and symlink target or file content per entry, in WalkDir's deterministic
 // order, every field length-prefixed. Used for untracked nested
 // repositories, where no git interpretation of the parent reaches.
-func hashDirectory(h io.Writer, root string) error {
+func hashDirectory(ctx context.Context, h io.Writer, root string) error {
 	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
+		}
+		if cerr := ctx.Err(); cerr != nil {
+			return cerr
 		}
 		rel, err := filepath.Rel(root, path)
 		if err != nil {
@@ -327,11 +354,9 @@ func hashDirectory(h io.Writer, root string) error {
 			}
 			field(target)
 		case fi.Mode().IsRegular():
-			b, err := os.ReadFile(path)
-			if err != nil {
+			if err := hashFile(h, path, fi.Size()); err != nil {
 				return err
 			}
-			field(string(b))
 		}
 		return nil
 	})
