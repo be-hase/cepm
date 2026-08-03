@@ -214,6 +214,7 @@ func runInstall(cmd *cobra.Command, url string, flags installFlags) error {
 		fmt.Fprintf(out, ", %d available (enable later with: cepm enable %s)", available, name)
 	}
 	fmt.Fprintln(out)
+	fmt.Fprintf(out, "Cloned to: %s\n", term.Quote(dir))
 
 	runLoadCeremony(ctx, cmd, targets)
 	fmt.Fprintf(out, "\nAfter loading, updates are applied automatically.\n")
