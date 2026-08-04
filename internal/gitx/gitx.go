@@ -183,6 +183,76 @@ func (r Repo) CheckoutDetached(ctx context.Context, ref string) error {
 	return err
 }
 
+// SwitchBranch checks out branch, creating a local branch from origin/<branch>
+// when none exists yet — a clone that has only ever tracked tags never made
+// one. --guess is passed explicitly rather than relied on: checkout.guess=false
+// in the user's config would otherwise turn the creation off. The "--" keeps a
+// branch name from being read as an option.
+func (r Repo) SwitchBranch(ctx context.Context, branch string) error {
+	_, err := run(ctx, r.Dir, "switch", "--guess", "--", branch)
+	return err
+}
+
+// CheckBranchName rejects a name git would not accept as a branch ("HEAD", a
+// leading dash, ".."). The gap it closes: some of these still *resolve* —
+// "origin/HEAD^{commit}" is a fine revision — so a caller that only resolves
+// would commit to a name that "git switch" then refuses.
+func CheckBranchName(ctx context.Context, name string) error {
+	_, err := run(ctx, "", "check-ref-format", "--branch", name)
+	return err
+}
+
+// FastForwardable reports whether the local branch can fast-forward to
+// origin/<branch>: true when it does not exist yet, or carries no commits of
+// its own. Existence goes through for-each-ref, not "show-ref --verify":
+// show-ref answers "absent" with the same non-zero exit as a canceled context
+// or a corrupt repository, and callers gate a state save on this answer.
+// for-each-ref exits zero either way — empty output means absent — so a real
+// failure stays an error.
+func (r Repo) FastForwardable(ctx context.Context, branch string) (bool, error) {
+	ref := "refs/heads/" + branch
+	// The argument is a prefix pattern (it would also match "<branch>/sub"),
+	// hence the exact comparison against each line.
+	out, err := run(ctx, r.Dir, "for-each-ref", "--format=%(refname)", ref)
+	if err != nil {
+		return false, err
+	}
+	exists := false
+	for _, line := range strings.Split(out, "\n") {
+		if line == ref {
+			exists = true
+		}
+	}
+	if !exists {
+		return true, nil
+	}
+	count, err := run(ctx, r.Dir, "rev-list", "--count",
+		"refs/remotes/origin/"+branch+".."+ref)
+	if err != nil {
+		return false, err
+	}
+	return count == "0", nil
+}
+
+// DefaultBranch returns the remote's current default branch name. origin/HEAD
+// is written at clone time and an existing one is never moved by fetch, so a
+// remote whose default changed would be misread forever; asking the remote
+// first keeps the answer current. A set-head failure is an error, not a cue
+// to fall back to the recorded ref: callers only ask after a successful
+// fetch, so the remote is reachable, and what failing looks like locally (a
+// leftover origin/HEAD.lock, say) would otherwise become silently following
+// the old default. Callers turn the error into "pass --branch".
+func (r Repo) DefaultBranch(ctx context.Context) (string, error) {
+	if _, err := run(ctx, r.Dir, "remote", "set-head", "origin", "--auto"); err != nil {
+		return "", err
+	}
+	out, err := run(ctx, r.Dir, "symbolic-ref", "--short", "refs/remotes/origin/HEAD")
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimPrefix(out, "origin/"), nil
+}
+
 // ChangedFiles lists paths (repo-relative) that differ between two commits.
 // The trailing "--" terminates the revision list: the callers validate that
 // from/to are commit OIDs, and this makes git agree that nothing here is an
