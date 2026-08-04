@@ -105,6 +105,7 @@ flowchart LR
 ```console
 $ cepm install <git-url>          # clone して登録(このあと一度だけ読み込む)
 $ cepm update                     # すべて pull し、変更された拡張を再読み込み
+$ cepm track <name> tag           # タグ追従に切り替え(branch で元に戻す)
 $ cepm list                       # 登録内容と、Chrome に読み込まれているか
 $ cepm enable <repo>[/<dir>]      # リポジトリ内の拡張を使い始める
 $ cepm disable <repo>[/<dir>]     # 使うのをやめる(登録は「利用可能」として残る)
@@ -149,6 +150,15 @@ cepm が見るのは GitHub Releases API ではなくタグです(トークン�
 作らずに push したタグも追われる(配布するものにだけタグを打つ)、
 「プレリリース」チェックボックスは見えない(`v2.0.0` ではなく
 `v2.0.0-rc1` と命名する)。
+
+インストール済みのリポジトリは、再インストールなしでいつでもモードを
+切り替えられます。clone・拡張 ID・有効/無効の選択はすべて維持されます:
+
+```console
+$ cepm track <name> tag                       # ブランチ → 最新リリースタグ
+$ cepm track <name> tag --tag-pattern "v1.*"  # あとからパターンだけ変更も可
+$ cepm track <name> branch                    # ブランチ追従に戻す
+```
 
 ### リポジトリ側の設定(`cepm.toml`、任意)
 
