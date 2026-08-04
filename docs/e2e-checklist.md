@@ -88,6 +88,10 @@ Note: `cepm setup` still writes the native messaging manifest to the real
       on the stable version; re-installing with `--prerelease` follows it.
 - [ ] Create a *draft* release: nothing happens (no tag is pushed until it is
       published), and publishing it makes cepm pick the version up.
+- [ ] On a branch-tracked repo with a pushed tag, `cepm track <name> tag`:
+      the clone moves to the tag, changed extensions reload, and `cepm list`
+      shows tag tracking. `cepm track <name> branch` reverses it — no
+      re-load ceremony in either direction (the paths never changed).
 
 ## 8. Upgrade path
 

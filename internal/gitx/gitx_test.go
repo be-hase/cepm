@@ -438,3 +438,38 @@ func TestIsDirtySeesThroughSilencingConfiguration(t *testing.T) {
 		t.Error("untracked work must count as dirty even with status.showUntrackedFiles=no")
 	}
 }
+
+// FastForwardable's answer gates a state save in the updater, so a failed
+// execution must stay an error: reading a canceled context as "no local
+// branch, go ahead" would let a Ctrl-C land the save it was meant to stop.
+func TestFastForwardableDoesNotReadFailureAsAbsence(t *testing.T) {
+	dir := t.TempDir()
+	gitIn(t, dir, "init", "--initial-branch=main")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := (Repo{Dir: dir}).FastForwardable(ctx, "main"); err == nil {
+		t.Error("a canceled context must surface as an error, not as \"branch absent\"")
+	}
+}
+
+// The existence probe is a prefix pattern: "refs/heads/main" also matches a
+// branch main/sub, which must not count as main existing.
+func TestFastForwardableMatchesTheBranchExactly(t *testing.T) {
+	dir := t.TempDir()
+	gitIn(t, dir, "init", "--initial-branch=other")
+	if err := os.WriteFile(filepath.Join(dir, "f.txt"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitIn(t, dir, "add", "-A")
+	gitIn(t, dir, "commit", "-m", "base")
+	gitIn(t, dir, "branch", "main/sub")
+
+	ff, err := (Repo{Dir: dir}).FastForwardable(context.Background(), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ff {
+		t.Error("main does not exist (only main/sub does); it must read as fast-forwardable")
+	}
+}

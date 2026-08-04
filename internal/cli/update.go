@@ -34,34 +34,41 @@ func newUpdateCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			out := cmd.OutOrStdout()
-			failed := printUpdateResults(out, results)
-
-			var items []reloadItem
-			for _, r := range results {
-				for _, c := range r.Changed {
-					items = append(items, reloadItem{ID: c.ID, Name: c.Name, ManifestChanged: c.ManifestChanged})
-				}
-			}
-			var outcome reloadOutcome
-			if len(items) > 0 && !noReload {
-				outcome = reloadExtensions(cmd.Context(), out, items)
-			}
-			if failed {
-				return errors.New("some repositories failed to update (see above)")
-			}
-			// An unreachable host stays a success — the pull happened and
-			// applies on the next Chrome launch — but real errors from a
-			// connected host must not exit 0.
-			if outcome.Failed > 0 {
-				return fmt.Errorf("%d reload(s) failed (see above)", outcome.Failed)
-			}
-			return nil
+			return finishUpdate(cmd, results, noReload)
 		},
 	}
 	cmd.Flags().BoolVar(&noReload, "no-reload", false, "pull only; do not reload extensions in Chrome")
 	cmd.Flags().BoolVar(&force, "force", false, "stash local changes before pulling dirty repositories")
 	return cmd
+}
+
+// finishUpdate renders update-shaped results, reloads the changed extensions,
+// and applies update's exit policy — shared by update and track, so the two
+// cannot drift in what a pull's outcome looks like.
+func finishUpdate(cmd *cobra.Command, results []updater.RepoResult, noReload bool) error {
+	out := cmd.OutOrStdout()
+	failed := printUpdateResults(out, results)
+
+	var items []reloadItem
+	for _, r := range results {
+		for _, c := range r.Changed {
+			items = append(items, reloadItem{ID: c.ID, Name: c.Name, ManifestChanged: c.ManifestChanged})
+		}
+	}
+	var outcome reloadOutcome
+	if len(items) > 0 && !noReload {
+		outcome = reloadExtensions(cmd.Context(), out, items)
+	}
+	if failed {
+		return errors.New("some repositories failed to update (see above)")
+	}
+	// An unreachable host stays a success — the pull happened and
+	// applies on the next Chrome launch — but real errors from a
+	// connected host must not exit 0.
+	if outcome.Failed > 0 {
+		return fmt.Errorf("%d reload(s) failed (see above)", outcome.Failed)
+	}
+	return nil
 }
 
 // printUpdateResults renders per-repo outcomes and reports whether any failed.

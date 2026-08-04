@@ -101,6 +101,7 @@ Chrome entries orphaned by upstream renames or deletes.
 ```console
 $ cepm install <git-url>          # clone + register (then load unpacked once)
 $ cepm update                     # pull everything, reload what changed
+$ cepm track <name> tag           # switch to tag tracking (or back: ... branch)
 $ cepm list                       # what's registered, and is it loaded?
 $ cepm enable <repo>[/<dir>]      # start using an extension of a repo
 $ cepm disable <repo>[/<dir>]     # stop using one (kept as "available")
@@ -145,6 +146,15 @@ cepm follows tags, not the GitHub Releases API — no tokens, and no access to
 `api.github.com` needed. Two consequences: a tag pushed without a release is
 followed like any other (tag only what you ship), and the *prerelease*
 checkbox is invisible to cepm — name prereleases `v2.0.0-rc1`, not `v2.0.0`.
+
+An installed repo can switch modes anytime, without reinstalling — the clone,
+extension IDs, and enable/disable choices are all kept:
+
+```console
+$ cepm track <name> tag                       # branch → latest release tag
+$ cepm track <name> tag --tag-pattern "v1.*"  # ...or change the pattern later
+$ cepm track <name> branch                    # back to the branch
+```
 
 ### Repository-side configuration (`cepm.toml`, optional)
 

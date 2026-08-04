@@ -47,6 +47,7 @@ the affected unpacked extensions in Chrome through a small helper extension.`,
 		newEnableCmd(),
 		newDisableCmd(),
 		newUpdateCmd(),
+		newTrackCmd(),
 		newReloadCmd(),
 		newListCmd(),
 		newCleanupCmd(),
@@ -62,8 +63,8 @@ the affected unpacked extensions in Chrome through a small helper extension.`,
 // change something. An inconsistent state must stop them *before* they act,
 // not at the save that follows: a removal cannot be undone.
 var touchesChrome = map[string]bool{
-	"install": true, "uninstall": true, "update": true, "reload": true,
-	"enable": true, "disable": true, "cleanup": true,
+	"install": true, "uninstall": true, "update": true, "track": true,
+	"reload": true, "enable": true, "disable": true, "cleanup": true,
 }
 
 // preflight refuses to run a state-changing command on a state cepm cannot
