@@ -1,0 +1,10 @@
+{
+  $schema: 'https://docs.renovatebot.com/renovate-schema.json',
+  // gomod and github-actions managers are enabled by config:recommended.
+  extends: [
+    'config:recommended',
+    'schedule:weekly',
+  ],
+  timezone: 'Asia/Tokyo',
+  postUpdateOptions: ['gomodTidy'],
+}
