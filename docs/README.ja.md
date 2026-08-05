@@ -20,27 +20,6 @@ $ cepm install git@github.example.com:team/internal-extensions.git
 1 時間ごと(および起動直後にも一度)に pull し、ファイルが変わった拡張だけを
 再読み込みします。任意のタイミングで実行したいときは `cepm update` です。
 
-## 仕組み
-
-```mermaid
-flowchart TD
-    chrome["Chrome — cepm helper 拡張<br/>(cepm setup が生成、最初に一度だけ読み込む)"]
-    host["cepm native host<br/>定期的な git pull、変更された拡張を再読み込み<br/>(management.setEnabled の off→on = ディスクから再読込)"]
-    cli["cepm CLI(install / update / list / doctor)"]
-    chrome <-->|"Native Messaging<br/>(stdio。Chrome がプロセスを起動・管理)"| host
-    cli <-->|"Unix socket"| host
-```
-
-- 常駐デーモンの設定は不要です。native host は Chrome が起動・終了させます。
-- Chrome が起動していなくても `cepm update` は pull できます。Chrome は
-  キャッシュしたコード(特に service worker)を使い続けるため、次の Chrome
-  起動時に catch-up reload で反映されます。
-- 1 つのリポジトリに拡張がいくつ入っていても構いません(`manifest.json` の
-  あるディレクトリを自動検出)。
-- cepm 自身の更新も自動で反映されます。Chrome は安定したパスの launcher
-  スクリプト(`~/.cepm/bin/cepm-host`)経由で host を起動し、helper 拡張の
-  ファイルも接続時に更新されます(次回の Chrome 起動から有効)。
-
 ## はじめかた
 
 **1. cepm をインストールします。**
@@ -77,62 +56,54 @@ $ cepm install git@github.example.com:team/internal-extensions.git
 
 対応 OS は macOS と Linux です(Windows は contributions welcome)。
 
-### 拡張のライフサイクル
+## ふだんの使いかた
 
-```mermaid
-flowchart LR
-    available -->|"cepm install で選択<br/>または cepm enable"| enabled
-    enabled -->|"cepm disable"| available
-    enabled -->|"「読み込む」を一度だけ<br/>(cepm が誘導)"| loaded
-```
+### 最新に保つ
 
-- **available(利用可能)** — 登録されているだけの状態。install で選ばな
-  かった拡張や、あとからリポジトリに追加された拡張は、オプトインするまで
-  ここで待ちます。
-- **enabled(有効)** — 使うと決めた状態。cepm が更新を適用し、Chrome に
-  あることを期待します。残るは一度だけの手動読み込みです。
-- **loaded(読み込み済み)** — 以降は全自動です。唯一の例外は
-  `manifest.json` の変更で、Chrome の再起動後に反映されます(cepm が知らせ
-  ます)。
-
-戻り道: `cepm disable` は *available* に戻し(Chrome からの削除も提案)、
-`cepm uninstall <repo>` はリポジトリごと登録解除して clone をゴミ箱ディレク
-トリへ移動、リポジトリ側の改名・削除で残った Chrome のエントリは
-`cepm cleanup` が削除します。
-
-## コマンド
+何もしなくて構いません。Chrome の起動中、cepm は 1 時間ごと(および起動
+直後にも一度)に pull し、ファイルが変わった拡張だけを再読み込みします。
+いますぐ更新したいときは:
 
 ```console
-$ cepm install <git-url>          # clone して登録(このあと一度だけ読み込む)
 $ cepm update                     # すべて pull し、変更された拡張を再読み込み
-$ cepm track <name> tag           # タグ追従に切り替え(branch で元に戻す)
-$ cepm list                       # 読み込み済みの拡張(--all で登録内容すべて)
-$ cepm enable <repo>[/<dir>]      # リポジトリ内の拡張を使い始める
-$ cepm disable <repo>[/<dir>]     # 使うのをやめる(登録は「利用可能」として残る)
-$ cepm reload                     # pull せず再読み込みだけ(ローカルでの開発用)
-$ cepm cleanup                    # 改名・削除で壊れた Chrome 側のエントリを削除
-$ cepm uninstall <name>           # 登録解除。clone はゴミ箱ディレクトリへ移動
-$ cepm doctor                     # セットアップと接続状況の診断
-$ cepm reset                      # state が壊れたとき、state と clone を退避してやり直す
-$ cepm id <path>                  # ディレクトリに対応する拡張 ID を表示
+$ cepm update --no-reload         # pull のみ
 ```
 
-便利なフラグ: `cepm update --no-reload`(pull のみ)、`cepm update --force`
-(ローカル変更を stash して pull)、`cepm uninstall --keep-files`、
-`cepm list --all`(全ステータスを表示。デフォルトは読み込み済みのみで、
-隠した行数を末尾に表示)、`cepm list --full`(拡張ごとの行で EXTENSION・
-ID・DIR・URL 列も表示。デフォルトはリポジトリごとに1行)、
-`cepm list --status not-loaded,stale`(ステータスで絞り込み)、
-`cepm list --share`(有効化中の拡張の install コマンドを、そのまま同僚に
-渡せる形で出力)、`cepm list --json` / `cepm doctor --json`、任意のコマンドの `-v`。
+知っておくべきことは 2 つ:
 
-### 複数の拡張を含むリポジトリ
+- `manifest.json` の変更(バージョン上げ、権限の追加)だけは Chrome の
+  再起動後に反映されます(該当したときは cepm が伝えます)。
+- Chrome の終了中でも `cepm update` は pull できます。変更は次の Chrome
+  起動直後に反映されます。
 
-`cepm install` はどれを使うか尋ねます(Enter で全部。スクリプトからは
-`--only dir,dir` や `--all`)。選ばなかったものは「利用可能」のままで、
-オプトインなしに読み込まれたり催促されたりはしません。リポジトリ側で拡張の
-ディレクトリが改名・削除されたときは cepm が報告し、有効の選択は新しい
-パスへ引き継がれ、壊れた Chrome 側のエントリは `cepm cleanup` が削除します。
+### いま何が入っているかを見る
+
+```console
+$ cepm list
+```
+
+デフォルトは読み込み済みリポジトリごとに 1 行です(隠した行数を末尾に表示)。
+`--full` は拡張ごとの 1 行で EXTENSION・ID・DIR・URL 列も表示、`--all` は
+選ばなかった拡張も含む登録内容すべて、`--status not-loaded,stale` は
+ステータスでの絞り込み、`--json` はスクリプト用です。
+
+### リポジトリ内の拡張を取捨選択する
+
+1 つのリポジトリに拡張がいくつ入っていても構いません(`manifest.json` の
+あるディレクトリを自動検出)。`cepm install` はどれを使うか尋ねます
+(Enter で全部。スクリプトからは `--only dir,dir` や `--all`)。選ばなかった
+ものは「利用可能(available)」として登録されるだけで、オプトインなしに
+読み込まれたり催促されたりはしません。あとからリポジトリに追加された拡張も
+ここで待ちます。選択はいつでも変えられます:
+
+```console
+$ cepm enable <repo>[/<dir>]      # 使い始める(一度だけの読み込みは cepm が誘導)
+$ cepm disable <repo>[/<dir>]     # 使うのをやめる(「利用可能」として残る)
+```
+
+リポジトリ側で拡張のディレクトリが改名・削除されたときは cepm が報告し、
+有効の選択は新しいパスへ引き継がれ、壊れた Chrome 側のエントリは
+`cepm cleanup` が削除します。
 
 ### ブランチではなくバージョンタグを追う
 
@@ -164,9 +135,87 @@ $ cepm track <name> tag --tag-pattern "v1.*"  # あとからパターンだけ�
 $ cepm track <name> branch                    # ブランチ追従に戻す
 ```
 
-### リポジトリ側の設定(`cepm.toml`、任意)
+### 同僚に共有する
 
-拡張の作者はリポジトリのルートに `cepm.toml` を置けます。利用者が単に
+```console
+$ cepm list --share
+```
+
+有効化中の拡張の `cepm install` コマンドを、そのままチャットに貼れる形で
+出力します。
+
+### 拡張をローカルで開発する
+
+`~/.cepm/repos/<name>` の clone を直接編集して:
+
+```console
+$ cepm reload                     # pull せず再読み込みだけ
+```
+
+ローカルに変更のあるリポジトリは警告つきで更新から skip され、作業中の
+内容が失われることはありません。`cepm update --force` は pull の前後で
+stash と復元を行います。
+
+### 削除する
+
+```console
+$ cepm disable <repo>[/<dir>]     # 拡張を使うのをやめる(「利用可能」として残る)
+$ cepm uninstall <name>           # リポジトリごと登録解除
+$ cepm cleanup                    # 改名・削除で壊れた Chrome 側のエントリを削除
+```
+
+cepm はユーザーのデータを削除しません。`uninstall` は clone をゴミ箱
+ディレクトリへ**移動**し(`--keep-files` でその場に残す)、Chrome からの
+削除は必ず Chrome 自身の確認ダイアログを通します。
+
+### 何かおかしいとき
+
+```console
+$ cepm doctor
+```
+
+一連の流れをすべて確認し、失敗には必ず対処コマンドが添えられます。
+よくあるケースは[困ったときは](#困ったときは)を参照してください。
+
+## コマンド一覧
+
+```console
+$ cepm install <git-url>          # clone して登録(このあと一度だけ読み込む)
+$ cepm update                     # すべて pull し、変更された拡張を再読み込み
+$ cepm track <name> tag           # タグ追従に切り替え(branch で元に戻す)
+$ cepm list                       # 読み込み済みの拡張(--all で登録内容すべて)
+$ cepm enable <repo>[/<dir>]      # リポジトリ内の拡張を使い始める
+$ cepm disable <repo>[/<dir>]     # 使うのをやめる(登録は「利用可能」として残る)
+$ cepm reload                     # pull せず再読み込みだけ(ローカルでの開発用)
+$ cepm cleanup                    # 改名・削除で壊れた Chrome 側のエントリを削除
+$ cepm uninstall <name>           # 登録解除。clone はゴミ箱ディレクトリへ移動
+$ cepm doctor                     # セットアップと接続状況の診断
+$ cepm reset                      # state が壊れたとき、state と clone を退避してやり直す
+$ cepm id <path>                  # ディレクトリに対応する拡張 ID を表示
+```
+
+`cepm list --json` と `cepm doctor --json` は機械可読の出力、`-v` は
+任意のコマンドで使えます。
+
+## 利用者側の設定(`~/.cepm/config.toml`、任意)
+
+```toml
+[update]
+interval = "1h"    # Chrome 起動中の自動更新の間隔(最小 "1m")
+auto     = true    # false にすると "cepm update" 実行時のみ更新
+
+[git]
+stash_dirty = false  # ローカル変更を stash して pull(自動更新にも適用)
+```
+
+cepm が stash エントリを削除することはなく、残したエントリは報告される
+ので都合のよいときに削除してください(`git -C <clone> stash list`)。
+`git.stash_dirty = true` の場合、変更を残したままの clone には自動更新ごとに
+1 件ずつ溜まります(`~/.cepm/logs/host.log` に記録されます)。
+
+## 拡張の作者向け(`cepm.toml`、任意)
+
+リポジトリのルートに `cepm.toml` を置くと、利用者が単に
 `cepm install <url>` するだけで適切な設定になります。
 
 ```toml
@@ -179,28 +228,52 @@ tag_pattern = "v*"
 # prerelease = true   # 利用者にリリース候補も配る場合
 ```
 
-作者向けの注意: 拡張ディレクトリの改名は破壊的変更です。Chrome は ID を
-パスから導出するため、利用者全員が一度読み込み直すことになります(cepm が
-案内します)。ディレクトリ名は安定させるか、`manifest.json` の `key` で
-ID を固定してください(移動しても ID が変わりません)。
+拡張ディレクトリの改名は破壊的変更です。Chrome は ID をパスから導出する
+ため、利用者全員が一度読み込み直すことになります(cepm が案内します)。
+ディレクトリ名は安定させるか、`manifest.json` の `key` で ID を固定して
+ください(移動しても ID が変わりません)。
 
-### 利用者側の設定(`~/.cepm/config.toml`、任意)
+## 仕組み
 
-```toml
-[update]
-interval = "1h"    # Chrome 起動中の自動更新の間隔(最小 "1m")
-auto     = true    # false にすると "cepm update" 実行時のみ更新
-
-[git]
-stash_dirty = false  # ローカル変更を stash して pull(自動更新にも適用)
+```mermaid
+flowchart TD
+    chrome["Chrome — cepm helper 拡張<br/>(cepm setup が生成、最初に一度だけ読み込む)"]
+    host["cepm native host<br/>定期的な git pull、変更された拡張を再読み込み<br/>(management.setEnabled の off→on = ディスクから再読込)"]
+    cli["cepm CLI(install / update / list / doctor)"]
+    chrome <-->|"Native Messaging<br/>(stdio。Chrome がプロセスを起動・管理)"| host
+    cli <-->|"Unix socket"| host
 ```
 
-ローカルに変更のあるリポジトリは警告つきで skip され、作業中の内容が失われる
-ことはありません。`cepm update --force` は pull の前後で stash と復元を行い
-ます。cepm が stash エントリを削除することはなく、残したエントリは報告される
-ので都合のよいときに削除してください(`git -C <clone> stash list`)。
-`git.stash_dirty = true` の場合、変更を残したままの clone には自動更新ごとに
-1 件ずつ溜まります(`~/.cepm/logs/host.log` に記録されます)。
+- 常駐デーモンの設定は不要です。native host は Chrome が起動・終了させます。
+- Chrome が起動していなくても `cepm update` は pull できます。Chrome は
+  キャッシュしたコード(特に service worker)を使い続けるため、次の Chrome
+  起動時に catch-up reload で反映されます。
+- cepm 自身の更新も自動で反映されます。Chrome は安定したパスの launcher
+  スクリプト(`~/.cepm/bin/cepm-host`)経由で host を起動し、helper 拡張の
+  ファイルも接続時に更新されます(次回の Chrome 起動から有効)。
+
+### 拡張のライフサイクル
+
+```mermaid
+flowchart LR
+    available -->|"cepm install で選択<br/>または cepm enable"| enabled
+    enabled -->|"cepm disable"| available
+    enabled -->|"「読み込む」を一度だけ<br/>(cepm が誘導)"| loaded
+```
+
+- **available(利用可能)** — 登録されているだけの状態。install で選ばな
+  かった拡張や、あとからリポジトリに追加された拡張は、オプトインするまで
+  ここで待ちます。
+- **enabled(有効)** — 使うと決めた状態。cepm が更新を適用し、Chrome に
+  あることを期待します。残るは一度だけの手動読み込みです。
+- **loaded(読み込み済み)** — 以降は全自動です。唯一の例外は
+  `manifest.json` の変更で、Chrome の再起動後に反映されます(cepm が知らせ
+  ます)。
+
+戻り道: `cepm disable` は *available* に戻し(Chrome からの削除も提案)、
+`cepm uninstall <repo>` はリポジトリごと登録解除して clone をゴミ箱ディレク
+トリへ移動、リポジトリ側の改名・削除で残った Chrome のエントリは
+`cepm cleanup` が削除します。
 
 ## 困ったときは
 
