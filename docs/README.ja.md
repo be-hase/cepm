@@ -54,7 +54,7 @@ $ cepm install git@github.example.com:team/internal-extensions.git
 
 セットアップは以上です。以降の更新は自動で行われます。
 
-対応 OS は macOS と Linux です(Windows は contributions welcome)。
+対応 OS は macOS と Linux です。
 
 ## 普段の使い方
 

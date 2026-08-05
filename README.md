@@ -51,7 +51,7 @@ one: path on your clipboard, chrome://extensions opened, load confirmed.
 
 That's it — from here on, updates are automatic.
 
-macOS and Linux are supported (Windows contributions welcome).
+macOS and Linux are supported.
 
 ## Everyday use
 
