@@ -40,7 +40,7 @@ $ cepm doctor
 
 `setup` は helper 拡張を `~/.cepm/helper` に生成し、Native Messaging host を
 Chrome に登録します。helper の読み込みだけは Chrome の仕様上、手動です。
-`doctor` はすべて緑になるはずです(Chrome 終了中の「Chrome is not
+`doctor` の項目はすべて ✔ になるはずです(Chrome 終了中の「Chrome is not
 reachable」だけは正常です)。
 
 **3. 拡張のリポジトリをインストールします:**

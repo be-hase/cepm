@@ -37,8 +37,8 @@ $ cepm doctor
 
 `setup` generates the helper into `~/.cepm/helper` and registers the native
 messaging host; loading the helper is the one step Chrome insists a human
-performs. `doctor` should be green — except "Chrome is not reachable",
-which is normal while Chrome is closed.
+performs. Every `doctor` check should show ✔ — except "Chrome is not
+reachable", which is normal while Chrome is closed.
 
 **3. Install an extension repository:**
 
@@ -57,16 +57,16 @@ macOS and Linux are supported (Windows contributions welcome).
 
 ### Staying up to date
 
-Nothing to do: while Chrome runs, cepm pulls every hour (and once shortly
-after Chrome starts) and reloads the extensions whose files changed. To
-update right now:
+While Chrome runs, cepm pulls every hour (and once shortly after Chrome
+starts) and reloads the extensions whose files changed, so day to day
+there is nothing to do. To update right now:
 
 ```console
 $ cepm update                     # pull everything, reload what changed
 $ cepm update --no-reload         # pull only
 ```
 
-Two things to know:
+Two caveats:
 
 - A `manifest.json` change (version bump, new permission) only applies
   after a Chrome restart — cepm says so when it happens.
