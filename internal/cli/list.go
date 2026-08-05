@@ -30,6 +30,12 @@ func newListCmd() *cobra.Command {
 		GroupID: "ext",
 		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// pflag turns --status "" into zero values, which must not
+			// silently mean "the default view": an empty $VAR in a script
+			// is a mistake, not a selection.
+			if cmd.Flags().Changed("status") && len(statuses) == 0 {
+				return fmt.Errorf("--status is empty (valid: %s)", strings.Join(listStatuses, ", "))
+			}
 			filter, err := newStatusFilter(statuses, all)
 			if err != nil {
 				return err
@@ -387,6 +393,11 @@ func printListTable(cmd *cobra.Command, st *state.State, chromeStatus map[string
 		fmt.Fprintln(out, "No loaded extensions.")
 	} else if filter.keys != nil {
 		fmt.Fprintf(out, "No extensions with status %s.\n", strings.Join(filter.names(), ", "))
+	} else {
+		// --all with repositories but no extension left in any of them
+		// (removed upstream, then cleaned up): silence would read like an
+		// unregistered state.
+		fmt.Fprintln(out, "No extensions registered.")
 	}
 	// The default view may narrow the table, but never silently: a NOT
 	// LOADED row exists to be seen. An explicit --status asked for exactly
@@ -395,7 +406,11 @@ func printListTable(cmd *cobra.Command, st *state.State, chromeStatus map[string
 		if len(rows) > 0 {
 			fmt.Fprintln(out)
 		}
-		fmt.Fprintf(out, "Not shown: %s. See: cepm list --all\n", hiddenSummary(hidden))
+		hint := "cepm list --all"
+		if full {
+			hint = "cepm list --all --full" // keep the shape the user chose
+		}
+		fmt.Fprintf(out, "Not shown: %s. See: %s\n", hiddenSummary(hidden), hint)
 	}
 	// Errors go below the table: they are multi-line git output, which would
 	// otherwise split rows and destroy the column alignment. They show
@@ -502,7 +517,10 @@ func printListJSON(cmd *cobra.Command, st *state.State, chromeStatus map[string]
 		}
 		// A filter selects rows, and a repo left with none is no row; repo
 		// metadata alone would read as a match to a script iterating repos.
-		if filter.keys != nil && len(ro.Extensions) == 0 && len(ro.Stale) == 0 {
+		// lastError is the exception: like the table's ⚠ line, a failing
+		// update is never hidden — a health check filtering on not-loaded
+		// must still see that the pulls stopped working.
+		if filter.keys != nil && len(ro.Extensions) == 0 && len(ro.Stale) == 0 && ro.LastError == "" {
 			continue
 		}
 		repos = append(repos, ro)

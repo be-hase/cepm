@@ -40,8 +40,17 @@ func TestListDefaultShowsLoadedAndCountsTheRest(t *testing.T) {
 			t.Errorf("extension names are --full territory, found %s:\n%s", name, out)
 		}
 	}
-	if !strings.Contains(out, "Not shown: 1 chrome-disabled, 1 not-loaded, 1 available. See: cepm list --all") {
+	if !strings.Contains(out, "Not shown: 1 chrome-disabled, 1 not-loaded, 1 available. See: cepm list --all\n") {
 		t.Errorf("hidden rows must be accounted for:\n%s", out)
+	}
+
+	// In --full mode the hint keeps the shape the user chose.
+	full, err := run(t, "", "list", "--full")
+	if err != nil {
+		t.Fatalf("list --full: %v\n%s", err, full)
+	}
+	if !strings.Contains(full, "See: cepm list --all --full") {
+		t.Errorf("the --full footer should suggest --all --full:\n%s", full)
 	}
 }
 
@@ -86,6 +95,11 @@ func TestListDefaultColumnsAndFull(t *testing.T) {
 	out, err := run(t, "", "list")
 	if err != nil {
 		t.Fatalf("list: %v\n%s", err, out)
+	}
+	// The positive anchor keeps the negative checks from passing vacuously
+	// if the default view stopped rendering at all.
+	if !regexp.MustCompile(`(?m)^tools\s+branch:main\s+loaded\s*$`).MatchString(out) {
+		t.Fatalf("expected the aggregated repo row:\n%s", out)
 	}
 	for _, leak := range []string{"MyExt", idA, "example.com", "subdir"} {
 		if strings.Contains(out, leak) {
@@ -205,6 +219,61 @@ func TestListStatusFilter(t *testing.T) {
 
 	if _, err := run(t, "", "list", "--status", "laoded"); err == nil || !strings.Contains(err.Error(), "valid:") {
 		t.Errorf("a typo must fail with the vocabulary, got: %v", err)
+	}
+
+	// --status "" (an empty $VAR in a script) must not silently degrade to
+	// the default view.
+	if _, err := run(t, "", "list", "--status", ""); err == nil || !strings.Contains(err.Error(), "valid:") {
+		t.Errorf("an empty --status must fail with the vocabulary, got: %v", err)
+	}
+}
+
+// A registered repository can be left with no extensions at all (every dir
+// removed upstream, then cleaned up); --all must say so rather than print
+// nothing and read like an unregistered state.
+func TestListAllExtensionlessRepoSaysSo(t *testing.T) {
+	startFakeHost(t)
+	seedRepo(t, "tools")
+
+	out, err := run(t, "", "list", "--all")
+	if err != nil {
+		t.Fatalf("list --all: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "No extensions registered.") {
+		t.Errorf("--all on an extensionless inventory should say so:\n%s", out)
+	}
+}
+
+// An explicit JSON filter narrows rows, but never hides that a repo's
+// updates are failing — the JSON counterpart of the table's ⚠ line.
+func TestListJSONStatusKeepsFailingRepo(t *testing.T) {
+	startFakeHost(t)
+	seedRepo(t, "tools", state.Extension{Dir: "a", Name: "Idle", ID: idA, Key: keyA, Disabled: true})
+	st, err := state.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.Repos["tools"].LastError = "fatal: could not read from remote"
+	if err := st.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := run(t, "", "list", "--json", "--status", "loaded")
+	if err != nil {
+		t.Fatalf("list --json --status loaded: %v\n%s", err, out)
+	}
+	var p struct {
+		Repos []struct {
+			Name       string `json:"name"`
+			LastError  string `json:"lastError"`
+			Extensions []any  `json:"extensions"`
+		} `json:"repos"`
+	}
+	if err := json.Unmarshal([]byte(out), &p); err != nil {
+		t.Fatalf("not valid JSON: %v\n%s", err, out)
+	}
+	if len(p.Repos) != 1 || p.Repos[0].LastError == "" || len(p.Repos[0].Extensions) != 0 {
+		t.Errorf("the failing repo should survive the filter with its lastError (and no rows), got %+v", p)
 	}
 }
 
