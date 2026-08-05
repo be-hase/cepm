@@ -63,10 +63,10 @@ func newListCmd() *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&asJSON, "json", false, "output as JSON (always all statuses and fields unless --status is given)")
 	cmd.Flags().BoolVar(&share, "share", false, "print install commands for the enabled extensions, ready to paste")
-	cmd.Flags().BoolVarP(&all, "all", "a", false, "show every status, not just what is loaded")
-	cmd.Flags().BoolVar(&full, "full", false, "one row per extension, with all columns (EXTENSION, ID, DIR, URL)")
+	cmd.Flags().BoolVarP(&all, "all", "a", false, "show every status, one row per extension (default: only what is loaded)")
+	cmd.Flags().BoolVar(&full, "full", false, "show all columns (EXTENSION, ID, DIR, URL), one row per extension")
 	cmd.Flags().StringSliceVar(&statuses, "status", nil,
-		"only list these statuses (comma-separated): "+strings.Join(listStatuses, ", "))
+		"only list these statuses, one row per extension (comma-separated): "+strings.Join(listStatuses, ", "))
 	cmd.MarkFlagsMutuallyExclusive("json", "share")
 	// --share answers "what do you run?", a selection by enabledness, not by
 	// status or presentation; combining would silently drop the other flag.
@@ -324,14 +324,18 @@ func printListTable(cmd *cobra.Command, st *state.State, chromeStatus map[string
 	if len(st.Repos) == 0 {
 		fmt.Fprintln(out, "No repositories registered.")
 	}
+	// The one-row-per-repo summary belongs to the default view only. Asking
+	// for statuses (--all, --status) means asking to *see* those extensions —
+	// a count in a cell would answer "how many", not "which" — so any
+	// explicit selection expands to one row per extension; --full then only
+	// adds the identifying columns.
+	detail := full || !filter.implicit
 	hidden := map[string]int{}
 	var rows []string
 	for _, name := range st.RepoNames() {
 		r := st.Repos[name]
-		// The default is one row per repo; --full expands to one per
-		// extension. The URL is what a colleague needs to install the same
-		// extension; last column, so its length does not push the narrow
-		// ones apart.
+		// The URL is what a colleague needs to install the same extension;
+		// last column, so its length does not push the narrow ones apart.
 		counts := map[string]int{}
 		for _, e := range r.Extensions {
 			key := extStatusKey(chromeStatus, e)
@@ -340,47 +344,55 @@ func printListTable(cmd *cobra.Command, st *state.State, chromeStatus map[string
 				continue
 			}
 			counts[key]++
-			if full {
+			switch {
+			case full:
 				rows = append(rows, strings.Join([]string{name, trackRef(r), e.Name, e.ID,
 					term.Safe(e.Dir), extStatusText(key), term.Safe(gitx.RedactURL(r.URL))}, "\t"))
+			case detail:
+				rows = append(rows, strings.Join([]string{name, trackRef(r), e.Name, extStatusText(key)}, "\t"))
 			}
 		}
+		// Stale rows are never aggregated: only an explicit selection (--all,
+		// --status stale) matches them, and an explicit selection always
+		// renders detail rows.
 		for _, s := range r.Stale {
 			if !filter.match(statusStale) {
 				hidden[statusStale]++
 				continue
 			}
-			counts[statusStale]++
-			if full {
+			switch {
+			case full:
 				rows = append(rows, strings.Join([]string{name, "", s.Name, s.ID,
 					"(" + term.Safe(s.Reason) + ")", staleStatusText, ""}, "\t"))
+			case detail:
+				rows = append(rows, strings.Join([]string{name, "", s.Name, staleStatusText}, "\t"))
 			}
 		}
-		if !full && len(counts) > 0 {
+		if !detail && len(counts) > 0 {
 			rows = append(rows, strings.Join([]string{name, trackRef(r), statusSummary(counts)}, "\t"))
 		}
 	}
-	orphanCount := 0
 	for _, o := range st.Orphans {
 		if !filter.match(statusStale) {
 			hidden[statusStale]++
 			continue
 		}
-		orphanCount++
-		if full {
+		switch {
+		case full:
 			rows = append(rows, strings.Join([]string{"(uninstalled)", "", o.Name, o.ID,
 				"(" + term.Safe(o.Reason) + ")", staleStatusText, ""}, "\t"))
+		case detail:
+			rows = append(rows, strings.Join([]string{"(uninstalled)", "", o.Name, staleStatusText}, "\t"))
 		}
-	}
-	if !full && orphanCount > 0 {
-		rows = append(rows, strings.Join([]string{"(uninstalled)", "",
-			statusSummary(map[string]int{statusStale: orphanCount})}, "\t"))
 	}
 	if len(rows) > 0 {
 		w := tabwriter.NewWriter(out, 2, 4, 2, ' ', 0)
-		if full {
+		switch {
+		case full:
 			fmt.Fprintln(w, "REPO\tTRACK\tEXTENSION\tID\tDIR\tSTATUS\tURL")
-		} else {
+		case detail:
+			fmt.Fprintln(w, "REPO\tTRACK\tEXTENSION\tSTATUS")
+		default:
 			fmt.Fprintln(w, "REPO\tTRACK\tSTATUS")
 		}
 		for _, r := range rows {
@@ -425,7 +437,9 @@ func printListTable(cmd *cobra.Command, st *state.State, chromeStatus map[string
 
 // statusSummary renders a repo's visible rows as one STATUS cell: the full
 // advice text while there is a single row to describe, counts of the short
-// vocabulary once there are more (the advice does not aggregate).
+// vocabulary once there are more (the advice does not aggregate). It only
+// serves the implicit default view — every explicit selection renders
+// detail rows — so its statuses are the default filter's: loaded, unknown.
 func statusSummary(counts map[string]int) string {
 	total, single := 0, ""
 	for key, n := range counts {
@@ -433,9 +447,6 @@ func statusSummary(counts map[string]int) string {
 		single = key
 	}
 	if total == 1 {
-		if single == statusStale {
-			return staleStatusText
-		}
 		return extStatusText(single)
 	}
 	var parts []string

@@ -119,9 +119,9 @@ $ cepm id <path>                  # ディレクトリに対応する拡張 ID �
 
 便利なフラグ: `cepm update --no-reload`(pull のみ)、`cepm update --force`
 (ローカル変更を stash して pull)、`cepm uninstall --keep-files`、
-`cepm list --all`(全ステータスを表示。デフォルトは読み込み済みのみで、
-隠した行数を末尾に表示)、`cepm list --full`(拡張ごとの行で EXTENSION・
-ID・DIR・URL 列も表示。デフォルトはリポジトリごとに1行)、
+`cepm list --all`(全ステータスを拡張ごとの行で表示。デフォルトは
+リポジトリごとに1行で、読み込み済みのみを表示し隠した件数を末尾に出す)、
+`cepm list --full`(EXTENSION・ID・DIR・URL の全列を表示)、
 `cepm list --status not-loaded,stale`(ステータスで絞り込み)、
 `cepm list --share`(有効化中の拡張の install コマンドを、そのまま同僚に
 渡せる形で出力)、`cepm list --json` / `cepm doctor --json`、任意のコマンドの `-v`。

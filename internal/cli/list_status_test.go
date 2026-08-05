@@ -119,8 +119,10 @@ func TestListDefaultColumnsAndFull(t *testing.T) {
 }
 
 // --all renders the complete inventory — stale leftovers and orphans
-// included — aggregated per repo, with no summary left to print; --all
-// --full expands it to the per-extension rows.
+// included — one row per extension, so the statuses it reveals are readable
+// by name, with no summary left to print. Ids, dirs and URLs stay --full
+// territory: --all answers "which and in what state", --full "identified
+// how".
 func TestListAllShowsEveryStatus(t *testing.T) {
 	startFakeHost(t, idA)
 	keyC, idC := fixtureKey("all-c")
@@ -142,9 +144,15 @@ func TestListAllShowsEveryStatus(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list --all: %v\n%s", err, out)
 	}
-	for _, want := range []string{"1 loaded, 1 available, 1 stale", "(uninstalled)", "stale — run: cepm cleanup"} {
+	for _, want := range []string{"Live", "Idle", "Gone", "Orphaned",
+		"(uninstalled)", "stale — run: cepm cleanup"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("--all should show %q:\n%s", want, out)
+		}
+	}
+	for _, leak := range []string{idA, "example.com"} {
+		if strings.Contains(out, leak) {
+			t.Errorf("--all without --full should not carry %q:\n%s", leak, out)
 		}
 	}
 	if strings.Contains(out, "Not shown") {
@@ -155,7 +163,7 @@ func TestListAllShowsEveryStatus(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list --all --full: %v\n%s", err, full)
 	}
-	for _, want := range []string{"Live", "Idle", "Gone", "Orphaned"} {
+	for _, want := range []string{"Live", "Idle", "Gone", "Orphaned", idA, idC} {
 		if !strings.Contains(full, want) {
 			t.Errorf("--all --full should show %q:\n%s", want, full)
 		}
@@ -193,9 +201,9 @@ func TestListStatusFilter(t *testing.T) {
 		{"loaded,available", []string{"Live", "Idle"}},
 	}
 	for _, tc := range cases {
-		// --full: the per-extension rows are what make the selection
-		// observable by name.
-		out, err := run(t, "", "list", "--status", tc.status, "--full")
+		// No --full: an explicit selection expands to per-extension rows on
+		// its own, so the selection is observable by name.
+		out, err := run(t, "", "list", "--status", tc.status)
 		if err != nil {
 			t.Fatalf("list --status %s: %v\n%s", tc.status, err, out)
 		}
@@ -207,6 +215,21 @@ func TestListStatusFilter(t *testing.T) {
 		if strings.Contains(out, "Not shown") {
 			t.Errorf("--status %s: an explicit filter needs no summary:\n%s", tc.status, out)
 		}
+	}
+
+	// --full composes with --status: the same selection, with the
+	// identifying columns added.
+	full, err := run(t, "", "list", "--status", "loaded", "--full")
+	if err != nil {
+		t.Fatalf("list --status loaded --full: %v\n%s", err, full)
+	}
+	for _, want := range []string{"Live", idA} {
+		if !strings.Contains(full, want) {
+			t.Errorf("--status loaded --full should carry %q:\n%s", want, full)
+		}
+	}
+	if strings.Contains(full, "Missing") {
+		t.Errorf("--status loaded --full must keep the selection:\n%s", full)
 	}
 
 	out, err := run(t, "", "list", "--status", "stale")
