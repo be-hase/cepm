@@ -139,18 +139,6 @@ $ cepm list --share
 prints the `cepm install` commands for your enabled extensions, ready to
 paste into a chat.
 
-### Hacking on an extension locally
-
-Edit the clone under `~/.cepm/repos/<name>` directly, then:
-
-```console
-$ cepm reload                     # reload without pulling
-```
-
-A repo with local modifications is skipped by updates (with a warning) so
-your experiments are never clobbered; `cepm update --force` stashes and
-restores them around the pull.
-
 ### Stopping and removing
 
 ```console
@@ -204,8 +192,10 @@ auto     = true    # set false to only update via "cepm update"
 stash_dirty = false  # stash local edits around pulls (also the periodic ones)
 ```
 
-cepm never deletes a stash entry — it reports the one it left, and you
-remove it when convenient (`git -C <clone> stash list`). With
+A repo with local modifications is skipped (with a warning) so your
+experiments are never clobbered; `cepm update --force` stashes and restores
+them around the pull. cepm never deletes a stash entry — it reports the one
+it left, and you remove it when convenient (`git -C <clone> stash list`). With
 `git.stash_dirty = true` a clone left dirty collects one entry per
 automatic update; each is logged to `~/.cepm/logs/host.log`.
 

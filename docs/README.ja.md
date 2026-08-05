@@ -144,18 +144,6 @@ $ cepm list --share
 有効化中の拡張の `cepm install` コマンドを、そのままチャットに貼れる形で
 出力します。
 
-### 拡張をローカルで開発する
-
-`~/.cepm/repos/<name>` の clone を直接編集して:
-
-```console
-$ cepm reload                     # pull せず再読み込みだけ
-```
-
-ローカルに変更のあるリポジトリは警告つきで更新から skip され、作業中の
-内容が失われることはありません。`cepm update --force` は pull の前後で
-stash と復元を行います。
-
 ### 使うのをやめる
 
 ```console
@@ -209,7 +197,9 @@ auto     = true    # false にすると "cepm update" 実行時のみ更新
 stash_dirty = false  # ローカル変更を stash して pull(自動更新にも適用)
 ```
 
-cepm が stash エントリを削除することはなく、残したエントリは報告される
+ローカルに変更のあるリポジトリは警告つきで skip され、作業中の内容が失われる
+ことはありません。`cepm update --force` は pull の前後で stash と復元を行い
+ます。cepm が stash エントリを削除することはなく、残したエントリは報告される
 ので都合のよいときに削除してください(`git -C <clone> stash list`)。
 `git.stash_dirty = true` の場合、変更を残したままの clone には自動更新ごとに
 1 件ずつ溜まります(`~/.cepm/logs/host.log` に記録されます)。
