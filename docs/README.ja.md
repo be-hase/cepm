@@ -106,7 +106,7 @@ flowchart LR
 $ cepm install <git-url>          # clone して登録(このあと一度だけ読み込む)
 $ cepm update                     # すべて pull し、変更された拡張を再読み込み
 $ cepm track <name> tag           # タグ追従に切り替え(branch で元に戻す)
-$ cepm list                       # 登録内容と、Chrome に読み込まれているか
+$ cepm list                       # 読み込み済みの拡張(--all で登録内容すべて)
 $ cepm enable <repo>[/<dir>]      # リポジトリ内の拡張を使い始める
 $ cepm disable <repo>[/<dir>]     # 使うのをやめる(登録は「利用可能」として残る)
 $ cepm reload                     # pull せず再読み込みだけ(ローカルでの開発用)
@@ -119,6 +119,9 @@ $ cepm id <path>                  # ディレクトリに対応する拡張 ID �
 
 便利なフラグ: `cepm update --no-reload`(pull のみ)、`cepm update --force`
 (ローカル変更を stash して pull)、`cepm uninstall --keep-files`、
+`cepm list --all`(全ステータスを表示。デフォルトは読み込み済みのみで、
+隠した行数を末尾に表示)、`cepm list --full`(ID・DIR・URL 列を追加)、
+`cepm list --status not-loaded,stale`(ステータスで絞り込み)、
 `cepm list --share`(有効化中の拡張の install コマンドを、そのまま同僚に
 渡せる形で出力)、`cepm list --json` / `cepm doctor --json`、任意のコマンドの `-v`。
 

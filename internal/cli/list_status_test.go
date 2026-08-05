@@ -1,0 +1,246 @@
+package cli
+
+import (
+	"encoding/json"
+	"slices"
+	"strings"
+	"testing"
+
+	"github.com/be-hase/cepm/internal/state"
+)
+
+// The default view answers "what is running?": loaded rows only, with a
+// summary line accounting for everything it hides — a NOT LOADED row must
+// not disappear without trace.
+func TestListDefaultShowsLoadedAndCountsTheRest(t *testing.T) {
+	host := startFakeHost(t, idA, idB)
+	host.mu.Lock()
+	host.disabledInChrome = map[string]bool{idB: true}
+	host.mu.Unlock()
+	keyC, idC := fixtureKey("status-c")
+	keyD, idD := fixtureKey("status-d")
+	seedRepo(t, "tools",
+		state.Extension{Dir: "a", Name: "Live", ID: idA, Key: keyA},
+		state.Extension{Dir: "b", Name: "SwitchedOff", ID: idB, Key: keyB},
+		state.Extension{Dir: "c", Name: "Missing", ID: idC, Key: keyC},
+		state.Extension{Dir: "d", Name: "Idle", ID: idD, Key: keyD, Disabled: true},
+	)
+
+	out, err := run(t, "", "list")
+	if err != nil {
+		t.Fatalf("list: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "Live") {
+		t.Errorf("the loaded extension should be listed:\n%s", out)
+	}
+	for _, name := range []string{"SwitchedOff", "Missing", "Idle"} {
+		if strings.Contains(out, name) {
+			t.Errorf("%s should be hidden by default:\n%s", name, out)
+		}
+	}
+	if !strings.Contains(out, "Not shown: 1 chrome-disabled, 1 not-loaded, 1 available. See: cepm list --all") {
+		t.Errorf("hidden rows must be accounted for:\n%s", out)
+	}
+}
+
+// Nothing loaded: the default explains itself rather than printing an empty
+// table that reads as breakage.
+func TestListDefaultNothingLoaded(t *testing.T) {
+	startFakeHost(t)
+	seedRepo(t, "tools", state.Extension{Dir: "a", Name: "Idle", ID: idA, Key: keyA, Disabled: true})
+	out, err := run(t, "", "list")
+	if err != nil {
+		t.Fatalf("list: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "No loaded extensions.") ||
+		!strings.Contains(out, "Not shown: 1 available. See: cepm list --all") {
+		t.Errorf("expected the empty-default notice with the hidden count:\n%s", out)
+	}
+}
+
+// With the host unreachable nothing is provably loaded; the default keeps
+// the enabled rows visible as unknown instead of rendering an empty table
+// that reads as "nothing is running".
+func TestListDefaultShowsUnknownWhenHostGone(t *testing.T) {
+	host := startFakeHost(t, idA)
+	seedRepo(t, "tools", state.Extension{Dir: "a", Name: "Live", ID: idA, Key: keyA})
+	host.stopListener()
+
+	out, err := run(t, "", "list")
+	if err != nil {
+		t.Fatalf("list: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "Live") || !strings.Contains(out, "unknown (host not connected)") {
+		t.Errorf("enabled extensions should stay visible as unknown:\n%s", out)
+	}
+}
+
+// The default columns are the ones a human scans — REPO, TRACK, EXTENSION,
+// STATUS; ids, dirs and URLs are --full territory.
+func TestListDefaultColumnsAndFull(t *testing.T) {
+	startFakeHost(t, idA)
+	seedRepo(t, "tools", state.Extension{Dir: "subdir", Name: "Ext", ID: idA, Key: keyA})
+
+	out, err := run(t, "", "list")
+	if err != nil {
+		t.Fatalf("list: %v\n%s", err, out)
+	}
+	if strings.Contains(out, idA) || strings.Contains(out, "example.com") || strings.Contains(out, "subdir") {
+		t.Errorf("default table should not carry ID, URL or DIR:\n%s", out)
+	}
+
+	full, err := run(t, "", "list", "--full")
+	if err != nil {
+		t.Fatalf("list --full: %v\n%s", err, full)
+	}
+	for _, want := range []string{idA, "https://***@example.com/t/r.git", "subdir"} {
+		if !strings.Contains(full, want) {
+			t.Errorf("full table should carry %q:\n%s", want, full)
+		}
+	}
+}
+
+// --all renders the complete inventory, stale leftovers and orphans
+// included, with no summary left to print.
+func TestListAllShowsEveryStatus(t *testing.T) {
+	startFakeHost(t, idA)
+	keyC, idC := fixtureKey("all-c")
+	seedRepo(t, "tools",
+		state.Extension{Dir: "a", Name: "Live", ID: idA, Key: keyA},
+		state.Extension{Dir: "c", Name: "Idle", ID: idC, Key: keyC, Disabled: true},
+	)
+	st, err := state.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.Repos["tools"].AddStale(state.StaleExtension{ID: idB, Name: "Gone", Reason: "removed"})
+	st.AddOrphans([]state.StaleExtension{{ID: idZ, Name: "Orphaned", Reason: "uninstalled"}})
+	if err := st.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := run(t, "", "list", "--all")
+	if err != nil {
+		t.Fatalf("list --all: %v\n%s", err, out)
+	}
+	for _, want := range []string{"Live", "Idle", "Gone", "Orphaned"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("--all should show %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "Not shown") {
+		t.Errorf("--all hides nothing, so there is nothing to account for:\n%s", out)
+	}
+}
+
+// --status narrows to exactly the named statuses, and rejects words outside
+// the vocabulary so a typo cannot read as "nothing matched".
+func TestListStatusFilter(t *testing.T) {
+	keyC, idC := fixtureKey("filter-c")
+	keyD, idD := fixtureKey("filter-d")
+	keyE, idE := fixtureKey("filter-e")
+	host := startFakeHost(t, idA, idB, idE)
+	host.mu.Lock()
+	host.disabledInChrome = map[string]bool{idB: true}
+	host.mu.Unlock()
+	seedRepo(t, "tools",
+		state.Extension{Dir: "a", Name: "Live", ID: idA, Key: keyA},
+		state.Extension{Dir: "b", Name: "SwitchedOff", ID: idB, Key: keyB},
+		state.Extension{Dir: "c", Name: "Missing", ID: idC, Key: keyC},
+		state.Extension{Dir: "d", Name: "Idle", ID: idD, Key: keyD, Disabled: true},
+		state.Extension{Dir: "e", Name: "Unmanaged", ID: idE, Key: keyE, Disabled: true},
+	)
+
+	names := []string{"Live", "SwitchedOff", "Missing", "Idle", "Unmanaged"}
+	cases := []struct {
+		status string
+		want   []string
+	}{
+		{"loaded", []string{"Live"}},
+		{"chrome-disabled", []string{"SwitchedOff"}},
+		{"not-loaded", []string{"Missing"}},
+		{"available", []string{"Idle"}},
+		{"not-enabled", []string{"Unmanaged"}},
+		{"loaded,available", []string{"Live", "Idle"}},
+	}
+	for _, tc := range cases {
+		out, err := run(t, "", "list", "--status", tc.status)
+		if err != nil {
+			t.Fatalf("list --status %s: %v\n%s", tc.status, err, out)
+		}
+		for _, name := range names {
+			if got, want := strings.Contains(out, name), slices.Contains(tc.want, name); got != want {
+				t.Errorf("--status %s: %s shown=%v, want %v\n%s", tc.status, name, got, want, out)
+			}
+		}
+		if strings.Contains(out, "Not shown") {
+			t.Errorf("--status %s: an explicit filter needs no summary:\n%s", tc.status, out)
+		}
+	}
+
+	out, err := run(t, "", "list", "--status", "stale")
+	if err != nil {
+		t.Fatalf("list --status stale: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "No extensions with status stale.") {
+		t.Errorf("an explicit filter with no matches should say so:\n%s", out)
+	}
+
+	if _, err := run(t, "", "list", "--status", "laoded"); err == nil || !strings.Contains(err.Error(), "valid:") {
+		t.Errorf("a typo must fail with the vocabulary, got: %v", err)
+	}
+}
+
+// JSON is for scripts: complete by default (every status, plus statusKey for
+// the stable vocabulary), narrowed only by an explicit --status.
+func TestListJSONStatusKeyAndFilter(t *testing.T) {
+	startFakeHost(t, idA)
+	keyC, idC := fixtureKey("json-c")
+	seedRepo(t, "tools",
+		state.Extension{Dir: "a", Name: "Live", ID: idA, Key: keyA},
+		state.Extension{Dir: "c", Name: "Missing", ID: idC, Key: keyC},
+	)
+
+	type payload struct {
+		Repos []struct {
+			Name       string `json:"name"`
+			Extensions []struct {
+				Name      string `json:"name"`
+				StatusKey string `json:"statusKey"`
+			} `json:"extensions"`
+		} `json:"repos"`
+	}
+	decode := func(args ...string) payload {
+		t.Helper()
+		out, err := run(t, "", args...)
+		if err != nil {
+			t.Fatalf("%v: %v\n%s", args, err, out)
+		}
+		var p payload
+		if err := json.Unmarshal([]byte(out), &p); err != nil {
+			t.Fatalf("%v is not valid JSON: %v\n%s", args, err, out)
+		}
+		return p
+	}
+
+	p := decode("list", "--json")
+	if len(p.Repos) != 1 || len(p.Repos[0].Extensions) != 2 {
+		t.Fatalf("default JSON must be complete, got %+v", p)
+	}
+	keys := map[string]string{}
+	for _, e := range p.Repos[0].Extensions {
+		keys[e.Name] = e.StatusKey
+	}
+	if keys["Live"] != "loaded" || keys["Missing"] != "not-loaded" {
+		t.Errorf("statusKey mismatch: %v", keys)
+	}
+
+	p = decode("list", "--json", "--status", "not-loaded")
+	if len(p.Repos) != 1 || len(p.Repos[0].Extensions) != 1 || p.Repos[0].Extensions[0].Name != "Missing" {
+		t.Errorf("--status should narrow the JSON, got %+v", p)
+	}
+
+	if p = decode("list", "--json", "--status", "available"); len(p.Repos) != 0 {
+		t.Errorf("a repo with no matching rows is not a match, got %+v", p)
+	}
+}

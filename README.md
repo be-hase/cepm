@@ -102,7 +102,7 @@ Chrome entries orphaned by upstream renames or deletes.
 $ cepm install <git-url>          # clone + register (then load unpacked once)
 $ cepm update                     # pull everything, reload what changed
 $ cepm track <name> tag           # switch to tag tracking (or back: ... branch)
-$ cepm list                       # what's registered, and is it loaded?
+$ cepm list                       # what's loaded (--all: everything registered)
 $ cepm enable <repo>[/<dir>]      # start using an extension of a repo
 $ cepm disable <repo>[/<dir>]     # stop using one (kept as "available")
 $ cepm reload                     # reload without pulling (local hacking)
@@ -115,6 +115,9 @@ $ cepm id <path>                  # print the extension ID for a directory
 
 Flags worth knowing: `cepm update --no-reload` (pull only), `cepm update
 --force` (stash local edits around the pull), `cepm uninstall --keep-files`,
+`cepm list --all` (every status — the default shows only what is loaded,
+plus a count of what it hides), `cepm list --full` (adds the ID, DIR and URL
+columns), `cepm list --status not-loaded,stale` (filter by status),
 `cepm list --share` (install commands for your enabled extensions, ready to
 paste to a colleague), `cepm list --json` / `cepm doctor --json`, and `-v`
 on any command.

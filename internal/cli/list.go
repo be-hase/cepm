@@ -7,6 +7,7 @@ import (
 	"fmt"
 	neturl "net/url"
 	"path/filepath"
+	"slices"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -21,13 +22,18 @@ import (
 )
 
 func newListCmd() *cobra.Command {
-	var asJSON, share bool
+	var asJSON, share, all, full bool
+	var statuses []string
 	cmd := &cobra.Command{
 		Use:     "list",
 		Short:   "List registered repositories and extensions",
 		GroupID: "ext",
 		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			filter, err := newStatusFilter(statuses, all)
+			if err != nil {
+				return err
+			}
 			st, err := state.Load()
 			if err != nil {
 				return err
@@ -39,15 +45,93 @@ func newListCmd() *cobra.Command {
 			}
 			chromeStatus := fetchChromeStatus(cmd.Context())
 			if asJSON {
-				return printListJSON(cmd, st, chromeStatus)
+				// The compact default is for eyes, not parsers: scripts get
+				// the complete picture unless they filtered explicitly.
+				if filter.implicit {
+					filter = statusFilter{}
+				}
+				return printListJSON(cmd, st, chromeStatus, filter)
 			}
-			return printListTable(cmd, st, chromeStatus)
+			return printListTable(cmd, st, chromeStatus, filter, full)
 		},
 	}
-	cmd.Flags().BoolVar(&asJSON, "json", false, "output as JSON")
+	cmd.Flags().BoolVar(&asJSON, "json", false, "output as JSON (always all statuses and fields unless --status is given)")
 	cmd.Flags().BoolVar(&share, "share", false, "print install commands for the enabled extensions, ready to paste")
+	cmd.Flags().BoolVarP(&all, "all", "a", false, "show every status, not just what is loaded")
+	cmd.Flags().BoolVar(&full, "full", false, "show all columns (adds ID, DIR, URL)")
+	cmd.Flags().StringSliceVar(&statuses, "status", nil,
+		"only list these statuses (comma-separated): "+strings.Join(listStatuses, ", "))
 	cmd.MarkFlagsMutuallyExclusive("json", "share")
+	// --share answers "what do you run?", a selection by enabledness, not by
+	// status or presentation; combining would silently drop the other flag.
+	cmd.MarkFlagsMutuallyExclusive("share", "status")
+	cmd.MarkFlagsMutuallyExclusive("share", "all")
+	cmd.MarkFlagsMutuallyExclusive("share", "full")
+	cmd.MarkFlagsMutuallyExclusive("all", "status")
+	cmd.MarkFlagsMutuallyExclusive("json", "full")
 	return cmd
+}
+
+// The status vocabulary: stable single words for --status and the JSON
+// statusKey, distinct from the table's advice-bearing display strings.
+const (
+	statusLoaded         = "loaded"          // enabled and live in Chrome
+	statusChromeDisabled = "chrome-disabled" // loaded, switched off in chrome://extensions
+	statusNotLoaded      = "not-loaded"      // enabled here, absent from Chrome
+	statusNotEnabled     = "not-enabled"     // loaded in Chrome, not enabled here
+	statusAvailable      = "available"       // registered, not enabled
+	statusUnknown        = "unknown"         // host unreachable, so unknowable
+	statusStale          = "stale"           // Chrome-side leftover; cleanup removes it
+)
+
+// listStatuses fixes the order used by help text, error messages and the
+// not-shown summary.
+var listStatuses = []string{statusLoaded, statusChromeDisabled, statusNotLoaded,
+	statusNotEnabled, statusAvailable, statusUnknown, statusStale}
+
+// statusFilter selects which statuses list shows. A nil keys map shows
+// everything; implicit marks the loaded-only default, which — unlike an
+// explicit --status — must account for what it hides.
+type statusFilter struct {
+	keys     map[string]bool
+	implicit bool
+}
+
+func (f statusFilter) match(key string) bool { return f.keys == nil || f.keys[key] }
+
+func (f statusFilter) names() []string {
+	var ns []string
+	for _, s := range listStatuses {
+		if f.keys[s] {
+			ns = append(ns, s)
+		}
+	}
+	return ns
+}
+
+// newStatusFilter turns the flags into a filter. Unknown words fail up front,
+// so a typo reads as an error rather than as an empty table.
+func newStatusFilter(statuses []string, all bool) (statusFilter, error) {
+	if all {
+		return statusFilter{}, nil
+	}
+	if len(statuses) == 0 {
+		// The default answers "what is running?". unknown stays in: with the
+		// host unreachable it is the honest answer for every enabled
+		// extension, and hiding it would make the table empty whenever
+		// Chrome is closed.
+		return statusFilter{keys: map[string]bool{statusLoaded: true, statusUnknown: true}, implicit: true}, nil
+	}
+	keys := map[string]bool{}
+	for _, v := range statuses {
+		v = strings.ToLower(strings.TrimSpace(v))
+		if !slices.Contains(listStatuses, v) {
+			return statusFilter{}, fmt.Errorf("unknown status %q (valid: %s)",
+				term.Safe(v), strings.Join(listStatuses, ", "))
+		}
+		keys[v] = true
+	}
+	return statusFilter{keys: keys}, nil
 }
 
 // printListShare prints one paste-ready install command per repository,
@@ -174,27 +258,47 @@ func fetchChromeStatus(ctx context.Context) map[string]ipc.ChromeExt {
 	return m
 }
 
-func extStatus(chromeStatus map[string]ipc.ChromeExt, e state.Extension) string {
+// extStatusKey classifies an extension into one word of the vocabulary;
+// extStatusText renders that word for the table. Split so that filtering and
+// display cannot drift apart.
+func extStatusKey(chromeStatus map[string]ipc.ChromeExt, e state.Extension) string {
 	if chromeStatus == nil {
 		if !e.Enabled() {
-			return "available"
+			return statusAvailable
 		}
-		return "unknown (host not connected)"
+		return statusUnknown
 	}
 	ce, loaded := chromeStatus[e.ID]
 	switch {
 	case !e.Enabled() && !loaded:
-		return "available"
+		return statusAvailable
 	case !e.Enabled() && loaded:
-		return "loaded but not enabled in cepm — cepm enable?"
+		return statusNotEnabled
 	case !loaded:
-		return "NOT LOADED — load it or run: cepm disable"
+		return statusNotLoaded
 	case !ce.Enabled:
-		return "loaded (disabled in Chrome)"
+		return statusChromeDisabled
 	default:
-		return "loaded"
+		return statusLoaded
 	}
 }
+
+func extStatusText(key string) string {
+	switch key {
+	case statusUnknown:
+		return "unknown (host not connected)"
+	case statusNotEnabled:
+		return "loaded but not enabled in cepm — cepm enable?"
+	case statusNotLoaded:
+		return "NOT LOADED — load it or run: cepm disable"
+	case statusChromeDisabled:
+		return "loaded (disabled in Chrome)"
+	default:
+		return key // loaded, available: the key reads as the status
+	}
+}
+
+const staleStatusText = "stale — run: cepm cleanup"
 
 func trackRef(r *state.Repo) string {
 	// Branch and tag names come from the remote; Validate rejects control
@@ -205,53 +309,108 @@ func trackRef(r *state.Repo) string {
 	return fmt.Sprintf("branch:%s", term.Safe(r.Branch))
 }
 
-func printListTable(cmd *cobra.Command, st *state.State, chromeStatus map[string]ipc.ChromeExt) error {
+func printListTable(cmd *cobra.Command, st *state.State, chromeStatus map[string]ipc.ChromeExt, filter statusFilter, full bool) error {
+	out := cmd.OutOrStdout()
 	if len(st.Repos) == 0 && len(st.Orphans) == 0 {
-		fmt.Fprintln(cmd.OutOrStdout(), "No repositories registered. Run: cepm install <git-url>")
+		fmt.Fprintln(out, "No repositories registered. Run: cepm install <git-url>")
 		return nil
 	}
 	if len(st.Repos) == 0 {
-		fmt.Fprintln(cmd.OutOrStdout(), "No repositories registered.")
+		fmt.Fprintln(out, "No repositories registered.")
 	}
-	w := tabwriter.NewWriter(cmd.OutOrStdout(), 2, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "REPO\tTRACK\tEXTENSION\tID\tDIR\tSTATUS\tURL")
+	// The URL is what a colleague needs to install the same extension; last
+	// column, so its length does not push the narrow ones apart.
+	row := func(repo, track, ext, id, dir, status, url string) string {
+		if full {
+			return strings.Join([]string{repo, track, ext, id, dir, status, url}, "\t")
+		}
+		return strings.Join([]string{repo, track, ext, status}, "\t")
+	}
+	hidden := map[string]int{}
+	var rows []string
 	for _, name := range st.RepoNames() {
 		r := st.Repos[name]
-		// The URL is what a colleague needs to install the same extension;
-		// last column, so its length does not push the narrow ones apart.
 		for _, e := range r.Extensions {
-			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-				name, trackRef(r), e.Name, e.ID, term.Safe(e.Dir), extStatus(chromeStatus, e),
-				term.Safe(gitx.RedactURL(r.URL)))
+			key := extStatusKey(chromeStatus, e)
+			if !filter.match(key) {
+				hidden[key]++
+				continue
+			}
+			rows = append(rows, row(name, trackRef(r), e.Name, e.ID, term.Safe(e.Dir),
+				extStatusText(key), term.Safe(gitx.RedactURL(r.URL))))
 		}
 		for _, s := range r.Stale {
-			fmt.Fprintf(w, "%s\t\t%s\t%s\t(%s)\tstale — run: cepm cleanup\n", name, s.Name, s.ID, term.Safe(s.Reason))
+			if !filter.match(statusStale) {
+				hidden[statusStale]++
+				continue
+			}
+			rows = append(rows, row(name, "", s.Name, s.ID, "("+term.Safe(s.Reason)+")", staleStatusText, ""))
 		}
 	}
 	for _, o := range st.Orphans {
-		fmt.Fprintf(w, "(uninstalled)\t\t%s\t%s\t(%s)\tstale — run: cepm cleanup\n", o.Name, o.ID, term.Safe(o.Reason))
+		if !filter.match(statusStale) {
+			hidden[statusStale]++
+			continue
+		}
+		rows = append(rows, row("(uninstalled)", "", o.Name, o.ID, "("+term.Safe(o.Reason)+")", staleStatusText, ""))
 	}
-	if err := w.Flush(); err != nil {
-		return err
+	if len(rows) > 0 {
+		w := tabwriter.NewWriter(out, 2, 4, 2, ' ', 0)
+		if full {
+			fmt.Fprintln(w, "REPO\tTRACK\tEXTENSION\tID\tDIR\tSTATUS\tURL")
+		} else {
+			fmt.Fprintln(w, "REPO\tTRACK\tEXTENSION\tSTATUS")
+		}
+		for _, r := range rows {
+			fmt.Fprintln(w, r)
+		}
+		if err := w.Flush(); err != nil {
+			return err
+		}
+	} else if filter.implicit {
+		fmt.Fprintln(out, "No loaded extensions.")
+	} else if filter.keys != nil {
+		fmt.Fprintf(out, "No extensions with status %s.\n", strings.Join(filter.names(), ", "))
+	}
+	// The default view may narrow the table, but never silently: a NOT
+	// LOADED row exists to be seen. An explicit --status asked for exactly
+	// its subset, so only the implicit filter accounts for the rest.
+	if filter.implicit && len(hidden) > 0 {
+		if len(rows) > 0 {
+			fmt.Fprintln(out)
+		}
+		fmt.Fprintf(out, "Not shown: %s. See: cepm list --all\n", hiddenSummary(hidden))
 	}
 	// Errors go below the table: they are multi-line git output, which would
-	// otherwise split rows and destroy the column alignment.
+	// otherwise split rows and destroy the column alignment. They show
+	// regardless of the filter — a failing update is never a hidden row.
 	for _, name := range st.RepoNames() {
 		if e := st.Repos[name].LastError; e != "" {
-			fmt.Fprintf(cmd.OutOrStdout(), "\n⚠ %s: last update failed: %s\n", name, term.Safe(oneLine(e)))
+			fmt.Fprintf(out, "\n⚠ %s: last update failed: %s\n", name, term.Safe(oneLine(e)))
 		}
 	}
 	return nil
 }
 
-func printListJSON(cmd *cobra.Command, st *state.State, chromeStatus map[string]ipc.ChromeExt) error {
+func hiddenSummary(hidden map[string]int) string {
+	var parts []string
+	for _, s := range listStatuses {
+		if n := hidden[s]; n > 0 {
+			parts = append(parts, fmt.Sprintf("%d %s", n, s))
+		}
+	}
+	return strings.Join(parts, ", ")
+}
+
+func printListJSON(cmd *cobra.Command, st *state.State, chromeStatus map[string]ipc.ChromeExt, filter statusFilter) error {
 	type extOut struct {
-		Name    string `json:"name"`
-		Dir     string `json:"dir"`
-		AbsDir  string `json:"absDir"`
-		ID      string `json:"id"`
-		Enabled bool   `json:"enabled"`
-		Status  string `json:"status"`
+		Name      string `json:"name"`
+		Dir       string `json:"dir"`
+		AbsDir    string `json:"absDir"`
+		ID        string `json:"id"`
+		Enabled   bool   `json:"enabled"`
+		Status    string `json:"status"`
+		StatusKey string `json:"statusKey"`
 	}
 	type staleOut struct {
 		ID     string `json:"id"`
@@ -287,19 +446,32 @@ func printListJSON(cmd *cobra.Command, st *state.State, chromeStatus map[string]
 			Extensions: []extOut{},
 		}
 		for _, e := range r.Extensions {
+			key := extStatusKey(chromeStatus, e)
+			if !filter.match(key) {
+				continue
+			}
 			ro.Extensions = append(ro.Extensions, extOut{
 				Name: e.Name, Dir: e.Dir, AbsDir: filepath.Join(dir, e.Dir),
-				ID: e.ID, Enabled: e.Enabled(), Status: extStatus(chromeStatus, e),
+				ID: e.ID, Enabled: e.Enabled(), Status: extStatusText(key), StatusKey: key,
 			})
 		}
-		for _, s := range r.Stale {
-			ro.Stale = append(ro.Stale, staleOut{ID: s.ID, Name: s.Name, Reason: s.Reason, NewDir: s.NewDir})
+		if filter.match(statusStale) {
+			for _, s := range r.Stale {
+				ro.Stale = append(ro.Stale, staleOut{ID: s.ID, Name: s.Name, Reason: s.Reason, NewDir: s.NewDir})
+			}
+		}
+		// A filter selects rows, and a repo left with none is no row; repo
+		// metadata alone would read as a match to a script iterating repos.
+		if filter.keys != nil && len(ro.Extensions) == 0 && len(ro.Stale) == 0 {
+			continue
 		}
 		repos = append(repos, ro)
 	}
 	orphans := []staleOut{}
-	for _, o := range st.Orphans {
-		orphans = append(orphans, staleOut{ID: o.ID, Name: o.Name, Reason: o.Reason, NewDir: o.NewDir})
+	if filter.match(statusStale) {
+		for _, o := range st.Orphans {
+			orphans = append(orphans, staleOut{ID: o.ID, Name: o.Name, Reason: o.Reason, NewDir: o.NewDir})
+		}
 	}
 	enc := json.NewEncoder(cmd.OutOrStdout())
 	enc.SetIndent("", "  ")

@@ -74,7 +74,8 @@ Note: `cepm setup` still writes the native messaging manifest to the real
 - [ ] `cepm disable` on a loaded extension offers Chrome-side removal and
       Chrome shows its confirmation dialog; cancelling is reported.
 - [ ] Rename an extension dir in the repo, push, `cepm update`: the move is
-      reported, enabled intent carries over, `cepm list` shows a stale row,
+      reported, enabled intent carries over, `cepm list --all` shows a
+      stale row (plain `cepm list` counts it under "Not shown"),
       and `cepm cleanup` removes the broken entry via the dialog.
 - [ ] Delete an extension dir, push, update: reported as removed; cleanup
       clears the Chrome entry.
