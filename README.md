@@ -151,7 +151,7 @@ A repo with local modifications is skipped by updates (with a warning) so
 your experiments are never clobbered; `cepm update --force` stashes and
 restores them around the pull.
 
-### Removing things
+### Stopping and removing
 
 ```console
 $ cepm disable <repo>[/<dir>]     # stop using one extension (kept as "available")
@@ -169,9 +169,9 @@ always go through Chrome's own confirmation dialog.
 $ cepm doctor
 ```
 
-It checks the whole chain, and every failure it reports comes with the
-command that fixes it. See [Troubleshooting](#troubleshooting) for the
-common cases.
+It checks the whole chain, from setup to connectivity, and every failure
+it reports comes with the command that fixes it. See
+[Troubleshooting](#troubleshooting) for the common cases.
 
 ## Command reference
 
@@ -335,7 +335,8 @@ $ make lint    # gofmt check + go vet + staticcheck (both build tags)
 and a test extension, and asserts that a `git push` actually changes the
 code Chrome is running — including auto-update, updates applied while
 Chrome was closed, and the helper refresh. `CEPM_E2E_HEADED=1` to watch it.
-`docs/e2e-checklist.md` lists what a human still has to check.
+`docs/e2e-checklist.md` lists what a human still has to check;
+[AGENTS.md](AGENTS.md) records the design invariants.
 
 ## License
 
