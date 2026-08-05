@@ -33,7 +33,8 @@ Note: `cepm setup` still writes the native messaging manifest to the real
 
 - [ ] `cepm install <test repo url>` detects the expected extensions.
 - [ ] Load the printed directories in chrome://extensions.
-- [ ] `cepm list` shows STATUS `loaded` for each.
+- [ ] `cepm list` shows STATUS `loaded` covering every extension
+      (`--full` for the per-extension rows).
 - [ ] Push a commit touching one extension → `cepm update` reports
       `↻ reloaded <name>` and Chrome shows the new behavior immediately.
 - [ ] Push a commit touching only one of two extensions → only that one
@@ -74,7 +75,8 @@ Note: `cepm setup` still writes the native messaging manifest to the real
 - [ ] `cepm disable` on a loaded extension offers Chrome-side removal and
       Chrome shows its confirmation dialog; cancelling is reported.
 - [ ] Rename an extension dir in the repo, push, `cepm update`: the move is
-      reported, enabled intent carries over, `cepm list` shows a stale row,
+      reported, enabled intent carries over, `cepm list --all` shows a
+      stale row (plain `cepm list` counts it under "Not shown"),
       and `cepm cleanup` removes the broken entry via the dialog.
 - [ ] Delete an extension dir, push, update: reported as removed; cleanup
       clears the Chrome entry.

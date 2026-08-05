@@ -19,7 +19,9 @@ func TestListAndDoctorNeverPrintControlCharactersFromState(t *testing.T) {
                "extensions":[{"dir":"ext","name":"Ext","id":%q,"key":%q}]}}}`,
 		strings.Repeat("a", 40), idA, keyA))
 
-	listOut, _ := run(t, "", "list")
+	// --all: the not-loaded row carrying the forged branch is hidden from the
+	// default view, and a row that never renders proves nothing.
+	listOut, _ := run(t, "", "list", "--all")
 	docOut, _ := run(t, "", "doctor")
 	for label, s := range map[string]string{"list": listOut, "doctor": docOut} {
 		if strings.Contains(s, "\x1b") || strings.Contains(s, "\x07") {

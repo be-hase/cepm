@@ -891,7 +891,9 @@ func TestLegacyNamesAreNeutralisedOnLoad(t *testing.T) {
 	if n := st.Orphans[0].Name; strings.ContainsAny(n, "\n\x1b") {
 		t.Errorf("orphan name still has control characters: %q", n)
 	}
-	out, _ := run(t, "", "list")
+	// --all --full: the forged rows are hidden or truncated in the default
+	// view, and a row that never renders proves nothing about neutralisation.
+	out, _ := run(t, "", "list", "--all", "--full")
 	if strings.Contains(out, "OK\nFORGED") || strings.Contains(out, "\x1b") {
 		t.Errorf("list printed a forged row:\n%q", out)
 	}
@@ -1104,17 +1106,17 @@ func TestEnableDisableRoundTrip(t *testing.T) {
 	}
 }
 
-// The table is what people paste into chat to share an extension; without
-// the git URL the recipient has nothing to `cepm install` from.
-func TestListTableShowsRepoURL(t *testing.T) {
-	startFakeHost(t)
+// The full table is what people paste into chat to share an extension;
+// without the git URL the recipient has nothing to `cepm install` from.
+func TestListFullTableShowsRepoURL(t *testing.T) {
+	startFakeHost(t, idA)
 	seedRepo(t, "tools", state.Extension{Dir: "ext", Name: "Ext", ID: idA, Key: keyA})
-	out, err := run(t, "", "list")
+	out, err := run(t, "", "list", "--full")
 	if err != nil {
-		t.Fatalf("list: %v\n%s", err, out)
+		t.Fatalf("list --full: %v\n%s", err, out)
 	}
 	if !strings.Contains(out, "https://***@example.com/t/r.git") {
-		t.Errorf("table should carry the (redacted) repo URL:\n%s", out)
+		t.Errorf("full table should carry the (redacted) repo URL:\n%s", out)
 	}
 }
 
@@ -1306,7 +1308,7 @@ func TestListDoesNotLeakCredentials(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for _, args := range [][]string{{"list"}, {"list", "--json"}, {"list", "--share"}} {
+	for _, args := range [][]string{{"list"}, {"list", "--all", "--full"}, {"list", "--json"}, {"list", "--share"}} {
 		out, err := run(t, "", args...)
 		if err != nil {
 			t.Fatalf("%v: %v\n%s", args, err, out)
