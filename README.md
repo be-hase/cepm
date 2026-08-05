@@ -116,8 +116,9 @@ $ cepm id <path>                  # print the extension ID for a directory
 Flags worth knowing: `cepm update --no-reload` (pull only), `cepm update
 --force` (stash local edits around the pull), `cepm uninstall --keep-files`,
 `cepm list --all` (every status — the default shows only what is loaded,
-plus a count of what it hides), `cepm list --full` (adds the ID, DIR and URL
-columns), `cepm list --status not-loaded,stale` (filter by status),
+plus a count of what it hides), `cepm list --full` (one row per extension,
+with the EXTENSION, ID, DIR and URL columns — the default is one row per
+repo), `cepm list --status not-loaded,stale` (filter by status),
 `cepm list --share` (install commands for your enabled extensions, ready to
 paste to a colleague), `cepm list --json` / `cepm doctor --json`, and `-v`
 on any command.

@@ -33,7 +33,8 @@ Note: `cepm setup` still writes the native messaging manifest to the real
 
 - [ ] `cepm install <test repo url>` detects the expected extensions.
 - [ ] Load the printed directories in chrome://extensions.
-- [ ] `cepm list` shows STATUS `loaded` for each.
+- [ ] `cepm list` shows STATUS `loaded` covering every extension
+      (`--full` for the per-extension rows).
 - [ ] Push a commit touching one extension → `cepm update` reports
       `↻ reloaded <name>` and Chrome shows the new behavior immediately.
 - [ ] Push a commit touching only one of two extensions → only that one

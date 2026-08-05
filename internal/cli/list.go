@@ -58,7 +58,7 @@ func newListCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&asJSON, "json", false, "output as JSON (always all statuses and fields unless --status is given)")
 	cmd.Flags().BoolVar(&share, "share", false, "print install commands for the enabled extensions, ready to paste")
 	cmd.Flags().BoolVarP(&all, "all", "a", false, "show every status, not just what is loaded")
-	cmd.Flags().BoolVar(&full, "full", false, "show all columns (adds ID, DIR, URL)")
+	cmd.Flags().BoolVar(&full, "full", false, "one row per extension, with all columns (EXTENSION, ID, DIR, URL)")
 	cmd.Flags().StringSliceVar(&statuses, "status", nil,
 		"only list these statuses (comma-separated): "+strings.Join(listStatuses, ", "))
 	cmd.MarkFlagsMutuallyExclusive("json", "share")
@@ -318,48 +318,64 @@ func printListTable(cmd *cobra.Command, st *state.State, chromeStatus map[string
 	if len(st.Repos) == 0 {
 		fmt.Fprintln(out, "No repositories registered.")
 	}
-	// The URL is what a colleague needs to install the same extension; last
-	// column, so its length does not push the narrow ones apart.
-	row := func(repo, track, ext, id, dir, status, url string) string {
-		if full {
-			return strings.Join([]string{repo, track, ext, id, dir, status, url}, "\t")
-		}
-		return strings.Join([]string{repo, track, ext, status}, "\t")
-	}
 	hidden := map[string]int{}
 	var rows []string
 	for _, name := range st.RepoNames() {
 		r := st.Repos[name]
+		// The default is one row per repo; --full expands to one per
+		// extension. The URL is what a colleague needs to install the same
+		// extension; last column, so its length does not push the narrow
+		// ones apart.
+		counts := map[string]int{}
 		for _, e := range r.Extensions {
 			key := extStatusKey(chromeStatus, e)
 			if !filter.match(key) {
 				hidden[key]++
 				continue
 			}
-			rows = append(rows, row(name, trackRef(r), e.Name, e.ID, term.Safe(e.Dir),
-				extStatusText(key), term.Safe(gitx.RedactURL(r.URL))))
+			counts[key]++
+			if full {
+				rows = append(rows, strings.Join([]string{name, trackRef(r), e.Name, e.ID,
+					term.Safe(e.Dir), extStatusText(key), term.Safe(gitx.RedactURL(r.URL))}, "\t"))
+			}
 		}
 		for _, s := range r.Stale {
 			if !filter.match(statusStale) {
 				hidden[statusStale]++
 				continue
 			}
-			rows = append(rows, row(name, "", s.Name, s.ID, "("+term.Safe(s.Reason)+")", staleStatusText, ""))
+			counts[statusStale]++
+			if full {
+				rows = append(rows, strings.Join([]string{name, "", s.Name, s.ID,
+					"(" + term.Safe(s.Reason) + ")", staleStatusText, ""}, "\t"))
+			}
+		}
+		if !full && len(counts) > 0 {
+			rows = append(rows, strings.Join([]string{name, trackRef(r), statusSummary(counts)}, "\t"))
 		}
 	}
+	orphanCount := 0
 	for _, o := range st.Orphans {
 		if !filter.match(statusStale) {
 			hidden[statusStale]++
 			continue
 		}
-		rows = append(rows, row("(uninstalled)", "", o.Name, o.ID, "("+term.Safe(o.Reason)+")", staleStatusText, ""))
+		orphanCount++
+		if full {
+			rows = append(rows, strings.Join([]string{"(uninstalled)", "", o.Name, o.ID,
+				"(" + term.Safe(o.Reason) + ")", staleStatusText, ""}, "\t"))
+		}
+	}
+	if !full && orphanCount > 0 {
+		rows = append(rows, strings.Join([]string{"(uninstalled)", "",
+			statusSummary(map[string]int{statusStale: orphanCount})}, "\t"))
 	}
 	if len(rows) > 0 {
 		w := tabwriter.NewWriter(out, 2, 4, 2, ' ', 0)
 		if full {
 			fmt.Fprintln(w, "REPO\tTRACK\tEXTENSION\tID\tDIR\tSTATUS\tURL")
 		} else {
-			fmt.Fprintln(w, "REPO\tTRACK\tEXTENSION\tSTATUS")
+			fmt.Fprintln(w, "REPO\tTRACK\tSTATUS")
 		}
 		for _, r := range rows {
 			fmt.Fprintln(w, r)
@@ -390,6 +406,30 @@ func printListTable(cmd *cobra.Command, st *state.State, chromeStatus map[string
 		}
 	}
 	return nil
+}
+
+// statusSummary renders a repo's visible rows as one STATUS cell: the full
+// advice text while there is a single row to describe, counts of the short
+// vocabulary once there are more (the advice does not aggregate).
+func statusSummary(counts map[string]int) string {
+	total, single := 0, ""
+	for key, n := range counts {
+		total += n
+		single = key
+	}
+	if total == 1 {
+		if single == statusStale {
+			return staleStatusText
+		}
+		return extStatusText(single)
+	}
+	var parts []string
+	for _, s := range listStatuses {
+		if n := counts[s]; n > 0 {
+			parts = append(parts, fmt.Sprintf("%d %s", n, s))
+		}
+	}
+	return strings.Join(parts, ", ")
 }
 
 func hiddenSummary(hidden map[string]int) string {

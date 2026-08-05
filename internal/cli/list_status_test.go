@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/json"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -9,9 +10,9 @@ import (
 	"github.com/be-hase/cepm/internal/state"
 )
 
-// The default view answers "what is running?": loaded rows only, with a
-// summary line accounting for everything it hides — a NOT LOADED row must
-// not disappear without trace.
+// The default view answers "what is running?": one row per repo, covering
+// only its loaded extensions, with a summary line accounting for everything
+// hidden — a NOT LOADED row must not disappear without trace.
 func TestListDefaultShowsLoadedAndCountsTheRest(t *testing.T) {
 	host := startFakeHost(t, idA, idB)
 	host.mu.Lock()
@@ -30,12 +31,13 @@ func TestListDefaultShowsLoadedAndCountsTheRest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list: %v\n%s", err, out)
 	}
-	if !strings.Contains(out, "Live") {
-		t.Errorf("the loaded extension should be listed:\n%s", out)
+	// A real row, not a substring of the "Not shown: … not-loaded" summary.
+	if !regexp.MustCompile(`(?m)^tools\s+branch:main\s+loaded\s*$`).MatchString(out) {
+		t.Errorf("expected the repo row \"tools branch:main loaded\":\n%s", out)
 	}
-	for _, name := range []string{"SwitchedOff", "Missing", "Idle"} {
+	for _, name := range []string{"Live", "SwitchedOff", "Missing", "Idle"} {
 		if strings.Contains(out, name) {
-			t.Errorf("%s should be hidden by default:\n%s", name, out)
+			t.Errorf("extension names are --full territory, found %s:\n%s", name, out)
 		}
 	}
 	if !strings.Contains(out, "Not shown: 1 chrome-disabled, 1 not-loaded, 1 available. See: cepm list --all") {
@@ -70,38 +72,41 @@ func TestListDefaultShowsUnknownWhenHostGone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list: %v\n%s", err, out)
 	}
-	if !strings.Contains(out, "Live") || !strings.Contains(out, "unknown (host not connected)") {
+	if !strings.Contains(out, "tools") || !strings.Contains(out, "unknown (host not connected)") {
 		t.Errorf("enabled extensions should stay visible as unknown:\n%s", out)
 	}
 }
 
-// The default columns are the ones a human scans — REPO, TRACK, EXTENSION,
-// STATUS; ids, dirs and URLs are --full territory.
+// The default columns are the ones a human scans — REPO, TRACK, STATUS, one
+// row per repo; extension names, ids, dirs and URLs are --full territory.
 func TestListDefaultColumnsAndFull(t *testing.T) {
 	startFakeHost(t, idA)
-	seedRepo(t, "tools", state.Extension{Dir: "subdir", Name: "Ext", ID: idA, Key: keyA})
+	seedRepo(t, "tools", state.Extension{Dir: "subdir", Name: "MyExt", ID: idA, Key: keyA})
 
 	out, err := run(t, "", "list")
 	if err != nil {
 		t.Fatalf("list: %v\n%s", err, out)
 	}
-	if strings.Contains(out, idA) || strings.Contains(out, "example.com") || strings.Contains(out, "subdir") {
-		t.Errorf("default table should not carry ID, URL or DIR:\n%s", out)
+	for _, leak := range []string{"MyExt", idA, "example.com", "subdir"} {
+		if strings.Contains(out, leak) {
+			t.Errorf("default table should not carry %q:\n%s", leak, out)
+		}
 	}
 
 	full, err := run(t, "", "list", "--full")
 	if err != nil {
 		t.Fatalf("list --full: %v\n%s", err, full)
 	}
-	for _, want := range []string{idA, "https://***@example.com/t/r.git", "subdir"} {
+	for _, want := range []string{"MyExt", idA, "https://***@example.com/t/r.git", "subdir"} {
 		if !strings.Contains(full, want) {
 			t.Errorf("full table should carry %q:\n%s", want, full)
 		}
 	}
 }
 
-// --all renders the complete inventory, stale leftovers and orphans
-// included, with no summary left to print.
+// --all renders the complete inventory — stale leftovers and orphans
+// included — aggregated per repo, with no summary left to print; --all
+// --full expands it to the per-extension rows.
 func TestListAllShowsEveryStatus(t *testing.T) {
 	startFakeHost(t, idA)
 	keyC, idC := fixtureKey("all-c")
@@ -123,13 +128,23 @@ func TestListAllShowsEveryStatus(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list --all: %v\n%s", err, out)
 	}
-	for _, want := range []string{"Live", "Idle", "Gone", "Orphaned"} {
+	for _, want := range []string{"1 loaded, 1 available, 1 stale", "(uninstalled)", "stale — run: cepm cleanup"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("--all should show %q:\n%s", want, out)
 		}
 	}
 	if strings.Contains(out, "Not shown") {
 		t.Errorf("--all hides nothing, so there is nothing to account for:\n%s", out)
+	}
+
+	full, err := run(t, "", "list", "--all", "--full")
+	if err != nil {
+		t.Fatalf("list --all --full: %v\n%s", err, full)
+	}
+	for _, want := range []string{"Live", "Idle", "Gone", "Orphaned"} {
+		if !strings.Contains(full, want) {
+			t.Errorf("--all --full should show %q:\n%s", want, full)
+		}
 	}
 }
 
@@ -164,7 +179,9 @@ func TestListStatusFilter(t *testing.T) {
 		{"loaded,available", []string{"Live", "Idle"}},
 	}
 	for _, tc := range cases {
-		out, err := run(t, "", "list", "--status", tc.status)
+		// --full: the per-extension rows are what make the selection
+		// observable by name.
+		out, err := run(t, "", "list", "--status", tc.status, "--full")
 		if err != nil {
 			t.Fatalf("list --status %s: %v\n%s", tc.status, err, out)
 		}
