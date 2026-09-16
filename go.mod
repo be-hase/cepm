@@ -1,6 +1,6 @@
 module github.com/be-hase/cepm
 
-go 1.25.0
+go 1.26.0
 
 require (
 	github.com/gofrs/flock v0.13.1
@@ -17,7 +17,7 @@ require (
 	golang.org/x/sync v0.21.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/tools v0.47.0 // indirect
-	honnef.co/go/tools v0.7.0 // indirect
+	honnef.co/go/tools v0.8.1 // indirect
 )
 
 tool honnef.co/go/tools/cmd/staticcheck
