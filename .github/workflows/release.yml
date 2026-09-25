@@ -51,7 +51,7 @@ jobs:
           # between two runs of the same tag. Dependabot does not track this
           # pin — bump it deliberately (internal/workflows enforces the
           # exact-version shape).
-          version: v2.18.1
+          version: v2.18.2
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
